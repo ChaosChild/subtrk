@@ -1,5 +1,10 @@
 # subtrk
 
+[![CI](https://github.com/ChaosChild/subtrk/actions/workflows/ci.yml/badge.svg)](https://github.com/ChaosChild/subtrk/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/subtrk)](https://www.npmjs.com/package/subtrk)
+[![node](https://img.shields.io/node/v/subtrk)](https://github.com/ChaosChild/subtrk/blob/main/package.json)
+[![license](https://img.shields.io/github/license/ChaosChild/subtrk)](LICENSE)
+
 **AI subscription quotas in one command.** `subtrk` reports remaining usage for
 the plans its contributors use – today Claude Pro, Z.ai GLM Coding Plan, Alibaba
 Cloud Model Studio, Google AI Pro, OpenCode Zen, OpenRouter, the ChatGPT plans
