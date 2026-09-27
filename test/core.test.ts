@@ -9,6 +9,7 @@ import { describe, it } from "node:test";
 import {
   ALL_PROVIDER_IDS,
   clearSecrets,
+  collectStatus,
   computeNextEvent,
   computeRecheckAfter,
   fetchProvider,
@@ -19,6 +20,7 @@ import {
   parseEnvText,
   registerSecret,
   removeCachedProvider,
+  saveConfig,
   scrub,
   scrubValue,
 } from "../src/core.ts";
@@ -131,6 +133,58 @@ describe("config", () => {
     assert.throws(() => loadConfig(dir));
     writeFileSync(join(dir, "config.json"), JSON.stringify({ enabled: "claude" }));
     assert.throws(() => loadConfig(dir));
+  });
+
+  it("reads an optional order list: unknown ids and duplicates dropped, invalid -> undefined", (t) => {
+    const dir = tempDir();
+    t.after(cleanup(dir));
+    writeFileSync(
+      join(dir, "config.json"),
+      JSON.stringify({ enabled: ["claude"], order: ["kimi", "nope", "kimi", "claude"] }),
+    );
+    assert.deepEqual(loadConfig(dir).order, ["kimi", "claude"]);
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ enabled: ["claude"], order: "claude" }));
+    assert.equal(loadConfig(dir).order, undefined, "non-array order is not a hard failure");
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ enabled: ["claude"] }));
+    assert.equal(loadConfig(dir).order, undefined);
+  });
+
+  it("saveConfig patches keys and preserves unknown pre-existing keys", (t) => {
+    const dir = tempDir();
+    t.after(cleanup(dir));
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ enabled: ["claude"], custom: { keep: true } }));
+    saveConfig(dir, { order: ["kimi"] });
+    const raw = readFileSync(join(dir, "config.json"), "utf8");
+    assert.ok(raw.endsWith("\n"), "newline-terminated");
+    assert.deepEqual(JSON.parse(raw), { enabled: ["claude"], order: ["kimi"], custom: { keep: true } });
+    saveConfig(dir, { enabled: ["glm"], order: [] });
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")), {
+      enabled: ["glm"],
+      order: [],
+      custom: { keep: true },
+    });
+    rmSync(join(dir, "config.json"));
+    saveConfig(dir, { enabled: ["claude"] });
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")), { enabled: ["claude"] });
+  });
+
+  it("collectStatus orders providers by config order, unlisted last in registry order", async (t) => {
+    const dir = tempDir();
+    t.after(cleanup(dir));
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ order: ["google", "claude"] }));
+    const mod = (id: ProviderModule["id"]): ProviderModule => ({
+      id,
+      ttlMs: 0,
+      probe: async () => ({ id, ok: true, stale: false, fetchedAt: new Date().toISOString() }),
+    });
+    const out = await collectStatus({
+      subtrkDir: dir,
+      providers: [mod("claude"), mod("glm"), mod("google")],
+    });
+    assert.deepEqual(
+      out.out.providers.map((p) => p.id),
+      ["google", "claude", "glm"],
+    );
   });
 });
 

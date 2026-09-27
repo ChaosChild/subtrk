@@ -60,10 +60,14 @@ so tests can exercise them against fixtures without network access.
 1. Create `src/providers/<id>.ts`: pure parsers + a default `ProviderModule`
    with its TTL (see `docs/spec.md` §Cache for guidance).
 2. Register it in `src/providers/index.ts` and add the id to
-   `ALL_PROVIDER_IDS` in `src/core.ts`.
+   `ALL_PROVIDER_IDS` in `src/core.ts`. Appending shifts `subtrk init`'s
+   numbered selection, so update the boundary cases in
+   `test/init-prompts.test.ts`.
 3. Add fixtures captured from the real endpoint to `test/fixtures/` and parser
    tests to `test/providers.test.ts`; include a redaction path in
-   `test/redaction.test.ts`.
+   `test/redaction.test.ts`. Reuse shared helpers where they exist (the
+   window-kind mapping lives in `src/providers/openai.ts`) instead of
+   duplicating them.
 4. If setup is needed, extend `subtrk init` with an honest per-step result line.
 5. Document the integration in `docs/spec.md` §Provider integrations and add a
    row to the README provider table.

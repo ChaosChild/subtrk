@@ -1,7 +1,9 @@
 // serve.ts – `subtrk serve` (M2): the localhost web console backend.
 // Loopback-only HTTP: the browser shell (src/console.html) is the one static
-// route; /api/status replays `subtrk status --json` and /api/refresh re-runs a
-// provider's interactive login, both behind the per-run Bearer token. No CORS
+// route; /api/status replays `subtrk status --json`, /api/refresh re-runs a
+// provider's interactive login, and /api/config persists the console's
+// provider selection and card order to config.json – all behind the per-run
+// Bearer token. No CORS
 // headers, ever – same-origin plus the custom Authorization header (preflight)
 // is the cross-site defense. Probe work inherits core's 10s per-provider
 // budget, so every request is bounded; refresh spawns are the provider
@@ -13,12 +15,15 @@ import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import {
+  ALL_PROVIDER_IDS,
   collectStatus,
   errorMessage,
+  type ProviderId,
   type ProviderModule,
   type RefreshResult,
   removeCachedProvider,
   SUBTRK_DIR,
+  saveConfig,
   scrubValue,
 } from "./core.ts";
 import { allProviders, refreshableProviders } from "./providers/index.ts";
@@ -72,6 +77,51 @@ function tokenOk(header: string | undefined, token: string): boolean {
   const expected = Buffer.from(token, "utf8");
   const given = match ? Buffer.from(match[1], "utf8") : Buffer.alloc(0);
   return given.length === expected.length && timingSafeEqual(given, expected);
+}
+
+const CONFIG_BODY_CAP_BYTES = 10_000; // the largest useful config patch is a few hundred bytes
+
+// Drain the request body (capped). Never throws – over-cap and stream errors
+// come back as null, which the caller answers 400.
+async function readBody(req: IncomingMessage, cap = CONFIG_BODY_CAP_BYTES): Promise<string | null> {
+  try {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for await (const chunk of req as AsyncIterable<Uint8Array>) {
+      total += chunk.byteLength;
+      if (total > cap) return null;
+      chunks.push(chunk);
+    }
+    return new TextDecoder().decode(Buffer.concat(chunks));
+  } catch {
+    return null;
+  }
+}
+
+type ConfigPatch = { enabled?: ProviderId[]; order?: ProviderId[] };
+
+// Pure: validate a parsed /api/config body. Fixed-literal errors; unknown extra
+// keys are ignored. enabled: all ids known, ≥1. order: all ids known, deduped,
+// may name currently-disabled providers.
+function parseConfigPatch(raw: unknown): { patch: ConfigPatch } | { error: string } {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { error: "invalid config body" };
+  const body = raw as { enabled?: unknown; order?: unknown };
+  if (body.enabled === undefined && body.order === undefined) {
+    return { error: "config body must include enabled or order" };
+  }
+  const known = (v: unknown): v is ProviderId =>
+    typeof v === "string" && (ALL_PROVIDER_IDS as readonly string[]).includes(v);
+  const patch: ConfigPatch = {};
+  if (body.enabled !== undefined) {
+    if (!Array.isArray(body.enabled) || !body.enabled.every(known)) return { error: "unknown provider id in enabled" };
+    if (body.enabled.length === 0) return { error: "enabled must contain at least one provider id" };
+    patch.enabled = [...body.enabled];
+  }
+  if (body.order !== undefined) {
+    if (!Array.isArray(body.order) || !body.order.every(known)) return { error: "unknown provider id in order" };
+    patch.order = [...new Set(body.order)];
+  }
+  return { patch };
 }
 
 export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
@@ -162,6 +212,39 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
             respond(res, 500, JSON.stringify({ error: "refresh failed" }));
           },
         );
+        return;
+      }
+      if (path === "/api/config") {
+        if (req.method !== "POST") {
+          respond(res, 405, JSON.stringify({ error: "method not allowed" }), "application/json", { allow: "POST" });
+          return;
+        }
+        if (!tokenOk(req.headers.authorization, token)) {
+          respond(res, 401, JSON.stringify({ error: "unauthorized" }));
+          return;
+        }
+        // Persist a console patch (enabled and/or order) to config.json via the
+        // atomic saveConfig. Responses are fixed literals – the file is echoed
+        // back through /api/status only.
+        void (async () => {
+          let raw: unknown;
+          try {
+            raw = JSON.parse((await readBody(req)) ?? "");
+          } catch {
+            respond(res, 400, JSON.stringify({ error: "invalid config body" }));
+            return;
+          }
+          const parsed = parseConfigPatch(raw);
+          if ("error" in parsed) {
+            respond(res, 400, JSON.stringify({ error: parsed.error }));
+            return;
+          }
+          saveConfig(deps.subtrkDir ?? SUBTRK_DIR, parsed.patch);
+          respond(res, 200, JSON.stringify({ ok: true }));
+        })().catch((err: unknown) => {
+          console.error(`subtrk: ${errorMessage(err)}`);
+          respond(res, 500, JSON.stringify({ error: "internal error" }));
+        });
         return;
       }
       respond(res, 404, JSON.stringify({ error: "not found" }));

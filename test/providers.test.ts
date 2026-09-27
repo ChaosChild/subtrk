@@ -28,6 +28,18 @@ import {
   slugify,
 } from "../src/providers/google.ts";
 import { allProviders, refreshableProviders } from "../src/providers/index.ts";
+import {
+  buildKimiRefreshForm,
+  kimiPlanLabel,
+  kimiTokenStale,
+  mergeKimiCredentials,
+  parseAgentGwUsage,
+  parseApiKimiUsage,
+  parseDesktopKeyFile,
+  parseKimiCliCredentials,
+  parseKimiRefreshResponse,
+  shouldTryFallbackTokenHost,
+} from "../src/providers/kimi.ts";
 import { parseOpenaiAuth, parseOpenaiUsage, windowKindFromSeconds } from "../src/providers/openai.ts";
 import { extractOpencodeKey } from "../src/providers/opencode.ts";
 import { parseOpenrouterCredits, parseOpenrouterKey } from "../src/providers/openrouter.ts";
@@ -38,10 +50,10 @@ function fixture(name: string): unknown {
 
 // ---- module contract -------------------------------------------------------
 
-test("allProviders exposes the seven modules in spec order with spec TTLs", () => {
+test("allProviders exposes the eight modules in spec order with spec TTLs", () => {
   assert.deepEqual(
     allProviders.map((p) => p.id),
-    ["claude", "glm", "alibaba", "google", "opencode", "openrouter", "openai"],
+    ["claude", "glm", "alibaba", "google", "opencode", "openrouter", "openai", "kimi"],
   );
   const ttls: Record<string, number> = {};
   for (const p of allProviders) {
@@ -56,13 +68,16 @@ test("allProviders exposes the seven modules in spec order with spec TTLs", () =
     opencode: 0,
     openrouter: 60000,
     openai: 60000,
+    kimi: 300000,
   });
 });
 
 test("refreshableProviders lists exactly the modules with refresh – google self-refreshes read-only", () => {
   assert.deepEqual(refreshableProviders(), ["claude", "alibaba", "google"]);
   // openai has no refresh: codex owns its tokens and subtrk never refreshes them.
-  for (const id of ["glm", "opencode", "openrouter", "openai"]) {
+  // kimi has none either: it refreshes its own CLI OAuth token in probe, and a
+  // dead grant is an interactive re-login in the owning tool, never a flow here.
+  for (const id of ["glm", "opencode", "openrouter", "openai", "kimi"]) {
     assert.equal(allProviders.find((p) => p.id === id)?.refresh, undefined);
   }
 });
@@ -588,4 +603,191 @@ test("openai parseOpenaiUsage: reset_at absent -> now + reset_after_seconds", ()
   assert.ok(parsed);
   assert.deepEqual(parsed.windows, [{ kind: "5h", usedPercent: 5, resetsAt: new Date(now + 600_000).toISOString() }]);
   assert.equal(parsed.plan, undefined, "plan_type absent -> no plan label");
+});
+
+// ---- kimi ------------------------------------------------------------------
+
+test("kimi parseDesktopKeyFile extracts keys[0].apiKey from the Desktop key file", () => {
+  assert.equal(parseDesktopKeyFile(fixture("kimi-credentials")), "sk-kimi-FAKE-0123456789abcdef");
+  assert.equal(parseDesktopKeyFile({ v: 2, keys: [] }), null);
+  assert.equal(parseDesktopKeyFile({ v: 2 }), null);
+  assert.equal(parseDesktopKeyFile({ keys: [{ apiKey: "" }] }), null);
+  assert.equal(parseDesktopKeyFile({ keys: [{ apiKey: 7 }] }), null);
+  assert.equal(parseDesktopKeyFile({ keys: ["nope"] }), null);
+  assert.equal(parseDesktopKeyFile(null), null);
+  assert.equal(parseDesktopKeyFile("garbage"), null);
+});
+
+test("kimi kimiPlanLabel: LEVEL_ prefix stripped and title-cased, unknown levels kept", () => {
+  assert.equal(kimiPlanLabel("LEVEL_FREE"), "Kimi Free");
+  assert.equal(kimiPlanLabel("LEVEL_PRO"), "Kimi Pro");
+  assert.equal(kimiPlanLabel("LEVEL_VIP_TEST"), "Kimi Vip Test");
+  assert.equal(kimiPlanLabel("free"), "Kimi Free", "no prefix -> title-cased as-is");
+  assert.equal(kimiPlanLabel(""), undefined);
+  assert.equal(kimiPlanLabel(7), undefined);
+});
+
+test("kimi parseAgentGwUsage maps the rich fixture to plan + one window (string quota numbers)", () => {
+  const now = Date.parse("2026-09-27T00:00:00Z");
+  const parsed = parseAgentGwUsage(fixture("kimi-agentgw-usages"), now);
+  assert.deepEqual(parsed, {
+    windows: [{ kind: "30d", usedPercent: 75, resetsAt: "2026-10-27T00:00:00.000Z" }],
+    plan: "Kimi Free",
+  });
+});
+
+test("kimi parseAgentGwUsage: unusable quota or resetTime -> note, no window; junk shapes -> null", () => {
+  const now = Date.parse("2026-09-27T00:00:00Z");
+  const noQuota = parseAgentGwUsage({ user: { membership: { level: "LEVEL_FREE" } } }, now);
+  assert.deepEqual(noQuota, { windows: [], plan: "Kimi Free", note: "no quota data reported yet" });
+  const badNumbers = parseAgentGwUsage(
+    { totalQuota: { limit: "0", remaining: "5", resetTime: "2026-10-27T00:00:00Z" } },
+    now,
+  );
+  assert.equal(badNumbers?.note, "no quota data reported yet", "limit <= 0");
+  const badReset = parseAgentGwUsage({ totalQuota: { limit: "10", remaining: "5", resetTime: "nope" } }, now);
+  assert.equal(badReset?.note, "no quota data reported yet");
+  const negative = parseAgentGwUsage(
+    { totalQuota: { limit: "10", remaining: "15", resetTime: "2026-10-27T00:00:00Z" } },
+    now,
+  );
+  assert.deepEqual(
+    negative?.windows,
+    [{ kind: "30d", usedPercent: 0, resetsAt: "2026-10-27T00:00:00Z" }],
+    "over-quota clamps to 0",
+  );
+  assert.equal(parseAgentGwUsage({}, now), null);
+  assert.equal(parseAgentGwUsage({ totalQuota: "nope" }, now), null);
+  assert.equal(parseAgentGwUsage("garbage", now), null);
+  assert.equal(parseAgentGwUsage(null, now), null);
+});
+
+test("kimi parseApiKimiUsage: simple shape -> one window, no plan", () => {
+  const now = Date.parse("2026-09-27T00:00:00Z");
+  const parsed = parseApiKimiUsage(fixture("kimi-api-usage"), now);
+  assert.deepEqual(parsed, {
+    windows: [{ kind: "1d", usedPercent: 75, resetsAt: "2026-09-28T00:00:00.000Z" }],
+  });
+});
+
+test("kimi parseApiKimiUsage: OAuth usages shape -> fixed kinds incl. the scoped code window", () => {
+  const now = Date.parse("2026-09-27T00:00:00Z");
+  const parsed = parseApiKimiUsage(fixture("kimi-oauth-usages"), now);
+  assert.deepEqual(parsed, {
+    windows: [
+      { kind: "5h", usedPercent: 12, resetsAt: "2026-09-27T18:00:00.000Z" },
+      { kind: "7d", usedPercent: 34, resetsAt: "2026-09-28T00:00:00.000Z" },
+      { kind: "30d", usedPercent: 50, resetsAt: "2026-10-27T00:00:00.000Z" },
+      { kind: "30d", scope: "code", usedPercent: 70, resetsAt: "2026-10-27T00:00:00.000Z" },
+    ],
+  });
+});
+
+test("kimi parseApiKimiUsage: absent usages fields are skipped, malformed ones fail the parse", () => {
+  const now = Date.parse("2026-09-27T00:00:00Z");
+  const partial = parseApiKimiUsage(
+    { usages: { limit_5h: { used_ratio: 0.1, reset_time: "2026-09-27T18:00:00Z" } } },
+    now,
+  );
+  assert.deepEqual(partial, {
+    windows: [{ kind: "5h", usedPercent: 10, resetsAt: "2026-09-27T18:00:00.000Z" }],
+  });
+  assert.deepEqual(parseApiKimiUsage({ usages: {} }, now), { windows: [] }, "all fields absent -> empty state");
+  assert.equal(parseApiKimiUsage({ usages: { limit_5h: "nope" } }, now), null);
+  assert.equal(
+    parseApiKimiUsage({ usages: { limit_5h: { used_ratio: "x", reset_time: "2026-09-27T18:00:00Z" } } }, now),
+    null,
+  );
+  assert.equal(parseApiKimiUsage({ usages: { limit_5h: { used_ratio: 0.1 } } }, now), null, "reset_time missing");
+  assert.equal(parseApiKimiUsage({ usage: "nope" }, now), null);
+  assert.equal(parseApiKimiUsage({}, now), null, "neither shape");
+  assert.equal(parseApiKimiUsage("garbage", now), null);
+  assert.equal(parseApiKimiUsage(null, now), null);
+});
+
+test("kimi parseKimiCliCredentials: tokens + unix-seconds expiry, junk null", () => {
+  const raw = {
+    access_token: "eyJhb.FAKE.sig",
+    refresh_token: "eyJhb.RTFAKE.sig",
+    expires_at: 1_784_278_056,
+    scope: "kimi-code",
+    token_type: "Bearer",
+    expires_in: 900,
+  };
+  assert.deepEqual(parseKimiCliCredentials(raw), {
+    accessToken: raw.access_token,
+    refreshToken: raw.refresh_token,
+    expiresAtSec: raw.expires_at,
+    raw,
+  });
+  assert.deepEqual(parseKimiCliCredentials({ access_token: "AT" }), { accessToken: "AT", raw: { access_token: "AT" } });
+  assert.equal(parseKimiCliCredentials({}), null);
+  assert.equal(parseKimiCliCredentials({ access_token: "" }), null);
+  assert.equal(parseKimiCliCredentials(null), null);
+  assert.equal(parseKimiCliCredentials("garbage"), null);
+});
+
+test("kimi kimiTokenStale: unix-seconds expiry with the 60s skew, unknown expiry counts fresh", () => {
+  const now = 1_800_000_000_000;
+  assert.equal(kimiTokenStale(1_799_990_000, now), true, "past expiry");
+  assert.equal(kimiTokenStale(1_800_000_030, now), true, "inside the 60s skew -> stale");
+  assert.equal(kimiTokenStale(1_800_090_000, now), false, "fresh beyond the skew");
+  assert.equal(kimiTokenStale(undefined, now), false, "unknown expiry counts fresh");
+  assert.equal(kimiTokenStale("nope", now), false);
+});
+
+test("kimi buildKimiRefreshForm + parseKimiRefreshResponse: grant body and token fields", () => {
+  assert.deepEqual(Object.fromEntries(new URLSearchParams(buildKimiRefreshForm("RT", "ID"))), {
+    grant_type: "refresh_token",
+    client_id: "ID",
+    refresh_token: "RT",
+  });
+  const now = 1_784_278_056;
+  assert.deepEqual(parseKimiRefreshResponse('{"access_token":"AT2","expires_in":900,"refresh_token":"RT2"}', now), {
+    ok: true,
+    token: { accessToken: "AT2", refreshToken: "RT2", expiresAtSec: now + 900, expiresInSec: 900 },
+  });
+  assert.deepEqual(
+    parseKimiRefreshResponse('{"access_token":"AT2","expires_in":900}', now),
+    {
+      ok: true,
+      token: { accessToken: "AT2", expiresAtSec: now + 900, expiresInSec: 900 },
+    },
+    "no refresh_token in the response -> none set",
+  );
+  assert.equal(parseKimiRefreshResponse("not json", now).ok, false);
+  assert.equal(parseKimiRefreshResponse('{"expires_in":900}', now).ok, false);
+  assert.equal(parseKimiRefreshResponse('{"access_token":"AT"}', now).ok, false);
+  assert.equal(parseKimiRefreshResponse('{"access_token":"AT","expires_in":"900"}', now).ok, false);
+});
+
+test("kimi mergeKimiCredentials: untouched fields preserved, old refresh token kept when not rotated", () => {
+  const raw = {
+    access_token: "OLD",
+    refresh_token: "RT",
+    expires_at: 1,
+    expires_in: 900,
+    scope: "kimi-code",
+    token_type: "Bearer",
+  };
+  assert.deepEqual(mergeKimiCredentials(raw, { accessToken: "NEW", expiresAtSec: 2, expiresInSec: 900 }), {
+    ...raw,
+    access_token: "NEW",
+    expires_at: 2,
+    refresh_token: "RT",
+  });
+  assert.equal(
+    mergeKimiCredentials(raw, { accessToken: "NEW", refreshToken: "RT2", expiresAtSec: 2, expiresInSec: 900 })
+      .refresh_token,
+    "RT2",
+    "rotation wins",
+  );
+});
+
+test("kimi shouldTryFallbackTokenHost: invalid_grant on 400/401 retries the fallback host once", () => {
+  assert.equal(shouldTryFallbackTokenHost(400, "invalid_grant"), true);
+  assert.equal(shouldTryFallbackTokenHost(401, "invalid_grant"), true);
+  assert.equal(shouldTryFallbackTokenHost(400, "invalid_client"), false);
+  assert.equal(shouldTryFallbackTokenHost(500, "invalid_grant"), false);
+  assert.equal(shouldTryFallbackTokenHost(undefined, "invalid_grant"), false);
 });

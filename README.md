@@ -2,8 +2,9 @@
 
 **AI subscription quotas in one command.** `subtrk` reports remaining usage for
 the plans its contributors use – today Claude Pro, Z.ai GLM Coding Plan, Alibaba
-Cloud Model Studio, Google AI Pro, OpenCode Zen, OpenRouter and the ChatGPT
-plans (via the OpenAI Codex CLI) – in one compact
+Cloud Model Studio, Google AI Pro, OpenCode Zen, OpenRouter, the ChatGPT plans
+(via the OpenAI Codex CLI) and the Kimi coding plans (via the Kimi Desktop app
+or the Kimi Code CLI) – in one compact
 view, designed first for the AI agents that work for you and second for you.
 Coverage expands as needs or requests come in: adding a provider is a contained
 change (see the [implementation guide](docs/implementation-plan.md)), and PRs
@@ -39,12 +40,15 @@ one page for every tracked provider: usage bars per window (with ≥80%/≥95% w
 levels), credit pools, a 7-day reset timeline, upcoming resets, and the same
 agent view the CLI prints, auto-refreshing on the cache heartbeat. When a
 provider's error says it is refreshable, its card shows a **Refresh now** button
-that re-runs that provider's own refresh action on the host.
+that re-runs that provider's own refresh action on the host. A plus-icon menu in
+the header toggles providers on/off and cards drag to reorder – both persist
+across restarts (saved to `~/.subtrk/config.json`, like `subtrk init`).
 
 ![Web console](docs/img/console.png)
 
 The server is loopback-only, requires a per-run token (delivered in the printed
-URL), never emits CORS headers, and serves read-only JSON – see
+URL), never emits CORS headers, and status stays read-only – toggles and card
+order persist through the authenticated `POST /api/config` – see
 [`docs/spec.md`](docs/spec.md) §`subtrk serve` for the security design.
 
 ## Why
@@ -165,6 +169,7 @@ is the machine-readable contract:
 | OpenCode | Zen pay-as-you-go | no usage/balance API exists for PAYG | – | signals only (honest note) |
 | OpenRouter | pay-as-you-go | `/api/v1/key` (+ `/api/v1/credits` with a management key) | – | official |
 | OpenAI | ChatGPT plan via Codex | the Codex CLI's own ChatGPT usage endpoint, read from its stored login | free: one 30-day window; paid: 5h + weekly | official client endpoint, not a documented public API |
+| Kimi | Kimi Desktop / Kimi Code CLI coding plans | the Kimi Desktop app's key or the Kimi Code CLI's OAuth login against the coding usage endpoints | free: one quota window; CLI login: 5h + 7d + monthly | official client endpoints, not a documented public API |
 
 None of these vendors officially supports third-party quota readers except Alibaba
 and OpenRouter; the others are the same calls their own CLIs make, and can change.

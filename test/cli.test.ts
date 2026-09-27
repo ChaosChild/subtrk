@@ -118,12 +118,12 @@ describe("usage errors (exit 2)", () => {
   it("unknown --provider id exits 2", async () => {
     const cap = captureConsole();
     try {
-      const code = await main(["status", "--provider", "kimi"], {
+      const code = await main(["status", "--provider", "nope"], {
         providers: [okModule("claude")],
         dirs: { subtrk: tempSubtrkDir() },
       });
       assert.equal(code, 2);
-      assert.match(cap.err[0], /kimi/);
+      assert.match(cap.err[0], /nope/);
     } finally {
       cap.restore();
     }
