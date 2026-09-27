@@ -2,7 +2,8 @@
 
 Thanks for considering a contribution. subtrk is deliberately small – please
 keep it that way: zero runtime dependencies, TypeScript that Node runs
-directly, no build step.
+directly, no build step. Bugs and provider requests use the issue templates;
+PRs have a short template too.
 
 ## Setup
 
