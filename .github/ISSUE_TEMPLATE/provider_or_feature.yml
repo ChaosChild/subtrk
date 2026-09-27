@@ -1,0 +1,35 @@
+name: Provider request or feature idea
+description: Track a new AI subscription, or improve an existing view
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What should it do?
+      description: For a provider request – which vendor, which plan, and what the plan's windows look like (5h, weekly, monthly, credits).
+    validations:
+      required: true
+  - type: textarea
+    id: pathway
+    attributes:
+      label: What does the vendor officially expose?
+      description: |
+        subtrk follows the vendor's own documented APIs and its own clients' behavior –
+        documented endpoints, CLI commands, or the calls their open-source clients make.
+        Link whatever you found; if nothing official exists, say so.
+  - type: input
+    id: links
+    attributes:
+      label: Links
+      description: Vendor docs, client source files, or prior art.
+  - type: dropdown
+    id: involvement
+    attributes:
+      label: Your involvement
+      description: Provider additions are contained changes and PRs are welcome (see docs/implementation-plan.md).
+      options:
+        - Just suggesting
+        - Happy to test a draft
+        - I plan to implement this myself
+    validations:
+      required: true

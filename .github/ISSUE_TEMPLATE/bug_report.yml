@@ -1,0 +1,58 @@
+name: Bug report
+description: A provider reports wrong data, errors out, or the CLI/console misbehaves
+labels: [bug]
+body:
+  - type: dropdown
+    id: providers
+    attributes:
+      label: Affected provider(s)
+      options:
+        - not provider-specific
+        - claude
+        - glm
+        - alibaba
+        - google
+        - opencode
+        - openrouter
+        - openai
+        - kimi
+        - several / all
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: How do you run subtrk, and which version?
+      description: npx, a global install, or from source – plus the version (or commit, when running from source).
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you saw, what you expected instead, and whether it reproduces.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Command and output
+      description: |
+        The command you ran and its output. `subtrk status` output is scrubbed and safe to paste –
+        but never paste `~/.subtrk/env`, `~/.subtrk/config.json`, or any vendor credential file.
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      description: e.g. Windows 11, macOS 15, Ubuntu 24.04
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues (open and closed) for this problem
+          required: true
+        - label: My output contains no secrets – no keys, tokens, or credential-file contents
+          required: true
