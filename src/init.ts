@@ -12,6 +12,7 @@ import { AGENT_SECTION, agentTargets, applyAgentSection, printAgentListing } fro
 import type { ProviderId } from "./core.ts";
 import { ALL_PROVIDER_IDS, getSecret, loadConfig, registerSecret, SUBTRK_DIR, scrub } from "./core.ts";
 import { claudeAuth } from "./providers/claude.ts";
+import { desktopKeyPath, kimiTokenStale, parseDesktopKeyFile, parseKimiCliCredentials } from "./providers/kimi.ts";
 import { parseOpenaiAuth } from "./providers/openai.ts";
 
 export interface InitOpts {
@@ -355,6 +356,27 @@ async function fetchGoogleClientConstants(): Promise<Record<string, string> | nu
   };
 }
 
+// Kimi's OAuth client id is a PUBLIC constant, published in the vendor's own
+// open-source client (MoonshotAI/kimi-code). Fetch from upstream so no literal
+// lives in this repo – secret scanners stay quiet and the value stays current.
+async function fetchKimiClientId(): Promise<string | null> {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 10_000);
+  try {
+    const res = await fetch(
+      "https://raw.githubusercontent.com/MoonshotAI/kimi-code/main/packages/oauth/src/constants.ts",
+      { signal: ac.signal },
+    );
+    if (!res.ok) return null;
+    const src = await res.text();
+    return src.match(/\bclientId:\s*["']([0-9a-fA-F-]{36})["']/)?.[1] ?? null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 // `subtrk init --agent <harness>`: write the instructions section, print one
 // line, exit – no provider selection, no checks. Unknown name prints the
 // supported listing on stderr and exits 2.
@@ -380,7 +402,7 @@ export async function runInit(opts: InitOpts = {}): Promise<number | undefined> 
 
   console.log("subtrk init – checking providers\n");
 
-  // 0. Provider selection: which of the seven does this machine actually use?
+  // 0. Provider selection: which of the eight does this machine actually use?
   //    Stored as ~/.subtrk/config.json `{ enabled: [...] }` – the same gate
   //    collectStatus reads – and honored by every step below. Re-run init (or
   //    edit the file) to change it; deleting the file restores all providers.
@@ -626,6 +648,44 @@ export async function runInit(opts: InitOpts = {}): Promise<number | undefined> 
     } else {
       missing.push("openai – run `codex login`, then re-run subtrk init");
       console.log(`[missing] openai – ${auth ? auth.error.message : "no Codex credentials at ~/.codex/auth.json"}`);
+    }
+  }
+
+  // 8. Kimi: check-only for credentials – Kimi Desktop and the Kimi Code CLI own
+  //    their files. When the CLI OAuth credential exists, the PUBLIC OAuth client
+  //    id is fetched into ~/.subtrk/env (the probe's token refresh needs it).
+  //    Selected only.
+  if (selected.has("kimi")) {
+    const keyPath = desktopKeyPath();
+    const desktopKey = keyPath ? parseDesktopKeyFile(readJson(keyPath)) : null;
+    const cliCreds = parseKimiCliCredentials(readJson(join(homedir(), ".kimi-code", "credentials", "kimi-code.json")));
+    if (desktopKey) {
+      console.log("[ok]      kimi – Kimi Desktop key found");
+    } else if (cliCreds) {
+      const expiry =
+        cliCreds.expiresAtSec === undefined
+          ? "expiry unknown"
+          : `${kimiTokenStale(cliCreds.expiresAtSec, Date.now()) ? "expired" : "expires"} ${new Date(
+              cliCreds.expiresAtSec * 1000,
+            )
+              .toISOString()
+              .slice(0, 10)}`;
+      console.log(`[ok]      kimi – Kimi Code CLI credential found (${expiry} – subtrk refreshes it on next status)`);
+    } else {
+      missing.push("kimi – launch Kimi Desktop once or log in with the Kimi Code CLI, then re-run subtrk init");
+      console.log("[missing] kimi – no Kimi Desktop key or Kimi Code CLI credential");
+    }
+    if (cliCreds && !getSecret("KIMI_CLIENT_ID", envPath)) {
+      const fetched = await fetchKimiClientId();
+      if (fetched) {
+        updateEnvFile(envPath, { KIMI_CLIENT_ID: fetched });
+        console.log("[ok]      kimi – OAuth client id fetched from upstream into ~/.subtrk/env");
+      } else {
+        console.log("[note]    kimi – could not fetch the OAuth client id");
+        console.log(
+          "          token refresh needs KIMI_CLIENT_ID in ~/.subtrk/env (public value – MoonshotAI/kimi-code's packages/oauth/src/constants.ts)",
+        );
+      }
     }
   }
 

@@ -71,7 +71,7 @@ actually observe, given the cache), not the raw reset instant. Schedulers wake t
 ### ProviderResult
 
 ```ts
-type ProviderId = "claude" | "glm" | "alibaba" | "google" | "opencode" | "openrouter" | "openai";
+type ProviderId = "claude" | "glm" | "alibaba" | "google" | "opencode" | "openrouter" | "openai" | "kimi";
 
 type ErrorKind =
   | "no-credentials"      // credential file/env/key absent
@@ -177,6 +177,7 @@ Default TTLs (the policy – no user knobs in v0):
 | alibaba | 300 000 | bl subprocess is slow; don't spam |
 | openrouter | 60 000 | official API, cheap |
 | openai | 60 000 | vendor's own client endpoint, cheap |
+| kimi | 300 000 | vendor client endpoints, cheap |
 | opencode | 0 | local presence check only – bypasses cache entirely |
 
 ## Configuration & secrets
@@ -401,9 +402,60 @@ inference). Absent everywhere → `no-credentials`, hint `run subtrk init or ope
   codex login`. No `refresh()` on the module (rotation behavior deliberately
   untested) – openai is not refreshable.
 
+### kimi – Kimi coding plans (Kimi Desktop / Kimi Code CLI)
+
+Credential discovery, first match wins:
+
+1. The Kimi Desktop app's scoped API key:
+   `%APPDATA%\kimi-desktop\daimon-share\daimon\kimi-code-key.json` →
+   `keys[0].apiKey` (`sk-kimi-…`). Windows only – the path is the Desktop app's
+   own, resolved via `process.env.APPDATA`; elsewhere this source does not apply.
+2. The Kimi Code CLI's OAuth login: `~/.kimi-code/credentials/kimi-code.json`
+   (`access_token`, `refresh_token`, `expires_at` unix **seconds**; access
+   tokens live 15 minutes).
+
+Neither file → `no-credentials`, hint naming both paths.
+
+- Desktop key: `GET https://agent-gw.kimi.com/coding/v1/usages` → plan label
+  from `user.membership.level` (`LEVEL_` prefix stripped, title-cased –
+  "Kimi Free"; unknown levels keep their title-cased raw text) and one window
+  from `totalQuota`: the wire carries `limit`/`remaining` as STRINGS, used % =
+  (limit − remaining)/limit clamped 0–100 (limit ≤ 0 or unparseable → no
+  window), `resetTime` (RFC3339) names both the window kind (via the shared
+  seconds mapping, §openai) and `resetsAt`. Unusable quota numbers or resetTime
+  degrade to the empty state: ok with no window and note "no quota data
+  reported yet" – the shape and plan label still parse.
+- CLI OAuth: a stale access token is refreshed via `POST
+  https://auth.kimi.com/api/oauth/token` with form body
+  `grant_type=refresh_token&client_id=$KIMI_CLIENT_ID&refresh_token=…`; a
+  400/401 `invalid_grant` retries ONCE against
+  `https://auth.kimi.ai/api/oauth/token`. Success rewrites the FULL bundle back
+  to the file (temp + rename, untouched fields preserved, the old refresh token
+  kept when the response carries none) – best effort: the probe keeps using the
+  fresh token even when the write fails. `KIMI_CLIENT_ID` is a PUBLIC vendor
+  constant (MoonshotAI/kimi-code's `packages/oauth/src/constants.ts`) kept in
+  `~/.subtrk/env`, fetched by `subtrk init` – no literal lives in this repo;
+  missing at probe time → `no-credentials` (remedy `subtrk init`). A grant that
+  dies on both hosts → `expired-token`, hint `launch the Kimi Code CLI (or Kimi
+  Desktop) once to re-login` – subtrk never runs an interactive login, so kimi
+  has no `refresh()`.
+- Usage read (CLI OAuth): `GET https://api.kimi.com/coding/v1/usages` →
+  `usages.limit_5h` / `limit_7d` / `limit_month_total` / `limit_month_code`
+  with `used_ratio` (0–1, ×100) and optional `reset_time` → windows `5h`, `7d`,
+  `30d` and `30d` scoped `code`; absent fields are skipped (the shape is
+  degradable by design), present-but-malformed ones fail the parse;
+  `boosterWallet` exists but is not surfaced in v1. The simple
+  `{"usage":{limit, remaining, resetTime}}` shape (API-key auth on this host)
+  parses through the same function.
+- Headers: `Authorization: Bearer <key-or-access-token>`, honest
+  `User-Agent: subtrk` – vendor client UAs are never spoofed. Errors map like
+  openai's (429 → `rate-limited` with retryAfterMs, other non-2xx →
+  `http-error`, 10s AbortController timeout); 401/403 on the API-key path fall
+  through to the CLI OAuth source once before erroring.
+
 ## `subtrk init` (one-time interactive setup)
 
-First, init asks which providers to track: a numbered listing of all seven,
+First, init asks which providers to track: a numbered listing of all eight,
 answered with numbers and/or ids (`1 3 5`, `claude, google`); empty input keeps
 the current selection, invalid input re-prompts (bounded), and non-TTY stdin
 skips the question. The answer is stored as `~/.subtrk/config.json`
@@ -440,6 +492,12 @@ Checks, in order, printing a checklist with pass/fail per provider:
 7. OpenAI: check-only, nothing to collect – `~/.codex/auth.json` parses as a
    ChatGPT login → `[ok]`; else `[missing]` with the honest message (API-key
    mode included) and `codex login` as the fix.
+8. Kimi: check-only for credentials – the Kimi Desktop key file or the Kimi
+   Code CLI credential (reported with its expiry status) → `[ok]`; else
+   `[missing]` with both paths. When the CLI credential exists and
+   `KIMI_CLIENT_ID` is not yet stored, the PUBLIC OAuth client id is fetched
+   from MoonshotAI/kimi-code's published source into `~/.subtrk/env` (the
+   probe's token refresh needs it).
 
 `subtrk init` never sends a secret anywhere except the owning provider's endpoint, and
 never writes secrets anywhere except `~/.subtrk/env` and vendor-owned files.

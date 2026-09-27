@@ -15,6 +15,12 @@ import {
 import { claudeAuth, parseClaudeUsage } from "../src/providers/claude.ts";
 import { parseGlmQuota } from "../src/providers/glm.ts";
 import { parseAntigravityTokenFile, parseGeminiCreds, parseGoogleSummary } from "../src/providers/google.ts";
+import {
+  parseAgentGwUsage,
+  parseApiKimiUsage,
+  parseDesktopKeyFile,
+  parseKimiCliCredentials,
+} from "../src/providers/kimi.ts";
 import { extractOpencodeKey } from "../src/providers/opencode.ts";
 import { parseOpenrouterCredits, parseOpenrouterKey } from "../src/providers/openrouter.ts";
 
@@ -73,6 +79,26 @@ test("parsers ignore injected secret fields and never echo them", () => {
 
   const opencodeKey = extractOpencodeKey({ opencode: { key: "real-key" }, __leak: SECRET });
   assert.equal(opencodeKey, "real-key");
+
+  const kimiParsed = parseAgentGwUsage(leaky(fixture("kimi-agentgw-usages")));
+  assert.ok(kimiParsed);
+  assert.ok(!json(kimiParsed).includes(SECRET));
+
+  const kimiApi = parseApiKimiUsage(leaky(fixture("kimi-api-usage")));
+  assert.ok(kimiApi);
+  assert.ok(!json(kimiApi).includes(SECRET));
+});
+
+test("kimi credential parsing extracts exactly the known fields, never echoes the rest", () => {
+  const key = parseDesktopKeyFile(leaky(fixture("kimi-credentials")));
+  assert.equal(key, "sk-kimi-FAKE-0123456789abcdef", "extraction is exact, nothing extra");
+  const creds = parseKimiCliCredentials(leaky({ access_token: SECRET, refresh_token: `${SECRET}-r`, expires_at: 1 }));
+  assert.ok(creds);
+  assert.equal(creds.accessToken, SECRET);
+  assert.equal(creds.refreshToken, `${SECRET}-r`);
+  const usage = parseApiKimiUsage(leaky(fixture("kimi-oauth-usages")));
+  assert.ok(usage);
+  assert.ok(!json(usage).includes(SECRET));
 });
 
 test("JSON extraction only takes the braced region – banner secrets stay out", () => {
