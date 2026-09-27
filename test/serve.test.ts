@@ -2,7 +2,7 @@
 // absence. Every request targets our own listening socket on 127.0.0.1 – no
 // other network. Stub providers ride the same deps seam as the CLI tests.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { type IncomingHttpHeaders, request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,7 +19,7 @@ interface Resp {
 function get(
   port: number,
   path: string,
-  opts: { headers?: Record<string, string>; method?: string } = {},
+  opts: { headers?: Record<string, string>; method?: string; body?: string } = {},
 ): Promise<Resp> {
   return new Promise((resolve, reject) => {
     const req = request(
@@ -37,7 +37,7 @@ function get(
       },
     );
     req.on("error", reject);
-    req.end();
+    req.end(opts.body);
   });
 }
 
@@ -347,5 +347,119 @@ describe("POST /api/refresh", () => {
         noCors(r.headers);
       },
     );
+  });
+});
+
+describe("POST /api/config", () => {
+  const postConfig = (h: ServeHandle, body: string): Promise<Resp> =>
+    get(h.port, "/api/config", {
+      method: "POST",
+      headers: { authorization: `Bearer ${h.token}`, "content-type": "application/json" },
+      body,
+    });
+
+  it("401 without a token – nothing is written", async () => {
+    const subtrkDir = mkdtempSync(join(tmpdir(), "subtrk-serve-"));
+    await withServer({ subtrkDir }, async (h) => {
+      const r = await get(h.port, "/api/config", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: ["claude"] }),
+      });
+      assert.equal(r.status, 401);
+      assert.deepEqual(JSON.parse(r.body), { error: "unauthorized" });
+      assert.equal(existsSync(join(subtrkDir, "config.json")), false);
+      noCors(r.headers);
+    });
+  });
+
+  it("GET → 405 with allow: POST", async () => {
+    const subtrkDir = mkdtempSync(join(tmpdir(), "subtrk-serve-"));
+    await withServer({ subtrkDir }, async (h) => {
+      const r = await get(h.port, "/api/config", { headers: { authorization: `Bearer ${h.token}` } });
+      assert.equal(r.status, 405);
+      assert.equal(r.headers.allow, "POST");
+      assert.deepEqual(JSON.parse(r.body), { error: "method not allowed" });
+      noCors(r.headers);
+    });
+  });
+
+  it("400 on a non-JSON body and on a body missing both keys", async () => {
+    const subtrkDir = mkdtempSync(join(tmpdir(), "subtrk-serve-"));
+    await withServer({ subtrkDir }, async (h) => {
+      const broken = await postConfig(h, "{not json");
+      assert.equal(broken.status, 400);
+      assert.deepEqual(JSON.parse(broken.body), { error: "invalid config body" });
+      const noKeys = await postConfig(h, JSON.stringify({ foo: ["claude"] }));
+      assert.equal(noKeys.status, 400);
+      assert.deepEqual(JSON.parse(noKeys.body), { error: "config body must include enabled or order" });
+      noCors(broken.headers);
+    });
+  });
+
+  it("400 on an unknown id in enabled and on an empty enabled", async () => {
+    const subtrkDir = mkdtempSync(join(tmpdir(), "subtrk-serve-"));
+    await withServer({ subtrkDir }, async (h) => {
+      const unknown = await postConfig(h, JSON.stringify({ enabled: ["claude", "nope"] }));
+      assert.equal(unknown.status, 400);
+      assert.deepEqual(JSON.parse(unknown.body), { error: "unknown provider id in enabled" });
+      const empty = await postConfig(h, JSON.stringify({ enabled: [] }));
+      assert.equal(empty.status, 400);
+      assert.deepEqual(JSON.parse(empty.body), { error: "enabled must contain at least one provider id" });
+      assert.equal(existsSync(join(subtrkDir, "config.json")), false, "rejected patches write nothing");
+    });
+  });
+
+  it("200 enabled-only write lands atomically on disk with a trailing newline", async () => {
+    const subtrkDir = mkdtempSync(join(tmpdir(), "subtrk-serve-"));
+    await withServer({ subtrkDir }, async (h) => {
+      const r = await postConfig(h, JSON.stringify({ enabled: ["claude", "google"] }));
+      assert.equal(r.status, 200);
+      assert.deepEqual(JSON.parse(r.body), { ok: true });
+      const raw = readFileSync(join(subtrkDir, "config.json"), "utf8");
+      assert.ok(raw.endsWith("\n"), "newline-terminated");
+      assert.deepEqual(JSON.parse(raw), { enabled: ["claude", "google"] });
+      noCors(r.headers);
+    });
+  });
+
+  it("200 order-only write; duplicates in order are dropped", async () => {
+    const subtrkDir = mkdtempSync(join(tmpdir(), "subtrk-serve-"));
+    await withServer({ subtrkDir }, async (h) => {
+      const r = await postConfig(h, JSON.stringify({ order: ["kimi", "claude", "kimi"] }));
+      assert.equal(r.status, 200);
+      assert.deepEqual(JSON.parse(r.body), { ok: true });
+      assert.deepEqual(JSON.parse(readFileSync(join(subtrkDir, "config.json"), "utf8")), {
+        order: ["kimi", "claude"],
+      });
+      noCors(r.headers);
+    });
+  });
+
+  it("200 with both keys", async () => {
+    const subtrkDir = mkdtempSync(join(tmpdir(), "subtrk-serve-"));
+    await withServer({ subtrkDir }, async (h) => {
+      const r = await postConfig(h, JSON.stringify({ enabled: ["claude"], order: ["claude", "openai"] }));
+      assert.equal(r.status, 200);
+      assert.deepEqual(JSON.parse(r.body), { ok: true });
+      assert.deepEqual(JSON.parse(readFileSync(join(subtrkDir, "config.json"), "utf8")), {
+        enabled: ["claude"],
+        order: ["claude", "openai"],
+      });
+    });
+  });
+
+  it("200 preserves an unknown pre-existing key in config.json", async () => {
+    const subtrkDir = mkdtempSync(join(tmpdir(), "subtrk-serve-"));
+    writeFileSync(join(subtrkDir, "config.json"), JSON.stringify({ enabled: ["claude"], custom: 42 }));
+    await withServer({ subtrkDir }, async (h) => {
+      const r = await postConfig(h, JSON.stringify({ order: ["google", "claude"] }));
+      assert.equal(r.status, 200);
+      assert.deepEqual(JSON.parse(readFileSync(join(subtrkDir, "config.json"), "utf8")), {
+        enabled: ["claude"],
+        order: ["google", "claude"],
+        custom: 42,
+      });
+    });
   });
 });

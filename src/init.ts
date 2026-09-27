@@ -10,7 +10,7 @@ import { createInterface } from "node:readline/promises";
 import type { AgentTarget } from "./agents.ts";
 import { AGENT_SECTION, agentTargets, applyAgentSection, printAgentListing } from "./agents.ts";
 import type { ProviderId } from "./core.ts";
-import { ALL_PROVIDER_IDS, getSecret, loadConfig, registerSecret, SUBTRK_DIR, scrub } from "./core.ts";
+import { ALL_PROVIDER_IDS, getSecret, loadConfig, registerSecret, SUBTRK_DIR, saveConfig, scrub } from "./core.ts";
 import { claudeAuth } from "./providers/claude.ts";
 import { desktopKeyPath, kimiTokenStale, parseDesktopKeyFile, parseKimiCliCredentials } from "./providers/kimi.ts";
 import { parseOpenaiAuth } from "./providers/openai.ts";
@@ -131,13 +131,13 @@ export async function askProviderSelection(
   return null;
 }
 
-// The selection persists as config.json `{ enabled: [...] }` – the same file
-// loadConfig/collectStatus read. Plain stringify + newline, best effort: a
-// lost write costs a re-run of init, never an error. Deleting the file
-// restores "all providers".
+// The selection persists as config.json `{ enabled: [...] }` via the shared
+// saveConfig (atomic temp+rename, any saved `order` and unknown keys survive) –
+// the same file loadConfig/collectStatus read. Best effort: a lost write costs
+// a re-run of init, never an error. Deleting the file restores "all providers".
 export function saveProviderSelection(subtrkDir: string, enabled: readonly ProviderId[]): boolean {
   try {
-    writeFileSync(join(subtrkDir, "config.json"), `${JSON.stringify({ enabled: [...enabled] }, null, 2)}\n`);
+    saveConfig(subtrkDir, { enabled: [...enabled] });
     return true;
   } catch {
     return false;

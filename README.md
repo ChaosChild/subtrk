@@ -39,12 +39,15 @@ one page for every tracked provider: usage bars per window (with ≥80%/≥95% w
 levels), credit pools, a 7-day reset timeline, upcoming resets, and the same
 agent view the CLI prints, auto-refreshing on the cache heartbeat. When a
 provider's error says it is refreshable, its card shows a **Refresh now** button
-that re-runs that provider's own refresh action on the host.
+that re-runs that provider's own refresh action on the host. A plus-icon menu in
+the header toggles providers on/off and cards drag to reorder – both persist
+across restarts (saved to `~/.subtrk/config.json`, like `subtrk init`).
 
 ![Web console](docs/img/console.png)
 
 The server is loopback-only, requires a per-run token (delivered in the printed
-URL), never emits CORS headers, and serves read-only JSON – see
+URL), never emits CORS headers, and status stays read-only – toggles and card
+order persist through the authenticated `POST /api/config` – see
 [`docs/spec.md`](docs/spec.md) §`subtrk serve` for the security design.
 
 ## Why

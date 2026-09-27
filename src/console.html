@@ -63,7 +63,7 @@ body {
 
 /* header */
 header { border-bottom: 1px solid var(--border); background: var(--surface); position: sticky; top: 0; z-index: 5; }
-.bar { display: flex; align-items: center; gap: 16px; height: 56px; }
+.bar { display: flex; align-items: center; gap: 16px; height: 56px; position: relative; }
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: -.01em; font-size: 15px; }
 .logo { width: 26px; height: 26px; border-radius: 7px; background: var(--text); color: var(--bg); display: grid; place-items: center; font: 700 13px var(--mono); }
 .brand small { color: var(--text-3); font-weight: 500; font-size: 13px; }
@@ -77,6 +77,11 @@ header { border-bottom: 1px solid var(--border); background: var(--surface); pos
 .iconbtn { border: 1px solid var(--border); background: var(--surface); color: var(--text-2); width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; cursor: pointer; }
 .iconbtn:hover { color: var(--text); border-color: var(--border-strong); }
 .iconbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pdd { position: absolute; top: calc(100% + 8px); right: 0; z-index: 6; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 6px; min-width: 190px; display: none; }
+.pdd:not([hidden]) { display: block; }
+.pdd label { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 7px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+.pdd label:hover { background: var(--surface-2); }
+.pdd input { accent-color: var(--accent); margin: 0; }
 @media (max-width: 860px) { .meta .hide-sm { display: none; } }
 @media (max-width: 640px) { .meta { display: none; } }
 .summary > *, .grid > *, .two > * { min-width: 0; }
@@ -107,6 +112,9 @@ main.wrap { padding-top: 28px; padding-bottom: 48px; display: grid; gap: 20px; }
 .prov { padding: 16px 18px 14px; display: flex; flex-direction: column; gap: 12px; }
 .prov.crit { border-color: color-mix(in srgb, var(--crit) 45%, var(--border)); }
 .phead { display: flex; align-items: flex-start; gap: 10px; }
+.drag { flex: none; cursor: grab; color: var(--text-3); font-size: 13px; line-height: 1; padding-top: 3px; user-select: none; }
+.drag:active { cursor: grabbing; }
+.prov.dragging { opacity: .5; }
 .pmark { width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; font: 700 12px var(--mono); color: #fff; flex: none; }
 .pname { font-weight: 650; font-size: 14.5px; line-height: 1.25; }
 .pplan { color: var(--text-3); font-size: 12.5px; }
@@ -196,6 +204,10 @@ footer code { font-family: var(--mono); color: var(--text-2); }
       <span class="sep"></span>
       <span>next refresh <b class="num" id="recheck">…</b></span>
     </div>
+    <button class="iconbtn" id="providersToggle" aria-label="Show or hide providers" aria-expanded="false" title="Show or hide providers">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <div class="pdd" id="providersMenu" hidden></div>
     <button class="iconbtn" id="theme" aria-label="Toggle colour theme" title="Toggle colour theme">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
     </button>
@@ -254,8 +266,8 @@ footer code { font-family: var(--mono); color: var(--text-2); }
 <script>
 // subtrk serve console – live page.
 // The bearer token arrives in the URL fragment (#<token> or #token=<token>) and is
-// used only as the Authorization header on /api/status and /api/refresh requests:
-// never stored, never logged, never rendered, never placed in a query string.
+// used only as the Authorization header on /api/status, /api/refresh and /api/config
+// requests: never stored, never logged, never rendered, never placed in a query string.
 
 const META = {
   claude:     { name: "Anthropic", color: "#c96442", ttl: 300 },
@@ -275,6 +287,7 @@ let STATUS = null;        // last successful /api/status payload
 let token = readToken();  // fragment credential – memory only
 let timer = null;         // the single pending re-fetch
 let inFlight = false;     // never parallel-fetch
+let refreshQueued = false; // a call that landed mid-flight replays once it clears
 let nextFetchAt = null;   // epoch-ms of the scheduled fetch, for the header countdown
 
 // Vendor-derived strings go through esc() – never raw into innerHTML.
@@ -345,7 +358,7 @@ function providerHTML(p) {
     const c = p.credits, pct = c.total != null ? clampPct((1 - Number(c.remaining) / Number(c.total)) * 100) : null;
     body += `<div><div class="label">${c.unit === "usd" ? "Balance" : "Credits left"}</div>
       <div class="credits"><span class="big">${money(c.remaining, c.unit)}</span>${c.total != null ? `<span class="of">/ ${money(c.total, c.unit)}</span>` : ""}</div>
-      ${pct != null ? `<div class="track" style="margin-top:6px"><div class="fill ${level(pct)}" style="width:${pct}%"></div></div>` : ""}
+      ${pct != null ? `<div class="wtop" style="margin-top:6px"><div class="track" style="flex:1"><div class="fill ${level(pct)}" style="width:${pct}%"></div></div><span class="wpct">${pct.toFixed(0)}% <small>used</small></span></div>` : ""}
       <div class="wreset" style="margin-top:5px"><span>${c.cycleEndsAt ? `cycle ends ${when(c.cycleEndsAt)}` : "no expiry"}</span><span>${c.source === "derived" ? "derived from %" : "from API"}</span></div></div>`;
   }
   if (ws.length && !p.credits) {
@@ -361,8 +374,8 @@ function providerHTML(p) {
     body += `<div class="err"><span class="k">${esc(p.error.kind)}</span> – ${esc(p.error.message)}${p.error.hint ? `<div class="h">${esc(p.error.hint)}</div>` : ""}${remedy}${ctl}</div>`;
   }
   if (p.note) body += `<div class="note">${esc(p.note)}</div>`;
-  return `<article class="card prov ${worst >= 95 ? "crit" : ""}">
-    <div class="phead"><div class="pmark" style="background:${m.color}">${esc(String(p.id).slice(0, 2).toUpperCase())}</div>
+  return `<article class="card prov ${worst >= 95 ? "crit" : ""}" draggable="true" data-id="${esc(p.id)}">
+    <div class="phead"><span class="drag" title="Drag to reorder" aria-hidden="true">⠿</span><div class="pmark" style="background:${m.color}">${esc(String(p.id).slice(0, 2).toUpperCase())}</div>
       <div><div class="pname">${esc(m.name)}</div><div class="pplan">${esc(p.plan || "")}</div></div>${badge(p)}</div>
     ${body}
     <div class="pfoot"><span>fetched <b data-ago="${esc(p.fetchedAt)}"></b></span><span>ttl <b>${m.ttl ? m.ttl + "s" : "none"}</b></span><span>id <b>${esc(p.id)}</b></span></div>
@@ -472,6 +485,7 @@ function render(data) {
   STATUS.providers = Array.isArray(STATUS.providers) ? STATUS.providers.filter(p => p && typeof p === "object") : [];
   clearBanner();
   renderAll();
+  syncProviderMenu(); // the dropdown lives outside the re-rendered innerHTML
 }
 
 function schedule(ms) {
@@ -481,7 +495,10 @@ function schedule(ms) {
 }
 
 async function refresh() {
-  if (inFlight) return;
+  if (inFlight) {
+    refreshQueued = true; // trailing replay – a dropped call would leave stale cards for up to a recheck period
+    return;
+  }
   inFlight = true;
   clearTimeout(timer);
   try {
@@ -503,6 +520,10 @@ async function refresh() {
     schedule(FALLBACK_MS);
   } finally {
     inFlight = false;
+    if (refreshQueued) {
+      refreshQueued = false;
+      void refresh();
+    }
   }
 }
 
@@ -543,6 +564,135 @@ document.addEventListener("click", async (e) => {
   } catch {
     failNote("cannot reach subtrk serve – is it still running?");
   }
+});
+
+// POST /api/config behind the same per-run Bearer token as the other calls.
+// 200 → the normal refresh() re-render picks up the saved shape; failures take
+// the existing banner paths with short fixed messages.
+async function postConfig(patch) {
+  let res;
+  try {
+    res = await fetch("/api/config", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify(patch),
+    });
+  } catch {
+    showBanner("warn", "cannot reach subtrk serve – is it still running?");
+    return false;
+  }
+  if (res.status === 401) {
+    showBanner("crit", "token rejected – restart subtrk serve and open the fresh URL");
+    return false;
+  }
+  if (!res.ok) {
+    showBanner("crit", "the server rejected the change");
+    return false;
+  }
+  refresh();
+  return true;
+}
+
+// Provider selection (plus icon, left of the theme button): one checkbox per
+// META provider, checked ⇔ present in the current /api/status payload. A change
+// POSTs {enabled} to /api/config – the same config.json `subtrk init` writes –
+// so the choice persists across restarts, exactly like re-running init.
+const pdd = $("providersMenu");
+pdd.innerHTML = Object.entries(META).map(([id, m]) =>
+  `<label><input type="checkbox" value="${esc(id)}"><span>${esc(m.name)}</span></label>`).join("");
+
+function syncProviderMenu() {
+  const enabled = new Set((STATUS && Array.isArray(STATUS.providers) ? STATUS.providers : []).map(p => p.id));
+  pdd.querySelectorAll("input[type=checkbox]").forEach(box => {
+    box.checked = enabled.has(box.value);
+    box.disabled = enabled.size <= 1 && box.checked; // never let the dashboard go empty
+    box.title = box.disabled ? "at least one provider must stay enabled" : "";
+  });
+}
+
+const providersToggle = $("providersToggle");
+function closeProviders() {
+  pdd.hidden = true;
+  providersToggle.setAttribute("aria-expanded", "false");
+}
+providersToggle.addEventListener("click", () => {
+  pdd.hidden = !pdd.hidden;
+  providersToggle.setAttribute("aria-expanded", String(!pdd.hidden));
+});
+document.addEventListener("click", (e) => {
+  if (pdd.hidden) return;
+  const t = e.target instanceof Element ? e.target : null;
+  if (!t || (!t.closest("#providersMenu") && !t.closest("#providersToggle"))) closeProviders();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeProviders();
+});
+
+let togglingProviders = false;
+pdd.addEventListener("change", async (e) => {
+  const box = e.target instanceof HTMLInputElement && e.target.type === "checkbox" ? e.target : null;
+  if (!box || togglingProviders) return;
+  // DOM order is META order – the checked boxes read back in the right sequence.
+  const ids = [...pdd.querySelectorAll("input[type=checkbox]")].filter(b => b.checked).map(b => b.value);
+  togglingProviders = true;
+  pdd.querySelectorAll("input[type=checkbox]").forEach(b => { b.disabled = true; }); // no double-submit
+  const ok = await postConfig({ enabled: ids });
+  togglingProviders = false;
+  if (ok) {
+    closeProviders(); // refresh() re-renders and re-syncs the checkboxes
+    return;
+  }
+  syncProviderMenu(); // server truth wins – reverts the box and re-enables
+});
+
+// Card drag-reorder: native HTML5 DnD inside #providers, armed only by a press
+// on the handle so card text stays mouse-selectable. Drop POSTs the new id order
+// to /api/config {order} – server-side config, so it survives restarts (the port
+// changes every run, so localStorage is useless here by design).
+const grid = $("providers");
+let dragCard = null;
+let handleArmed = false;
+grid.addEventListener("mousedown", (e) => {
+  handleArmed = e.target instanceof Element && e.target.closest(".drag") !== null;
+});
+grid.addEventListener("dragstart", (e) => {
+  const card = e.target instanceof Element ? e.target.closest("article[data-id]") : null;
+  if (!handleArmed || !card) { e.preventDefault(); return; }
+  dragCard = card;
+  card.classList.add("dragging");
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", card.dataset.id ?? "");
+  }
+});
+grid.addEventListener("dragover", (e) => {
+  if (!dragCard) return;
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+  // Live position: first card (row-major) that starts below the pointer, or
+  // whose midpoint sits right of it on the same row, receives the dragged card
+  // before itself; past all of them the card appends. Grid auto-flow does the
+  // snapping – no coordinate math beyond this scan, and the 2-col/1-col media
+  // queries keep working.
+  for (const card of grid.querySelectorAll("article[data-id]")) {
+    if (card === dragCard) continue;
+    const r = card.getBoundingClientRect();
+    if (e.clientY < r.top || (e.clientY <= r.bottom && e.clientX < r.left + r.width / 2)) {
+      grid.insertBefore(dragCard, card);
+      return;
+    }
+  }
+  grid.appendChild(dragCard);
+});
+grid.addEventListener("drop", (e) => e.preventDefault());
+grid.addEventListener("dragend", () => {
+  if (!dragCard) return;
+  dragCard.classList.remove("dragging");
+  dragCard = null;
+  handleArmed = false;
+  // DOM order is the new order; the server drops disabled/unknown ids on read
+  // and the next render() shows the saved sequence.
+  void postConfig({ order: [...grid.querySelectorAll("article[data-id]")].map(c => c.dataset.id ?? "") });
 });
 
 // A fresh URL (new fragment token) opened in this tab heals the page without a manual reload.

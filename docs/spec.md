@@ -182,8 +182,14 @@ Default TTLs (the policy – no user knobs in v0):
 
 ## Configuration & secrets
 
-- `~/.subtrk/config.json` – `{ "enabled": ["claude", "glm", …] }`. Absent ⇒ all enabled.
-  That is the entire config in v0 (no knobs).
+- `~/.subtrk/config.json` – `{ "enabled": ["claude", "glm", …], "order": ["kimi",
+  "claude", …] }`. `enabled` gates which providers are tracked (absent ⇒ all
+  enabled); `order` is the optional display order – listed ids come first in
+  their given order (unknown ids and duplicates dropped on read), unlisted ids
+  keep registry order after them. Both keys are written by `subtrk init` and by
+  the web console (`POST /api/config`) through one shared `saveConfig`: a
+  read-modify-write that preserves unknown pre-existing keys and lands
+  atomically (temp file + rename). That is the entire config in v0 (no knobs).
 - `~/.subtrk/env` – dotenv format (`KEY=VALUE`, `#` comments), parsed by a ~20-line
   reader. Holds subtrk's own keys: `OPENROUTER_API_KEY`, `OPENROUTER_MANAGEMENT_KEY`,
   optionally `OPENCODE_API_KEY`. Real process env wins over the file. Written by
@@ -459,9 +465,10 @@ First, init asks which providers to track: a numbered listing of all eight,
 answered with numbers and/or ids (`1 3 5`, `claude, google`); empty input keeps
 the current selection, invalid input re-prompts (bounded), and non-TTY stdin
 skips the question. The answer is stored as `~/.subtrk/config.json`
-`{ "enabled": [...] }` – the same gate `subtrk status` applies – and the checks
-below only cover selected providers; edit the file or re-run init to change it,
-deleting it restores all.
+`{ "enabled": [...] }` via the shared `saveConfig` (any saved `order` and
+unknown keys survive) – the same gate `subtrk status` applies – and the checks
+below only cover selected providers; edit the file, use the console's provider
+menu, or re-run init to change it, deleting it restores all.
 
 Checks, in order, printing a checklist with pass/fail per provider:
 1. Claude: `~/.claude/.credentials.json` readable + unexpired → else instruct `claude /login`.
@@ -571,7 +578,8 @@ errors + exit codes, agent commands never prompt · content-first (bare `subtrk`
 · contextual `help:` line · consistent `--help` · secrets redacted by default ·
 `--confirm` gating reserved for any future state-changing operation (e.g. grant
 redemption, if ever un-parked) · interactive re-auth (`subtrk auth refresh` /
-`POST /api/refresh`) is the one deliberate state-changing exception – D9.
+`POST /api/refresh`) and the console's config writes (`POST /api/config`) are
+the two deliberate state-changing exceptions – D9.
 
 ## `subtrk serve` – local web console
 
@@ -604,16 +612,33 @@ One page for every enabled provider, served from the same cache the CLI reads.
   provider's cache entry is dropped so the next `/api/status` re-probes.
   Non-POST → 405 with `allow: POST`. No request body – the provider id comes
   from the query string only.
+- `POST /api/config` → persists the console's provider selection and card order
+  to `config.json` via `saveConfig` (atomic temp+rename; unknown pre-existing
+  keys are preserved), behind the same Bearer token as `/api/status` (401 on
+  failure). The body is a JSON object carrying at least one of the two keys
+  (a body with neither → 400, so a typo'd key cannot silently no-op):
+  `enabled` must be a non-empty array of known provider ids (unknown or empty
+  → 400); `order` must be an array of known ids (unknown → 400, duplicates
+  dropped, currently-disabled ids allowed). Unknown extra body keys are
+  ignored; a body over the 10KB cap, or one that is not valid JSON / not a
+  plain object, → 400. Success answers 200 `{"ok": true}` – fixed literals
+  only, the file itself is never echoed (read it back through `/api/status`).
+  Non-POST → 405 with `allow: POST`.
 - Hardening: the Host header must be `127.0.0.1[:port]` or
   `localhost[:port]` (403 otherwise – DNS-rebinding defense); no CORS headers
   are ever emitted, so cross-site pages can neither read responses nor pass
   the preflight a custom header requires; `/` and `/api/status` stay
-  GET-only (405 otherwise); handlers never throw. Ctrl-C shuts down cleanly.
+  GET-only, `/api/refresh` and `/api/config` stay POST-only (405 otherwise);
+  handlers never throw. Ctrl-C shuts down cleanly.
 - The dashboard: per-provider cards (usage bars per window with ≥80%/≥95%
-  warning levels, credits, staleness, error kinds with hints and remedies –
-  providers marked `refreshable` get a Refresh now button that calls
-  `POST /api/refresh`), a 7-day reset timeline, an upcoming-resets table, an
-  agent-view terminal panel, and auto-refresh at `recheckAfter`.
+  warning levels, credits with a used-percentage bar, staleness, error kinds
+  with hints and remedies – providers marked `refreshable` get a Refresh now
+  button that calls `POST /api/refresh`), a 7-day reset timeline, an
+  upcoming-resets table, an agent-view terminal panel, and auto-refresh at
+  `recheckAfter`. A plus-icon menu in the header toggles providers on/off (the
+  last enabled provider locks) and each card carries a drag handle for
+  reordering – both persist through `/api/config` and survive restarts, and the
+  saved `order` also governs `subtrk status` output order.
 
 ## Not in v0 (parked)
 

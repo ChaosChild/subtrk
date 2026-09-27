@@ -169,7 +169,20 @@ function sleep(ms: number): Promise<void> {
 
 // ---------- config ----------
 
-export function loadConfig(subtrkDir: string = SUBTRK_DIR): { enabled: ProviderId[] } {
+export interface SubtrkConfig {
+  enabled: ProviderId[];
+  order?: ProviderId[]; // display order – listed ids first, rest keeps registry order
+}
+
+// Known ids only, duplicates dropped; a non-array of strings yields undefined
+// (order is an optional hint, never a hard failure like enabled).
+function parseOrder(value: unknown): ProviderId[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((e) => typeof e !== "string")) return undefined;
+  return [...new Set(value.filter((id): id is ProviderId => (ALL_PROVIDER_IDS as readonly string[]).includes(id)))];
+}
+
+export function loadConfig(subtrkDir: string = SUBTRK_DIR): SubtrkConfig {
   const path = join(subtrkDir, "config.json");
   let text: string;
   try {
@@ -184,12 +197,38 @@ export function loadConfig(subtrkDir: string = SUBTRK_DIR): { enabled: ProviderI
   } catch {
     throw new ConfigError(`config is not valid JSON: ${path}`);
   }
-  const enabled = (raw as { enabled?: unknown } | null)?.enabled;
-  if (enabled === undefined) return { enabled: [...ALL_PROVIDER_IDS] };
+  const file = raw as { enabled?: unknown; order?: unknown } | null;
+  const enabled = file?.enabled;
+  if (enabled === undefined) return { enabled: [...ALL_PROVIDER_IDS], order: parseOrder(file?.order) };
   if (!Array.isArray(enabled) || enabled.some((e) => typeof e !== "string")) {
     throw new ConfigError(`config.enabled must be an array of provider ids: ${path}`);
   }
-  return { enabled: enabled.filter((id): id is ProviderId => (ALL_PROVIDER_IDS as readonly string[]).includes(id)) };
+  return {
+    enabled: enabled.filter((id): id is ProviderId => (ALL_PROVIDER_IDS as readonly string[]).includes(id)),
+    order: parseOrder(file?.order),
+  };
+}
+
+// Read-modify-write of the whole config file: unknown pre-existing keys are
+// preserved, only the patch keys are overwritten. Temp file + rename (the
+// writeCacheEntry discipline). Throws on write failure – callers decide.
+export function saveConfig(subtrkDir: string, patch: { enabled?: ProviderId[]; order?: ProviderId[] }): void {
+  const path = join(subtrkDir, "config.json");
+  let file: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      file = parsed as Record<string, unknown>;
+    }
+  } catch {
+    /* absent or unparseable – start a fresh file */
+  }
+  if (patch.enabled !== undefined) file.enabled = [...patch.enabled];
+  if (patch.order !== undefined) file.order = [...patch.order];
+  mkdirSync(subtrkDir, { recursive: true });
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`);
+  renameSync(tmp, path);
 }
 
 // ---------- env secrets + redaction ----------
@@ -638,10 +677,17 @@ export interface CollectStatusOpts {
 export async function collectStatus(
   opts: CollectStatusOpts = {},
 ): Promise<{ out: StatusOutput; ttlById: Map<string, number> }> {
-  const enabled = loadConfig(opts.subtrkDir).enabled;
+  const cfg = loadConfig(opts.subtrkDir);
   const registry = opts.providers ?? (await import("./providers/index.ts")).allProviders;
   const requested = opts.requested !== undefined && opts.requested.length > 0 ? new Set<string>(opts.requested) : null;
-  const selected = registry.filter((m) => enabled.includes(m.id) && (!requested || requested.has(m.id)));
+  const selected = registry.filter((m) => cfg.enabled.includes(m.id) && (!requested || requested.has(m.id)));
+  // Configured display order: listed ids first by index, unlisted keep registry
+  // order after them (stable sort). Applied to filtered lists too – harmless.
+  if (cfg.order && cfg.order.length > 0) {
+    const rank = new Map(cfg.order.map((id, i) => [id, i] as const));
+    const last = cfg.order.length;
+    selected.sort((a, b) => (rank.get(a.id) ?? last) - (rank.get(b.id) ?? last));
+  }
   if (selected.length === 0) {
     throw new Error("no providers selected – check ~/.subtrk/config.json or --provider");
   }
