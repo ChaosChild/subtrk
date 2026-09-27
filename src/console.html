@@ -358,7 +358,7 @@ function providerHTML(p) {
     const c = p.credits, pct = c.total != null ? clampPct((1 - Number(c.remaining) / Number(c.total)) * 100) : null;
     body += `<div><div class="label">${c.unit === "usd" ? "Balance" : "Credits left"}</div>
       <div class="credits"><span class="big">${money(c.remaining, c.unit)}</span>${c.total != null ? `<span class="of">/ ${money(c.total, c.unit)}</span>` : ""}</div>
-      ${pct != null ? `<div class="wtop" style="margin-top:6px"><div class="track" style="flex:1"><div class="fill ${level(pct)}" style="width:${pct}%"></div></div><span class="wpct">${pct.toFixed(0)}% <small>used</small></span></div>` : ""}
+      ${pct != null ? `<div class="wtop" style="margin-top:6px"><span class="wpct">${pct.toFixed(0)}% <small>used</small></span></div><div class="track" style="margin-top:5px" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct.toFixed(0)}" aria-label="credits used"><div class="fill ${level(pct)}" style="width:${pct}%"></div></div>` : ""}
       <div class="wreset" style="margin-top:5px"><span>${c.cycleEndsAt ? `cycle ends ${when(c.cycleEndsAt)}` : "no expiry"}</span><span>${c.source === "derived" ? "derived from %" : "from API"}</span></div></div>`;
   }
   if (ws.length && !p.credits) {
