@@ -2,8 +2,9 @@
 
 **AI subscription quotas in one command.** `subtrk` reports remaining usage for
 the plans its contributors use – today Claude Pro, Z.ai GLM Coding Plan, Alibaba
-Cloud Model Studio, Google AI Pro, OpenCode Zen, OpenRouter and the ChatGPT
-plans (via the OpenAI Codex CLI) – in one compact
+Cloud Model Studio, Google AI Pro, OpenCode Zen, OpenRouter, the ChatGPT plans
+(via the OpenAI Codex CLI) and the Kimi coding plans (via the Kimi Desktop app
+or the Kimi Code CLI) – in one compact
 view, designed first for the AI agents that work for you and second for you.
 Coverage expands as needs or requests come in: adding a provider is a contained
 change (see the [implementation guide](docs/implementation-plan.md)), and PRs

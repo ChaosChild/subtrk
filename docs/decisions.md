@@ -179,3 +179,49 @@ an agent needs (windows, `nextEvent.at` wake-ups instead of polling,
 `recheckAfter`, `error.kind`/`error.remedy`, exit codes, cache politeness) and
 tells the agent to ask the operator before any browser-opening remedy, since
 only the operator can consent to that.
+
+## D12 · Kimi – the Kimi Desktop key or the Kimi Code CLI login
+
+subtrk reads the first credential it finds: the Kimi Desktop app's scoped API
+key (`%APPDATA%\kimi-desktop\daimon-share\daimon\kimi-code-key.json`, Windows
+only) or the Kimi Code CLI's OAuth login
+(`~/.kimi-code/credentials/kimi-code.json`). Both files belong to their owning
+apps. With the desktop key it calls the app's own gateway
+(`GET agent-gw.kimi.com/coding/v1/usages`) for the plan level and the quota
+window; with the CLI login it calls the endpoint the vendor's open-source
+client uses for its `/usage` command (`GET api.kimi.com/coding/v1/usages`,
+5h/7d/monthly windows). Neither endpoint is a documented public API – the
+first is the desktop app's own host (validated live, can change), the second
+is contract-stable in the client's MIT source – the same trust level as the
+Codex login (D10). Requests carry an honest `User-Agent: subtrk`; vendor
+client identifiers are never spoofed.
+
+CLI access tokens live 15 minutes, so the probe refreshes a stale one via the
+vendor's device-flow token endpoint with the public OAuth client id. That id
+is a published constant of the vendor's open-source client, but it is kept
+out of this repo: `subtrk init` fetches it from upstream into
+`~/.subtrk/env` (`KIMI_CLIENT_ID`), the same pattern as the Google constants
+(D7). Refresh tokens may rotate, so the full updated bundle is written back
+atomically – best effort, and the probe keeps using the fresh token even if
+the write fails. A grant rejected on both auth hosts points at the owning
+tool for re-login: the module has no `refresh()` and never runs an
+interactive login. The free plan's quota numbers are unitless strings with an
+undocumented reset cycle, so they are treated as ratio inputs and the window
+kind is derived from the reset distance.
+
+## D13 · Console persistence – config.json is the single source
+
+The dashboard's provider selection and card order live in
+`~/.subtrk/config.json` (`{ enabled, order }`) – the same file `subtrk init`
+writes – not in browser storage: `subtrk serve` binds a random port each run,
+so a page's localStorage would not survive a restart. The console applies
+changes through `POST /api/config` behind the same per-run Bearer token as
+`/api/status` and `/api/refresh`; the endpoint accepts only validated
+`enabled`/`order` patches (known provider ids, at least one enabled, fixed
+literal responses) and persists them atomically. `subtrk init` and the server
+share one merge-preserving writer, so neither drops the other's keys.
+
+Ordering is a display hint only: ids missing from `order` keep registry order
+after the listed ones, so a newly added provider always appears. The console
+refuses to disable the last enabled provider (the server rejects an empty
+list with 400 as backstop).
