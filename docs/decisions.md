@@ -264,3 +264,11 @@ GET /api/config. Hiding never affects probing, the CLI, or the
 summary/timeline views. The provider-selection icon is a gear; overlapping
 with the per-provider toggle is accepted – one control answers "track it at
 all", the other "show me this class".
+
+Dragging follows the same card-key model: config `order` holds
+`"<id>"`/`"<id>:<scope>"` entries, the grid renders as one flat list ordered by
+them, and a drop posts the visible card keys in DOM order. A bare provider id
+ranks that provider's whole group (legacy configs keep working), a scoped key
+positions a single class, and the CLI's provider ordering projects from the
+first mentioning entry – so model-class cards reorder and interleave
+independently and a dragged card never drags its siblings along.

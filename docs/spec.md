@@ -185,8 +185,11 @@ Default TTLs (the policy – no user knobs in v0):
 - `~/.subtrk/config.json` – `{ "enabled": ["claude", "glm", …], "order": ["kimi",
   "claude", …], "hidden": ["google:claude-and-gpt-models", …] }`. `enabled` gates
   which providers are tracked (absent ⇒ all enabled); `order` is the optional
-  display order – listed ids come first in their given order (unknown ids and
-  duplicates dropped on read), unlisted ids keep registry order after them;
+  display order of console cards – entries are card keys (`"<providerId>"` or
+  `"<providerId>:<scope>"`; malformed entries and duplicates dropped on read).
+  A provider's rank is its first mentioning entry, so `subtrk status` still
+  orders providers; unlisted cards keep registry/payload order after the
+  listed ones;
   `hidden` is the console's hidden-card list (`"<providerId>"` or
   `"<providerId>:<scope>"`, malformed entries dropped on read) – a display hint
   that never affects probing or the CLI. All keys are written by `subtrk init`
@@ -650,8 +653,9 @@ One page for every enabled provider, served from the same cache the CLI reads.
   `/api/status` (401 on failure). The body is a JSON object carrying at least
   one of the three keys (a body with none → 400, so a typo'd key cannot
   silently no-op): `enabled` must be a non-empty array of known provider ids
-  (unknown or empty → 400); `order` must be an array of known ids (unknown →
-  400, duplicates dropped, currently-disabled ids allowed); `hidden` must be an
+  (unknown or empty → 400); `order` must be an array of valid card keys (malformed or
+  unknown-prefix → 400, duplicates dropped, currently-disabled providers
+  allowed); `hidden` must be an
   array of valid card keys (`"<providerId>"` or `"<providerId>:<scope>"`,
   malformed or unknown-prefix → 400, duplicates dropped, capped at 64).
   Unknown extra body keys are ignored; a body over the 10KB cap, or one that
@@ -683,8 +687,10 @@ One page for every enabled provider, served from the same cache the CLI reads.
   summary/timeline views. An agent-view terminal panel and auto-refresh at
   `recheckAfter` complete the page. A gear-icon menu in the header toggles
   providers on/off (the last enabled provider locks) and each card carries a
-  drag handle for reordering – both persist through `/api/config` and survive
-  restarts, and the saved `order` also governs `subtrk status` output order.
+  drag handle – cards drag **individually**, so model-class cards of one
+  provider reorder and interleave freely; the saved card-key `order` persists
+  through `/api/config`, governs the grid, and its per-provider projection
+  governs `subtrk status` output order.
 
 ## Not in v0 (parked)
 

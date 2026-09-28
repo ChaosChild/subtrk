@@ -100,12 +100,12 @@ async function readBody(req: IncomingMessage, cap = CONFIG_BODY_CAP_BYTES): Prom
   }
 }
 
-type ConfigPatch = { enabled?: ProviderId[]; order?: ProviderId[]; hidden?: string[] };
+type ConfigPatch = { enabled?: ProviderId[]; order?: string[]; hidden?: string[] };
 
 // Pure: validate a parsed /api/config body. Fixed-literal errors; unknown extra
-// keys are ignored. enabled: all ids known, ≥1. order: all ids known, deduped,
-// may name currently-disabled providers. hidden: valid card keys
-// ("<providerId>" or "<providerId>:<scope>"), deduped, capped at 64.
+// keys are ignored. enabled: all ids known, ≥1. order: valid card keys
+// ("<providerId>" or "<providerId>:<scope>"), deduped, may name
+// currently-disabled providers. hidden: valid card keys, deduped, capped at 64.
 function parseConfigPatch(raw: unknown): { patch: ConfigPatch } | { error: string } {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { error: "invalid config body" };
   const body = raw as { enabled?: unknown; order?: unknown; hidden?: unknown };
@@ -121,7 +121,9 @@ function parseConfigPatch(raw: unknown): { patch: ConfigPatch } | { error: strin
     patch.enabled = [...body.enabled];
   }
   if (body.order !== undefined) {
-    if (!Array.isArray(body.order) || !body.order.every(known)) return { error: "unknown provider id in order" };
+    if (!Array.isArray(body.order) || !body.order.every((k) => isValidCardKey(k))) {
+      return { error: "invalid card key in order" };
+    }
     patch.order = [...new Set(body.order)];
   }
   if (body.hidden !== undefined) {
