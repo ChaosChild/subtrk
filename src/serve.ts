@@ -18,15 +18,15 @@ import {
   ALL_PROVIDER_IDS,
   collectStatus,
   errorMessage,
+  isValidCardKey,
+  loadConfig,
   type ProviderId,
   type ProviderModule,
   type RefreshResult,
   removeCachedProvider,
-  loadConfig,
   SUBTRK_DIR,
   saveConfig,
   scrubValue,
-  isValidCardKey,
 } from "./core.ts";
 import { allProviders, refreshableProviders } from "./providers/index.ts";
 
@@ -235,7 +235,11 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
           }
           try {
             const cfg = loadConfig(deps.subtrkDir ?? SUBTRK_DIR);
-            respond(res, 200, JSON.stringify({ enabled: cfg.enabled, order: cfg.order ?? [], hidden: cfg.hidden ?? [] }));
+            respond(
+              res,
+              200,
+              JSON.stringify({ enabled: cfg.enabled, order: cfg.order ?? [], hidden: cfg.hidden ?? [] }),
+            );
           } catch (err) {
             console.error(`subtrk: ${errorMessage(err)}`);
             respond(res, 500, JSON.stringify({ error: "config unavailable" }));
@@ -243,7 +247,9 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
           return;
         }
         if (req.method !== "POST") {
-          respond(res, 405, JSON.stringify({ error: "method not allowed" }), "application/json", { allow: "GET, POST" });
+          respond(res, 405, JSON.stringify({ error: "method not allowed" }), "application/json", {
+            allow: "GET, POST",
+          });
           return;
         }
         if (!tokenOk(req.headers.authorization, token)) {
