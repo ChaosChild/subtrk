@@ -24,6 +24,7 @@ import {
   parseAntigravityTokenFile,
   parseGeminiCreds,
   parseGoogleSummary,
+  parseLsCandidates,
   parseMintResponse,
   slugify,
 } from "../src/providers/google.ts";
@@ -310,6 +311,82 @@ test("google parseGoogleSummary: missing groups -> null, empty groups -> empty a
   assert.equal(parseGoogleSummary({}), null);
   assert.equal(parseGoogleSummary({ groups: "nope" }), null);
   assert.deepEqual(parseGoogleSummary({ groups: [] }), []);
+});
+
+// Live dashboard shape (captured 2026-09-28): the language server nests the
+// summary under `response`, and a hit weekly limit disables the 5h bucket.
+test("google parseGoogleSummary unwraps the language-server envelope and skips disabled buckets", () => {
+  const local = {
+    response: {
+      groups: [
+        {
+          displayName: "Gemini Models",
+          buckets: [
+            {
+              bucketId: "gemini-weekly",
+              displayName: "Weekly Limit Remaining",
+              window: "weekly",
+              remainingFraction: 0,
+              resetTime: "2026-09-30T09:34:02Z",
+            },
+            {
+              bucketId: "gemini-5h",
+              displayName: "Five Hour Limit Remaining",
+              window: "5h",
+              remainingFraction: 1,
+              disabled: true,
+              resetTime: "2026-09-28T11:55:57Z",
+            },
+          ],
+        },
+        {
+          displayName: "Claude and GPT models",
+          buckets: [
+            { bucketId: "3p-weekly", window: "weekly", remainingFraction: 1, resetTime: "2026-10-05T06:55:57Z" },
+            { bucketId: "3p-5h", window: "5h", remainingFraction: 1, resetTime: "2026-09-28T11:55:57Z" },
+          ],
+        },
+      ],
+    },
+  };
+  assert.deepEqual(parseGoogleSummary(local), [
+    { kind: "7d", scope: "gemini-models", remainingFraction: 0, resetsAt: "2026-09-30T09:34:02.000Z" },
+    { kind: "7d", scope: "claude-and-gpt-models", remainingFraction: 1, resetsAt: "2026-10-05T06:55:57.000Z" },
+    { kind: "5h", scope: "claude-and-gpt-models", remainingFraction: 1, resetsAt: "2026-09-28T11:55:57.000Z" },
+  ]);
+  // A `response` wrapper without groups is not silently unwrapped to something else.
+  assert.equal(parseGoogleSummary({ response: { nope: true } }), null);
+});
+
+test("google parseLsCandidates validates pid/csrf/ports, dedupes, tolerates PS quirks", () => {
+  assert.deepEqual(parseLsCandidates(""), []);
+  assert.deepEqual(parseLsCandidates("   \n"), []);
+  assert.deepEqual(parseLsCandidates("not json"), []);
+  assert.deepEqual(parseLsCandidates("[]"), []);
+
+  const good = { pid: 7052, csrf: "05148b8e-efb7-4e41-a058-a1dea9139319", ports: [49184, 49183, 49184] };
+  assert.deepEqual(parseLsCandidates(JSON.stringify(good)), [
+    { pid: 7052, csrf: "05148b8e-efb7-4e41-a058-a1dea9139319", ports: [49184, 49183] },
+  ]);
+  assert.deepEqual(parseLsCandidates(JSON.stringify([good])), parseLsCandidates(JSON.stringify(good)));
+
+  assert.deepEqual(
+    parseLsCandidates(
+      JSON.stringify([
+        { pid: 1, csrf: "x", ports: [0, 70_000, "80", 443] },
+        { pid: 2, csrf: "", ports: [80] },
+        { pid: -3, csrf: "x", ports: [80] },
+        { pid: 0, csrf: "x", ports: [80] },
+        { pid: "4", csrf: "x", ports: [80] },
+        { pid: 5, csrf: "x" },
+        { pid: 6, csrf: "x", ports: "nope" },
+        { pid: 7, csrf: "x", ports: [] },
+        "junk",
+        null,
+      ]),
+    ),
+    [{ pid: 1, csrf: "x", ports: [443] }],
+  );
 });
 
 test("google parseGoogleSummary: bucketId-only bucket derives its kind, kindless bucket is skipped", () => {

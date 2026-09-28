@@ -225,3 +225,20 @@ Ordering is a display hint only: ids missing from `order` keep registry order
 after the listed ones, so a newly added provider always appears. The console
 refuses to disable the last enabled provider (the server rejects an empty
 list with 400 as backstop).
+
+## D14 · Google – the local language server is the quota source, REST is a labeled fallback
+
+Google keeps separate quota domains per surface for one account. The remote
+`retrieveUserQuotaSummary` REST call answers from the Code Assist domain: live
+checks (2026-09-28) returned full buckets whose reset times sit fetch+5h/+7d to
+the second – synthetic values that never reflected Antigravity usage, while the
+Antigravity desktop app showed the weekly Gemini limit exhausted. The
+authoritative source is therefore the desktop app's local language server: the
+same `RetrieveUserQuotaSummary` Connect RPC the Model Quota panel renders, with
+the process command line (`--csrf_token`) and 127.0.0.1 listeners read through
+a fixed-literal PowerShell script. It needs no OAuth material. When the app is
+not running (or off-Windows), the probe falls back to the remote REST call and
+labels the result as the Code Assist view instead of presenting it as the
+dashboard's numbers. The same evidence explained the third-party trackers:
+CLIProxyAPI agreed with reality because it counted requests and 429s locally,
+never because it read a remote summary.
