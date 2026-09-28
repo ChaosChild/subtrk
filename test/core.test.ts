@@ -225,6 +225,38 @@ describe("config", () => {
       ["google", "claude", "glm"],
     );
   });
+
+  it("collectStatus: a scoped card key ranks its whole provider; bare ids still work", async (t) => {
+    const dir = tempDir();
+    t.after(cleanup(dir));
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ order: ["google:gemini-models", "kimi"] }));
+    const mod = (id: ProviderModule["id"]): ProviderModule => ({
+      id,
+      ttlMs: 0,
+      probe: async () => ({ id, ok: true, stale: false, fetchedAt: new Date().toISOString() }),
+    });
+    const out = await collectStatus({
+      subtrkDir: dir,
+      providers: [mod("claude"), mod("glm"), mod("google"), mod("kimi")],
+    });
+    assert.deepEqual(
+      out.out.providers.map((p) => p.id),
+      ["google", "kimi", "claude", "glm"],
+      "google ranks first via its scoped key, kimi second, unlisted keep registry order",
+    );
+  });
+
+  it("order accepts scoped card keys alongside bare ids and drops malformed entries", (t) => {
+    const dir = tempDir();
+    t.after(cleanup(dir));
+    writeFileSync(
+      join(dir, "config.json"),
+      JSON.stringify({ order: ["google:gemini-models", "claude", "google:claude-and-gpt-models", "nope:x"] }),
+    );
+    assert.deepEqual(loadConfig(dir).order, ["google:gemini-models", "claude", "google:claude-and-gpt-models"]);
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ order: ["claude", 7] }));
+    assert.equal(loadConfig(dir).order, undefined, "a non-string entry invalidates the whole list");
+  });
 });
 
 describe("cache: fresh / stale / probe math", () => {

@@ -171,7 +171,7 @@ function sleep(ms: number): Promise<void> {
 
 export interface SubtrkConfig {
   enabled: ProviderId[];
-  order?: ProviderId[]; // display order – listed ids first, rest keeps registry order
+  order?: string[]; // display order of cards – "<id>" or "<id>:<scope>", unlisted keep registry order
   hidden?: string[]; // hidden console cards: "<providerId>" or "<providerId>:<scope>"
 }
 
@@ -184,12 +184,14 @@ export function isValidCardKey(value: unknown): value is string {
   return m !== null && (ALL_PROVIDER_IDS as readonly string[]).includes(m[1]);
 }
 
-// Known ids only, duplicates dropped; a non-array of strings yields undefined
-// (order is an optional hint, never a hard failure like enabled).
-function parseOrder(value: unknown): ProviderId[] | undefined {
+// Valid card keys only (bare provider ids and "<id>:<scope>" entries alike),
+// duplicates dropped; a non-array of strings yields undefined (order is an
+// optional hint, never a hard failure like enabled). Bare ids order that
+// provider's whole card group; scoped keys order individual model-class cards.
+function parseOrder(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.some((e) => typeof e !== "string")) return undefined;
-  return [...new Set(value.filter((id): id is ProviderId => (ALL_PROVIDER_IDS as readonly string[]).includes(id)))];
+  return [...new Set(value.filter((k) => isValidCardKey(k)))];
 }
 
 export function loadConfig(subtrkDir: string = SUBTRK_DIR): SubtrkConfig {
@@ -236,7 +238,7 @@ function parseHidden(value: unknown): string[] | undefined {
 // writeCacheEntry discipline). Throws on write failure – callers decide.
 export function saveConfig(
   subtrkDir: string,
-  patch: { enabled?: ProviderId[]; order?: ProviderId[]; hidden?: string[] },
+  patch: { enabled?: ProviderId[]; order?: string[]; hidden?: string[] },
 ): void {
   const path = join(subtrkDir, "config.json");
   let file: Record<string, unknown> = {};
@@ -707,12 +709,20 @@ export async function collectStatus(
   const registry = opts.providers ?? (await import("./providers/index.ts")).allProviders;
   const requested = opts.requested !== undefined && opts.requested.length > 0 ? new Set<string>(opts.requested) : null;
   const selected = registry.filter((m) => cfg.enabled.includes(m.id) && (!requested || requested.has(m.id)));
-  // Configured display order: listed ids first by index, unlisted keep registry
-  // order after them (stable sort). Applied to filtered lists too – harmless.
+  // Configured display order: entries are card keys ("<id>" or "<id>:<scope>").
+  // A provider's rank is its first mentioning entry, so a scoped key hoists the
+  // whole provider; unlisted providers keep registry order after them (stable
+  // sort). Applied to filtered lists too – harmless.
   if (cfg.order && cfg.order.length > 0) {
-    const rank = new Map(cfg.order.map((id, i) => [id, i] as const));
-    const last = cfg.order.length;
-    selected.sort((a, b) => (rank.get(a.id) ?? last) - (rank.get(b.id) ?? last));
+    const ord = cfg.order;
+    const providerRank = (id: string): number => {
+      for (let i = 0; i < ord.length; i++) {
+        const key = ord[i];
+        if (key === id || key.startsWith(`${id}:`)) return i;
+      }
+      return ord.length;
+    };
+    selected.sort((a, b) => providerRank(a.id) - providerRank(b.id));
   }
   if (selected.length === 0) {
     throw new Error("no providers selected – check ~/.subtrk/config.json or --provider");

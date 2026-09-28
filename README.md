@@ -48,9 +48,9 @@ that reports several model classes (Google's Gemini and Claude/GPT, for example)
 renders one card per class. When a provider's error says it is refreshable, its
 card shows a **Refresh now** button that re-runs that provider's own refresh
 action on the host. A gear-icon menu in the header toggles providers on/off, an
-eye-icon menu shows or hides individual cards, and every card has an × to hide
-itself – all persist across restarts (saved to `~/.subtrk/config.json`, like
-`subtrk init`).
+eye-icon menu shows or hides individual cards, every card has an × to hide
+itself, and cards drag individually into any order – all persist across
+restarts (saved to `~/.subtrk/config.json`, like `subtrk init`).
 
 ![Web console](docs/img/console.png)
 

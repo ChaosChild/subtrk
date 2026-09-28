@@ -388,38 +388,63 @@ function cardBadge(p, ws, isFirst) {
 // per scope; single-class providers render one provider card exactly as before.
 // Credits, errors, notes and the footer are provider-level and ride the first
 // card. Hiding is display-only: hidden classes keep being probed and still
-// feed the summary, timeline and resets table.
-function providerCardsHTML(p) {
+// feed the summary, timeline and resets table. Cards are ordered independently
+// per card key (config `order` holds "<id>"/"<id>:<scope>" entries) – dragging
+// one model-class card never moves its siblings.
+let ORDER = []; // card keys in display order (config.json `order`) – display hint only
+
+function cardRank(key) {
+  const i = ORDER.indexOf(key);
+  if (i >= 0) return i;
+  const j = ORDER.indexOf(key.split(":")[0]); // a bare provider-id entry ranks its whole group
+  return j >= 0 ? j : Number.MAX_SAFE_INTEGER; // unlisted cards keep payload order, after listed ones
+}
+
+function providerCardHTML(p, g, first, multi) {
   const m = META[p.id] || { name: p.id, color: "#6b7280", ttl: 0 };
-  const all = scopeGroups(p);
-  const multi = all.length > 1;
-  const groups = all.filter(g => !HIDDEN.has(g.key));
-  return groups.map((g, i) => {
-    const first = i === 0;
-    const worst = Math.max(0, ...g.ws.map(used));
-    let body = "";
-    if (first && p.credits) {
-      const c = p.credits, pct = c.total != null ? clampPct((1 - Number(c.remaining) / Number(c.total)) * 100) : null;
-      body += `<div><div class="label">${c.unit === "usd" ? "Balance" : "Credits left"}</div>
-        <div class="credits"><span class="big">${money(c.remaining, c.unit)}</span>${c.total != null ? `<span class="of">/ ${money(c.total, c.unit)}</span>` : ""}</div>
-        ${pct != null ? `<div class="wtop" style="margin-top:6px">${g.ws.length ? `<span class="wkind">${esc(g.ws[0].kind)}</span>` : ""}<span class="wpct">${pct.toFixed(0)}% <small>used</small></span></div><div class="track" style="margin-top:5px" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct.toFixed(0)}" aria-label="credits used"><div class="fill ${level(pct)}" style="width:${pct}%"></div></div>` : ""}
-        <div class="wreset" style="margin-top:5px"><span>${c.cycleEndsAt ? `cycle ends ${when(c.cycleEndsAt)}` : "no expiry"}</span><span>${c.source === "derived" ? "derived from %" : "from API"}</span></div></div>`;
+  const worst = Math.max(0, ...g.ws.map(used));
+  let body = "";
+  if (first && p.credits) {
+    const c = p.credits, pct = c.total != null ? clampPct((1 - Number(c.remaining) / Number(c.total)) * 100) : null;
+    body += `<div><div class="label">${c.unit === "usd" ? "Balance" : "Credits left"}</div>
+      <div class="credits"><span class="big">${money(c.remaining, c.unit)}</span>${c.total != null ? `<span class="of">/ ${money(c.total, c.unit)}</span>` : ""}</div>
+      ${pct != null ? `<div class="wtop" style="margin-top:6px">${g.ws.length ? `<span class="wkind">${esc(g.ws[0].kind)}</span>` : ""}<span class="wpct">${pct.toFixed(0)}% <small>used</small></span></div><div class="track" style="margin-top:5px" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct.toFixed(0)}" aria-label="credits used"><div class="fill ${level(pct)}" style="width:${pct}%"></div></div>` : ""}
+      <div class="wreset" style="margin-top:5px"><span>${c.cycleEndsAt ? `cycle ends ${when(c.cycleEndsAt)}` : "no expiry"}</span><span>${c.source === "derived" ? "derived from %" : "from API"}</span></div></div>`;
+  }
+  if (g.ws.length && !p.credits) body += g.ws.map(windowHTML).join("");
+  if (first && p.error) {
+    const remedy = p.error.remedy ? `<div class="h"><code>${esc(p.error.remedy)}</code></div>` : "";
+    const ctl = p.refreshable ? `<div class="rrow"><button type="button" class="btn-refresh" data-refresh="${esc(p.id)}">Refresh now</button><span class="rnote"></span></div>` : "";
+    body += `<div class="err"><span class="k">${esc(p.error.kind)}</span> – ${esc(p.error.message)}${p.error.hint ? `<div class="h">${esc(p.error.hint)}</div>` : ""}${remedy}${ctl}</div>`;
+  }
+  if (first && p.note) body += `<div class="note">${esc(p.note)}</div>`;
+  const hideLabel = multi ? "Hide this model class card" : `Hide ${m.name}`;
+  return `<article class="card prov ${worst >= 95 ? "crit" : ""}" draggable="true" data-key="${esc(g.key)}">
+    <div class="phead"><span class="drag" title="Drag to reorder" aria-hidden="true">⠿</span><div class="pmark" style="background:${m.color}">${esc(String(p.id).slice(0, 2).toUpperCase())}</div>
+      <div><div class="pname">${esc(m.name)}${multi && g.scope ? ` · ${esc(prettyScope(g.scope))}` : ""}</div><div class="pplan">${esc(p.plan || "")}</div></div>${cardBadge(p, g.ws, first)}<button type="button" class="cardx" data-x="${esc(g.key)}" data-multi="${multi ? "1" : ""}" aria-label="${esc(hideLabel)}" title="${esc(hideLabel)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div>
+    ${body}
+    ${first ? `<div class="pfoot"><span>fetched <b data-ago="${esc(p.fetchedAt)}"></b></span><span>ttl <b>${m.ttl ? m.ttl + "s" : "none"}</b></span><span>id <b>${esc(p.id)}</b></span></div>` : ""}
+  </article>`;
+}
+
+// The grid is a flat, independently draggable card list: every visible card
+// from every enabled provider, ordered by its card key's position in `order`
+// (a bare provider-id entry ranks that provider's whole group; unlisted cards
+// keep payload order after the listed ones). Stable sort, so ties preserve the
+// payload sequence.
+function allCardsHTML() {
+  const cards = [];
+  for (const p of STATUS.providers) {
+    const all = scopeGroups(p);
+    const multi = all.length > 1;
+    let first = true;
+    for (const g of all) {
+      if (HIDDEN.has(g.key)) continue;
+      cards.push({ key: g.key, html: providerCardHTML(p, g, first, multi) });
+      first = false;
     }
-    if (g.ws.length && !p.credits) body += g.ws.map(windowHTML).join("");
-    if (first && p.error) {
-      const remedy = p.error.remedy ? `<div class="h"><code>${esc(p.error.remedy)}</code></div>` : "";
-      const ctl = p.refreshable ? `<div class="rrow"><button type="button" class="btn-refresh" data-refresh="${esc(p.id)}">Refresh now</button><span class="rnote"></span></div>` : "";
-      body += `<div class="err"><span class="k">${esc(p.error.kind)}</span> – ${esc(p.error.message)}${p.error.hint ? `<div class="h">${esc(p.error.hint)}</div>` : ""}${remedy}${ctl}</div>`;
-    }
-    if (first && p.note) body += `<div class="note">${esc(p.note)}</div>`;
-    const hideLabel = multi ? "Hide this model class card" : `Hide ${m.name}`;
-    return `<article class="card prov ${worst >= 95 ? "crit" : ""}" draggable="true" data-id="${esc(p.id)}">
-      <div class="phead"><span class="drag" title="Drag to reorder" aria-hidden="true">⠿</span><div class="pmark" style="background:${m.color}">${esc(String(p.id).slice(0, 2).toUpperCase())}</div>
-        <div><div class="pname">${esc(m.name)}${multi && g.scope ? ` · ${esc(prettyScope(g.scope))}` : ""}</div><div class="pplan">${esc(p.plan || "")}</div></div>${cardBadge(p, g.ws, first)}<button type="button" class="cardx" data-x="${esc(g.key)}" data-multi="${multi ? "1" : ""}" aria-label="${esc(hideLabel)}" title="${esc(hideLabel)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div>
-      ${body}
-      ${first ? `<div class="pfoot"><span>fetched <b data-ago="${esc(p.fetchedAt)}"></b></span><span>ttl <b>${m.ttl ? m.ttl + "s" : "none"}</b></span><span>id <b>${esc(p.id)}</b></span></div>` : ""}
-    </article>`;
-  }).join("");
+  }
+  return cards.sort((a, b) => cardRank(a.key) - cardRank(b.key)).map(c => c.html).join("");
 }
 
 function allWindows() {
@@ -502,7 +527,7 @@ function termHTML() {
 
 function renderAll() {
   $("summary").innerHTML = summaryHTML();
-  $("providers").innerHTML = STATUS.providers.map(providerCardsHTML).join("");
+  $("providers").innerHTML = allCardsHTML();
   $("timeline").innerHTML = timelineHTML();
   document.querySelector("#resets tbody").innerHTML = resetsHTML();
   $("term").innerHTML = termHTML();
@@ -561,6 +586,7 @@ async function refresh() {
       if (cres.ok) {
         const cfg = await cres.json();
         HIDDEN = new Set(Array.isArray(cfg.hidden) ? cfg.hidden : []);
+        ORDER = Array.isArray(cfg.order) ? cfg.order : [];
       }
     } catch {}
     render(data);
@@ -821,13 +847,13 @@ grid.addEventListener("mousedown", (e) => {
   handleArmed = e.target instanceof Element && e.target.closest(".drag") !== null;
 });
 grid.addEventListener("dragstart", (e) => {
-  const card = e.target instanceof Element ? e.target.closest("article[data-id]") : null;
+  const card = e.target instanceof Element ? e.target.closest("article[data-key]") : null;
   if (!handleArmed || !card) { e.preventDefault(); return; }
   dragCard = card;
   card.classList.add("dragging");
   if (e.dataTransfer) {
     e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", card.dataset.id ?? "");
+    e.dataTransfer.setData("text/plain", card.dataset.key ?? "");
   }
 });
 grid.addEventListener("dragover", (e) => {
@@ -838,8 +864,9 @@ grid.addEventListener("dragover", (e) => {
   // whose midpoint sits right of it on the same row, receives the dragged card
   // before itself; past all of them the card appends. Grid auto-flow does the
   // snapping – no coordinate math beyond this scan, and the 2-col/1-col media
-  // queries keep working.
-  for (const card of grid.querySelectorAll("article[data-id]")) {
+  // queries keep working. Cards move individually – siblings from the same
+  // multi-class provider stay put.
+  for (const card of grid.querySelectorAll("article[data-key]")) {
     if (card === dragCard) continue;
     const r = card.getBoundingClientRect();
     if (e.clientY < r.top || (e.clientY <= r.bottom && e.clientX < r.left + r.width / 2)) {
@@ -855,9 +882,10 @@ grid.addEventListener("dragend", () => {
   dragCard.classList.remove("dragging");
   dragCard = null;
   handleArmed = false;
-  // DOM order is the new order; the server drops disabled/unknown ids on read
-  // and the next render() shows the saved sequence.
-  void postConfig({ order: [...grid.querySelectorAll("article[data-id]")].map(c => c.dataset.id ?? "") });
+  // DOM order is the new order, as card keys ("<id>" or "<id>:<scope>"); the
+  // server drops malformed entries on read and the next render() shows the
+  // saved sequence.
+  void postConfig({ order: [...grid.querySelectorAll("article[data-key]")].map(c => c.dataset.key ?? "") });
 });
 
 // A fresh URL (new fragment token) opened in this tab heals the page without a manual reload.

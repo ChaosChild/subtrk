@@ -429,16 +429,23 @@ describe("POST /api/config", () => {
     });
   });
 
-  it("200 order-only write; duplicates in order are dropped", async () => {
+  it("200 order-only write; duplicates dropped; scoped card keys accepted", async () => {
     const subtrkDir = mkdtempSync(join(tmpdir(), "subtrk-serve-"));
     await withServer({ subtrkDir }, async (h) => {
-      const r = await postConfig(h, JSON.stringify({ order: ["kimi", "claude", "kimi"] }));
+      const r = await postConfig(h, JSON.stringify({ order: ["kimi", "claude", "kimi", "google:gemini-models"] }));
       assert.equal(r.status, 200);
       assert.deepEqual(JSON.parse(r.body), { ok: true });
       assert.deepEqual(JSON.parse(readFileSync(join(subtrkDir, "config.json"), "utf8")), {
-        order: ["kimi", "claude"],
+        order: ["kimi", "claude", "google:gemini-models"],
       });
       noCors(r.headers);
+
+      const bad = await postConfig(h, JSON.stringify({ order: ["claude", "nope:x"] }));
+      assert.equal(bad.status, 400);
+      assert.deepEqual(JSON.parse(bad.body), { error: "invalid card key in order" });
+      assert.deepEqual(JSON.parse(readFileSync(join(subtrkDir, "config.json"), "utf8")), {
+        order: ["kimi", "claude", "google:gemini-models"],
+      });
     });
   });
 
