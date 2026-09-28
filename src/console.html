@@ -77,6 +77,11 @@ header { border-bottom: 1px solid var(--border); background: var(--surface); pos
 .iconbtn { border: 1px solid var(--border); background: var(--surface); color: var(--text-2); width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; cursor: pointer; }
 .iconbtn:hover { color: var(--text); border-color: var(--border-strong); }
 .iconbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.menuwrap { position: relative; display: inline-flex; }
+.pdd-empty { padding: 10px 12px; font-size: 12.5px; color: var(--text-3); white-space: nowrap; }
+.cardx { border: 0; background: transparent; color: var(--text-3); width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; cursor: pointer; flex: none; }
+.cardx:hover { color: var(--crit); background: var(--surface-2); }
+.cardx:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .pdd { position: absolute; top: calc(100% + 8px); right: 0; z-index: 6; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 6px; min-width: 190px; display: none; }
 .pdd:not([hidden]) { display: block; }
 .pdd label { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 7px; font-size: 13px; cursor: pointer; white-space: nowrap; }
@@ -204,10 +209,18 @@ footer code { font-family: var(--mono); color: var(--text-2); }
       <span class="sep"></span>
       <span>next refresh <b class="num" id="recheck">…</b></span>
     </div>
-    <button class="iconbtn" id="providersToggle" aria-label="Show or hide providers" aria-expanded="false" title="Show or hide providers">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-    </button>
-    <div class="pdd" id="providersMenu" hidden></div>
+    <span class="menuwrap">
+      <button class="iconbtn" id="providersToggle" aria-label="Provider settings" aria-expanded="false" title="Provider settings – enable or disable providers">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
+      <div class="pdd" id="providersMenu" hidden></div>
+    </span>
+    <span class="menuwrap">
+      <button class="iconbtn" id="cardsToggle" aria-label="Show or hide cards" aria-expanded="false" title="Show or hide cards – per model class where a provider reports several">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+      </button>
+      <div class="pdd" id="cardsMenu" hidden></div>
+    </span>
     <button class="iconbtn" id="theme" aria-label="Toggle colour theme" title="Toggle colour theme">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
     </button>
@@ -330,16 +343,6 @@ const bannerEl = $("banner");
 function showBanner(kind, msg) { bannerEl.className = "banner " + kind; bannerEl.textContent = msg; bannerEl.hidden = false; }
 function clearBanner() { bannerEl.hidden = true; bannerEl.textContent = ""; }
 
-function badge(p) {
-  if (p.error && p.stale) return `<span class="badge b-warn">stale · ${esc(p.error.kind)}</span>`;
-  if (p.error) return `<span class="badge b-crit">${esc(p.error.kind)}</span>`;
-  if (!p.windows && !p.credits) return `<span class="badge b-muted">signals only</span>`;
-  const worst = Math.max(0, ...(Array.isArray(p.windows) ? p.windows : []).map(used));
-  return worst >= 95 ? `<span class="badge b-crit">window exhausted</span>`
-       : worst >= 80 ? `<span class="badge b-warn">running low</span>`
-       : `<span class="badge b-ok">healthy</span>`;
-}
-
 function windowHTML(w) {
   const u = used(w), lv = level(u);
   return `<div class="win">
@@ -349,37 +352,74 @@ function windowHTML(w) {
   </div>`;
 }
 
-function providerHTML(p) {
-  const m = META[p.id] || { name: p.id, color: "#6b7280", ttl: 0 };
+const prettyScope = s => s.split("-").join(" ");
+
+let HIDDEN = new Set(); // hidden card keys (config.json `hidden`) – display hint only
+
+// Split a provider's windows into display groups, one per reported model class
+// (scope); a provider without scopes gets a single provider-level group. The
+// key doubles as the config.json `hidden` card key: "<id>" or "<id>:<scope>".
+function scopeGroups(p) {
   const ws = Array.isArray(p.windows) ? p.windows : [];
+  if (ws.length === 0) return [{ key: p.id, scope: null, ws: [] }];
+  const groups = [];
+  const byKey = new Map();
+  for (const w of ws) {
+    const key = w.scope ? `${p.id}:${w.scope}` : p.id;
+    let g = byKey.get(key);
+    if (!g) { g = { key, scope: w.scope || null, ws: [] }; byKey.set(key, g); groups.push(g); }
+    g.ws.push(w);
+  }
+  return groups;
+}
+
+function cardBadge(p, ws, isFirst) {
+  if (p.error && p.stale) return `<span class="badge b-warn">stale · ${esc(p.error.kind)}</span>`;
+  if (isFirst && p.error) return `<span class="badge b-crit">${esc(p.error.kind)}</span>`;
+  if (!ws.length && isFirst && !p.windows && !p.credits) return `<span class="badge b-muted">signals only</span>`;
   const worst = Math.max(0, ...ws.map(used));
-  let body = "";
-  if (p.credits) {
-    const c = p.credits, pct = c.total != null ? clampPct((1 - Number(c.remaining) / Number(c.total)) * 100) : null;
-    body += `<div><div class="label">${c.unit === "usd" ? "Balance" : "Credits left"}</div>
-      <div class="credits"><span class="big">${money(c.remaining, c.unit)}</span>${c.total != null ? `<span class="of">/ ${money(c.total, c.unit)}</span>` : ""}</div>
-      ${pct != null ? `<div class="wtop" style="margin-top:6px">${ws.length ? `<span class="wkind">${esc(ws[0].kind)}</span>` : ""}<span class="wpct">${pct.toFixed(0)}% <small>used</small></span></div><div class="track" style="margin-top:5px" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct.toFixed(0)}" aria-label="credits used"><div class="fill ${level(pct)}" style="width:${pct}%"></div></div>` : ""}
-      <div class="wreset" style="margin-top:5px"><span>${c.cycleEndsAt ? `cycle ends ${when(c.cycleEndsAt)}` : "no expiry"}</span><span>${c.source === "derived" ? "derived from %" : "from API"}</span></div></div>`;
-  }
-  if (ws.length && !p.credits) {
-    let scope = null;
-    for (const w of ws) {
-      if (w.scope && w.scope !== scope) { scope = w.scope; body += `<div class="scope">${esc(scope)}</div>`; }
-      body += windowHTML(w);
+  return worst >= 95 ? `<span class="badge b-crit">window exhausted</span>`
+       : worst >= 80 ? `<span class="badge b-warn">running low</span>`
+       : `<span class="badge b-ok">healthy</span>`;
+}
+
+// One card per model class: a multi-class provider (windows carrying distinct
+// scopes – Google today, any aggregator-shaped provider later) renders a card
+// per scope; single-class providers render one provider card exactly as before.
+// Credits, errors, notes and the footer are provider-level and ride the first
+// card. Hiding is display-only: hidden classes keep being probed and still
+// feed the summary, timeline and resets table.
+function providerCardsHTML(p) {
+  const m = META[p.id] || { name: p.id, color: "#6b7280", ttl: 0 };
+  const all = scopeGroups(p);
+  const multi = all.length > 1;
+  const groups = all.filter(g => !HIDDEN.has(g.key));
+  return groups.map((g, i) => {
+    const first = i === 0;
+    const worst = Math.max(0, ...g.ws.map(used));
+    let body = "";
+    if (first && p.credits) {
+      const c = p.credits, pct = c.total != null ? clampPct((1 - Number(c.remaining) / Number(c.total)) * 100) : null;
+      body += `<div><div class="label">${c.unit === "usd" ? "Balance" : "Credits left"}</div>
+        <div class="credits"><span class="big">${money(c.remaining, c.unit)}</span>${c.total != null ? `<span class="of">/ ${money(c.total, c.unit)}</span>` : ""}</div>
+        ${pct != null ? `<div class="wtop" style="margin-top:6px">${g.ws.length ? `<span class="wkind">${esc(g.ws[0].kind)}</span>` : ""}<span class="wpct">${pct.toFixed(0)}% <small>used</small></span></div><div class="track" style="margin-top:5px" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct.toFixed(0)}" aria-label="credits used"><div class="fill ${level(pct)}" style="width:${pct}%"></div></div>` : ""}
+        <div class="wreset" style="margin-top:5px"><span>${c.cycleEndsAt ? `cycle ends ${when(c.cycleEndsAt)}` : "no expiry"}</span><span>${c.source === "derived" ? "derived from %" : "from API"}</span></div></div>`;
     }
-  }
-  if (p.error) {
-    const remedy = p.error.remedy ? `<div class="h"><code>${esc(p.error.remedy)}</code></div>` : "";
-    const ctl = p.refreshable ? `<div class="rrow"><button type="button" class="btn-refresh" data-refresh="${esc(p.id)}">Refresh now</button><span class="rnote"></span></div>` : "";
-    body += `<div class="err"><span class="k">${esc(p.error.kind)}</span> – ${esc(p.error.message)}${p.error.hint ? `<div class="h">${esc(p.error.hint)}</div>` : ""}${remedy}${ctl}</div>`;
-  }
-  if (p.note) body += `<div class="note">${esc(p.note)}</div>`;
-  return `<article class="card prov ${worst >= 95 ? "crit" : ""}" draggable="true" data-id="${esc(p.id)}">
-    <div class="phead"><span class="drag" title="Drag to reorder" aria-hidden="true">⠿</span><div class="pmark" style="background:${m.color}">${esc(String(p.id).slice(0, 2).toUpperCase())}</div>
-      <div><div class="pname">${esc(m.name)}</div><div class="pplan">${esc(p.plan || "")}</div></div>${badge(p)}</div>
-    ${body}
-    <div class="pfoot"><span>fetched <b data-ago="${esc(p.fetchedAt)}"></b></span><span>ttl <b>${m.ttl ? m.ttl + "s" : "none"}</b></span><span>id <b>${esc(p.id)}</b></span></div>
-  </article>`;
+    if (g.ws.length && !p.credits) body += g.ws.map(windowHTML).join("");
+    if (first && p.error) {
+      const remedy = p.error.remedy ? `<div class="h"><code>${esc(p.error.remedy)}</code></div>` : "";
+      const ctl = p.refreshable ? `<div class="rrow"><button type="button" class="btn-refresh" data-refresh="${esc(p.id)}">Refresh now</button><span class="rnote"></span></div>` : "";
+      body += `<div class="err"><span class="k">${esc(p.error.kind)}</span> – ${esc(p.error.message)}${p.error.hint ? `<div class="h">${esc(p.error.hint)}</div>` : ""}${remedy}${ctl}</div>`;
+    }
+    if (first && p.note) body += `<div class="note">${esc(p.note)}</div>`;
+    const hideLabel = multi ? "Hide this model class card" : `Hide ${m.name}`;
+    return `<article class="card prov ${worst >= 95 ? "crit" : ""}" draggable="true" data-id="${esc(p.id)}">
+      <div class="phead"><span class="drag" title="Drag to reorder" aria-hidden="true">⠿</span><div class="pmark" style="background:${m.color}">${esc(String(p.id).slice(0, 2).toUpperCase())}</div>
+        <div><div class="pname">${esc(m.name)}${multi && g.scope ? ` · ${esc(prettyScope(g.scope))}` : ""}</div><div class="pplan">${esc(p.plan || "")}</div></div>${cardBadge(p, g.ws, first)}<button type="button" class="cardx" data-x="${esc(g.key)}" data-multi="${multi ? "1" : ""}" aria-label="${esc(hideLabel)}" title="${esc(hideLabel)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div>
+      ${body}
+      ${first ? `<div class="pfoot"><span>fetched <b data-ago="${esc(p.fetchedAt)}"></b></span><span>ttl <b>${m.ttl ? m.ttl + "s" : "none"}</b></span><span>id <b>${esc(p.id)}</b></span></div>` : ""}
+    </article>`;
+  }).join("");
 }
 
 function allWindows() {
@@ -462,7 +502,7 @@ function termHTML() {
 
 function renderAll() {
   $("summary").innerHTML = summaryHTML();
-  $("providers").innerHTML = STATUS.providers.map(providerHTML).join("");
+  $("providers").innerHTML = STATUS.providers.map(providerCardsHTML).join("");
   $("timeline").innerHTML = timelineHTML();
   document.querySelector("#resets tbody").innerHTML = resetsHTML();
   $("term").innerHTML = termHTML();
@@ -486,6 +526,7 @@ function render(data) {
   clearBanner();
   renderAll();
   syncProviderMenu(); // the dropdown lives outside the re-rendered innerHTML
+  syncCardsMenu();
 }
 
 function schedule(ms) {
@@ -512,7 +553,17 @@ async function refresh() {
       return;
     }
     if (!res.ok) throw new Error("http " + res.status);
-    render(await res.json());
+    const data = await res.json();
+    // Display config (hidden cards) syncs with every status fetch – server
+    // truth wins; a failure here just keeps the last known set.
+    try {
+      const cres = await fetch("/api/config", { cache: "no-store", headers: token ? { Authorization: `Bearer ${token}` } : {} });
+      if (cres.ok) {
+        const cfg = await cres.json();
+        HIDDEN = new Set(Array.isArray(cfg.hidden) ? cfg.hidden : []);
+      }
+    } catch {}
+    render(data);
     const ms = STATUS.recheckAfter ? new Date(STATUS.recheckAfter) - now() : NaN;
     schedule(Number.isFinite(ms) && ms > 0 ? Math.max(1000, ms) : FALLBACK_MS);
   } catch (e) {
@@ -611,21 +662,30 @@ function syncProviderMenu() {
 }
 
 const providersToggle = $("providersToggle");
-function closeProviders() {
+const cardsToggle = $("cardsToggle");
+const cmd = $("cardsMenu");
+
+function closeMenus() {
   pdd.hidden = true;
+  cmd.hidden = true;
   providersToggle.setAttribute("aria-expanded", "false");
+  cardsToggle.setAttribute("aria-expanded", "false");
 }
-providersToggle.addEventListener("click", () => {
-  pdd.hidden = !pdd.hidden;
-  providersToggle.setAttribute("aria-expanded", String(!pdd.hidden));
-});
+function toggleMenu(menu, btn) {
+  const willOpen = menu.hidden;
+  closeMenus();
+  menu.hidden = !willOpen;
+  btn.setAttribute("aria-expanded", String(willOpen));
+}
+providersToggle.addEventListener("click", () => toggleMenu(pdd, providersToggle));
+cardsToggle.addEventListener("click", () => toggleMenu(cmd, cardsToggle));
 document.addEventListener("click", (e) => {
-  if (pdd.hidden) return;
   const t = e.target instanceof Element ? e.target : null;
-  if (!t || (!t.closest("#providersMenu") && !t.closest("#providersToggle"))) closeProviders();
+  if (t && (t.closest("#providersMenu") || t.closest("#providersToggle") || t.closest("#cardsMenu") || t.closest("#cardsToggle"))) return;
+  closeMenus();
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeProviders();
+  if (e.key === "Escape") closeMenus();
 });
 
 let togglingProviders = false;
@@ -639,10 +699,87 @@ pdd.addEventListener("change", async (e) => {
   const ok = await postConfig({ enabled: ids });
   togglingProviders = false;
   if (ok) {
-    closeProviders(); // refresh() re-renders and re-syncs the checkboxes
+    closeMenus(); // refresh() re-renders and re-syncs the checkboxes
     return;
   }
   syncProviderMenu(); // server truth wins – reverts the box and re-enables
+});
+
+// Card manager (eye icon): one checkbox per currently-reported card. A
+// single-class provider's card toggles the provider itself (the same `enabled`
+// patch as the settings menu); a model-class card of a multi-class provider
+// toggles its key in config `hidden` – display only, probing continues.
+function cardEntries() {
+  const out = [];
+  for (const p of STATUS.providers) {
+    const m = META[p.id] || { name: p.id };
+    const groups = scopeGroups(p);
+    const multi = groups.length > 1;
+    for (const g of groups) {
+      out.push({
+        key: g.key,
+        provId: p.id,
+        multi,
+        label: multi && g.scope ? `${m.name} · ${prettyScope(g.scope)}` : m.name,
+      });
+    }
+  }
+  return out;
+}
+
+// Visible cards left after removing one key (or a whole provider when the key
+// is a provider id) – the never-empty-dashboard guard shared by the menu and
+// the cards' × buttons.
+function visibleCardCount(excludeKey, excludeProv) {
+  let n = 0;
+  for (const p of STATUS.providers) {
+    if (excludeProv && p.id === excludeProv) continue;
+    for (const g of scopeGroups(p)) {
+      if (g.key !== excludeKey && !HIDDEN.has(g.key)) n++;
+    }
+  }
+  return n;
+}
+
+function syncCardsMenu() {
+  const entries = cardEntries();
+  cmd.innerHTML = entries.length
+    ? entries.map(e =>
+        `<label><input type="checkbox" data-key="${esc(e.key)}" data-multi="${e.multi ? "1" : ""}" ${HIDDEN.has(e.key) ? "" : "checked"}><span>${esc(e.label)}</span></label>`
+      ).join("")
+    : `<div class="pdd-empty">no cards to manage</div>`;
+}
+
+let togglingCards = false;
+cmd.addEventListener("change", async (e) => {
+  const box = e.target instanceof HTMLInputElement && e.target.type === "checkbox" ? e.target : null;
+  if (!box || togglingCards) return;
+  const key = box.dataset.key ?? "";
+  const multi = box.dataset.multi === "1";
+  if (!box.checked && visibleCardCount(key, multi ? null : key) === 0) {
+    box.checked = true;
+    box.title = "at least one card must stay visible";
+    return;
+  }
+  togglingCards = true;
+  cmd.querySelectorAll("input[type=checkbox]").forEach(b => { b.disabled = true; }); // no double-submit
+  let ok;
+  if (multi) {
+    const next = new Set(HIDDEN);
+    if (box.checked) next.delete(key); else next.add(key);
+    ok = await postConfig({ hidden: [...next] });
+    if (ok) HIDDEN = next;
+  } else {
+    // single-class provider: hiding the card disables the provider
+    const ids = STATUS.providers.map(p => p.id).filter(id => id !== key);
+    ok = ids.length > 0 ? await postConfig({ enabled: ids }) : false;
+  }
+  togglingCards = false;
+  if (ok) {
+    closeMenus(); // refresh() re-renders and re-syncs
+    return;
+  }
+  syncCardsMenu(); // server truth wins – reverts the box and re-enables
 });
 
 // Card drag-reorder: native HTML5 DnD inside #providers, armed only by a press
@@ -652,6 +789,34 @@ pdd.addEventListener("change", async (e) => {
 const grid = $("providers");
 let dragCard = null;
 let handleArmed = false;
+
+// The card × : a single-class card disables the whole provider (the same
+// `enabled` patch as the settings menu); a model-class card hides only that
+// class (config `hidden`) – the provider keeps probing and the card comes back
+// via the eye menu.
+grid.addEventListener("click", async (e) => {
+  const b = e.target instanceof Element ? e.target.closest(".cardx") : null;
+  if (!b) return;
+  const key = b.dataset.x ?? "";
+  const multi = b.dataset.multi === "1";
+  if (visibleCardCount(key, multi ? null : key) === 0) {
+    showBanner("warn", "at least one card must stay visible");
+    return;
+  }
+  if (multi) {
+    const next = new Set(HIDDEN);
+    next.add(key);
+    const ok = await postConfig({ hidden: [...next] });
+    if (ok) HIDDEN = next;
+    return;
+  }
+  const ids = STATUS.providers.map(p => p.id).filter(id => id !== key);
+  if (ids.length === 0) {
+    showBanner("warn", "at least one provider must stay enabled");
+    return;
+  }
+  void postConfig({ enabled: ids });
+});
 grid.addEventListener("mousedown", (e) => {
   handleArmed = e.target instanceof Element && e.target.closest(".drag") !== null;
 });

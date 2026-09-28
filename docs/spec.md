@@ -183,11 +183,14 @@ Default TTLs (the policy – no user knobs in v0):
 ## Configuration & secrets
 
 - `~/.subtrk/config.json` – `{ "enabled": ["claude", "glm", …], "order": ["kimi",
-  "claude", …] }`. `enabled` gates which providers are tracked (absent ⇒ all
-  enabled); `order` is the optional display order – listed ids come first in
-  their given order (unknown ids and duplicates dropped on read), unlisted ids
-  keep registry order after them. Both keys are written by `subtrk init` and by
-  the web console (`POST /api/config`) through one shared `saveConfig`: a
+  "claude", …], "hidden": ["google:claude-and-gpt-models", …] }`. `enabled` gates
+  which providers are tracked (absent ⇒ all enabled); `order` is the optional
+  display order – listed ids come first in their given order (unknown ids and
+  duplicates dropped on read), unlisted ids keep registry order after them;
+  `hidden` is the console's hidden-card list (`"<providerId>"` or
+  `"<providerId>:<scope>"`, malformed entries dropped on read) – a display hint
+  that never affects probing or the CLI. All keys are written by `subtrk init`
+  and by the web console (`POST /api/config`) through one shared `saveConfig`: a
   read-modify-write that preserves unknown pre-existing keys and lands
   atomically (temp file + rename). That is the entire config in v0 (no knobs).
 - `~/.subtrk/env` – dotenv format (`KEY=VALUE`, `#` comments), parsed by a ~20-line
@@ -641,18 +644,24 @@ One page for every enabled provider, served from the same cache the CLI reads.
   provider's cache entry is dropped so the next `/api/status` re-probes.
   Non-POST → 405 with `allow: POST`. No request body – the provider id comes
   from the query string only.
-- `POST /api/config` → persists the console's provider selection and card order
-  to `config.json` via `saveConfig` (atomic temp+rename; unknown pre-existing
-  keys are preserved), behind the same Bearer token as `/api/status` (401 on
-  failure). The body is a JSON object carrying at least one of the two keys
-  (a body with neither → 400, so a typo'd key cannot silently no-op):
-  `enabled` must be a non-empty array of known provider ids (unknown or empty
-  → 400); `order` must be an array of known ids (unknown → 400, duplicates
-  dropped, currently-disabled ids allowed). Unknown extra body keys are
-  ignored; a body over the 10KB cap, or one that is not valid JSON / not a
-  plain object, → 400. Success answers 200 `{"ok": true}` – fixed literals
-  only, the file itself is never echoed (read it back through `/api/status`).
-  Non-POST → 405 with `allow: POST`.
+- `POST /api/config` → persists the console's provider selection, card order and
+  hidden cards to `config.json` via `saveConfig` (atomic temp+rename; unknown
+  pre-existing keys are preserved), behind the same Bearer token as
+  `/api/status` (401 on failure). The body is a JSON object carrying at least
+  one of the three keys (a body with none → 400, so a typo'd key cannot
+  silently no-op): `enabled` must be a non-empty array of known provider ids
+  (unknown or empty → 400); `order` must be an array of known ids (unknown →
+  400, duplicates dropped, currently-disabled ids allowed); `hidden` must be an
+  array of valid card keys (`"<providerId>"` or `"<providerId>:<scope>"`,
+  malformed or unknown-prefix → 400, duplicates dropped, capped at 64).
+  Unknown extra body keys are ignored; a body over the 10KB cap, or one that
+  is not valid JSON / not a plain object, → 400. Success answers 200
+  `{"ok": true}` – fixed literals only, the file itself is never echoed (read
+  it back through `GET /api/config`). Non-POST/GET → 405 with
+  `allow: GET, POST`.
+- `GET /api/config` → the current display config for the console's menus, same
+  Bearer token, GET-only: `{"enabled": […], "order": […], "hidden": […]}`.
+  These are the fields `subtrk init` writes – the file holds no secrets.
 - Hardening: the Host header must be `127.0.0.1[:port]` or
   `localhost[:port]` (403 otherwise – DNS-rebinding defense); no CORS headers
   are ever emitted, so cross-site pages can neither read responses nor pass
@@ -663,11 +672,19 @@ One page for every enabled provider, served from the same cache the CLI reads.
   warning levels, credits with a used-percentage bar, staleness, error kinds
   with hints and remedies – providers marked `refreshable` get a Refresh now
   button that calls `POST /api/refresh`), a 7-day reset timeline, an
-  upcoming-resets table, an agent-view terminal panel, and auto-refresh at
-  `recheckAfter`. A plus-icon menu in the header toggles providers on/off (the
-  last enabled provider locks) and each card carries a drag handle for
-  reordering – both persist through `/api/config` and survive restarts, and the
-  saved `order` also governs `subtrk status` output order.
+  upcoming-resets table and the agent view. A provider whose windows carry
+  distinct scopes renders one card per model class (Google's Gemini and
+  Claude/GPT classes are separate cards; single-class providers render one
+  card as before) – each card reads 5h before 7d. Every card has an × that
+  disables the provider (single-class) or hides just that model class
+  (multi-class, config `hidden` – display only, probing continues); the
+  eye-icon card manager lists every reported card with checkboxes to hide or
+  bring classes back. Hiding never affects probing, the CLI, or the
+  summary/timeline views. An agent-view terminal panel and auto-refresh at
+  `recheckAfter` complete the page. A gear-icon menu in the header toggles
+  providers on/off (the last enabled provider locks) and each card carries a
+  drag handle for reordering – both persist through `/api/config` and survive
+  restarts, and the saved `order` also governs `subtrk status` output order.
 
 ## Not in v0 (parked)
 

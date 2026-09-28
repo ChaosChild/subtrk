@@ -247,3 +247,20 @@ dashboard's numbers. Parsed windows are ordered 5h before 7d (payload order
 within a rank), so the card reads top-to-bottom like every other provider's. The same evidence explained the third-party trackers:
 CLIProxyAPI agreed with reality because it counted requests and 429s locally,
 never because it read a remote summary.
+
+## D15 · Console – one card per model class, hidden cards are a display hint
+
+A provider whose windows carry distinct scopes renders one card per scope –
+Google's Gemini and Claude/GPT classes are independent cards, and any future
+aggregator-shaped provider gets the same treatment for free; single-class
+providers render exactly one card as before. Cards are hidden, not removed:
+the × on a single-class card disables the whole provider (the same `enabled`
+write as the settings menu), while on a multi-class card it only adds the card
+key (`<id>:<scope>`) to config.json `hidden` – the provider keeps probing and
+the eye-icon card manager lists every reported card with checkboxes to bring
+classes back. `hidden` is validated like the other display hints (malformed
+keys rejected at the endpoint, dropped on read) and reaches the page through
+GET /api/config. Hiding never affects probing, the CLI, or the
+summary/timeline views. The provider-selection icon is a gear; overlapping
+with the per-provider toggle is accepted – one control answers "track it at
+all", the other "show me this class".
