@@ -180,6 +180,29 @@ describe("help", () => {
       cap.restore();
     }
   });
+
+  it("--version, -v and `version` exit 0 and print the package version", async () => {
+    for (const argv of [["--version"], ["-v"], ["version"]]) {
+      const cap = captureConsole();
+      try {
+        assert.equal(await main(argv, { providers: [], dirs: { subtrk: tempSubtrkDir() } }), 0, argv.join(" "));
+        assert.match(cap.out.join("\n"), /^\d+\.\d+\.\d+/);
+        assert.equal(cap.err.length, 0);
+      } finally {
+        cap.restore();
+      }
+    }
+  });
+
+  it("`version extra` stays a usage error", async () => {
+    const cap = captureConsole();
+    try {
+      assert.equal(await main(["version", "extra"], { providers: [], dirs: { subtrk: tempSubtrkDir() } }), 2);
+      assert.match(cap.err.join("\n"), /unexpected argument/);
+    } finally {
+      cap.restore();
+    }
+  });
 });
 
 describe("status with a stubbed registry (exit 0)", () => {

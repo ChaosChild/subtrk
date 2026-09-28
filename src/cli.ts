@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { realpathSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { realpathSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 // cli.ts – subtrk entry point. `subtrk` / `subtrk status` / `subtrk init` /
 // `subtrk auth refresh` / `subtrk serve`. The providers registry lives in
 // ./providers/index.ts (allProviders) and is imported lazily (from collectStatus)
@@ -49,6 +49,7 @@ usage:
                           (claude|zcode|codex|opencode|agy)
   subtrk auth refresh     re-authorise one provider interactively (--provider <id>)
   subtrk serve            local web console (loopback only)
+  subtrk --version        print the version
 
 status flags:
   --json                machine-readable output (schemaVersion 1)
@@ -81,6 +82,18 @@ flags:
   -h, --help    this screen`;
 
 // ---------- text rendering (spec §Text format) ----------
+
+// package.json rides next to src/ in the repo and in the npm tarball alike.
+function cliVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
+    ) as { version?: unknown };
+    return typeof pkg.version === "string" && pkg.version ? pkg.version : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
 
 function clock(iso: string): string {
   const d = new Date(iso);
@@ -200,6 +213,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
         port: { type: "string" },
         agent: { type: "string" },
         help: { type: "boolean", short: "h", default: false },
+        version: { type: "boolean", short: "v", default: false },
       },
     });
   } catch (err) {
@@ -231,6 +245,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     port,
     agent,
     help,
+    version: versionFlag,
   } = parsed.values as {
     json?: boolean;
     provider?: string[];
@@ -240,9 +255,14 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     port?: string;
     agent?: string;
     help?: boolean;
+    version?: boolean;
   };
   if (help) {
     console.log(cmd === "init" ? INIT_USAGE : cmd === "serve" ? SERVE_USAGE : USAGE);
+    return 0;
+  }
+  if (versionFlag || cmd === "version") {
+    console.log(cliVersion());
     return 0;
   }
   if (cmd === "init") {

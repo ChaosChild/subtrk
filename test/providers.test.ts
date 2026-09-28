@@ -17,6 +17,7 @@ import { glmAuth, parseGlmQuota } from "../src/providers/glm.ts";
 import {
   ANTIGRAVITY_CONSTANTS_MISSING,
   buildAntigravityRefreshForm,
+  buildLsSpawnArgs,
   googleExpired,
   mapGrantFailure,
   needsRefresh,
@@ -350,9 +351,9 @@ test("google parseGoogleSummary unwraps the language-server envelope and skips d
     },
   };
   assert.deepEqual(parseGoogleSummary(local), [
+    { kind: "5h", scope: "claude-and-gpt-models", remainingFraction: 1, resetsAt: "2026-09-28T11:55:57.000Z" },
     { kind: "7d", scope: "gemini-models", remainingFraction: 0, resetsAt: "2026-09-30T09:34:02.000Z" },
     { kind: "7d", scope: "claude-and-gpt-models", remainingFraction: 1, resetsAt: "2026-10-05T06:55:57.000Z" },
-    { kind: "5h", scope: "claude-and-gpt-models", remainingFraction: 1, resetsAt: "2026-09-28T11:55:57.000Z" },
   ]);
   // A `response` wrapper without groups is not silently unwrapped to something else.
   assert.equal(parseGoogleSummary({ response: { nope: true } }), null);
@@ -406,6 +407,31 @@ test("google parseGoogleSummary: bucketId-only bucket derives its kind, kindless
     [],
     "no window and no bucketId -> no kind -> bucket skipped",
   );
+});
+
+test("google buildLsSpawnArgs mirrors the app's standalone flags with the generated csrf token", () => {
+  const args = buildLsSpawnArgs("csrf-uuid");
+  assert.deepEqual(args, [
+    "--standalone",
+    "--override_ide_name",
+    "antigravity",
+    "--subclient_type",
+    "hub",
+    "--override_ide_version",
+    "2.17.0",
+    "--override_user_agent_name",
+    "antigravity",
+    "--https_server_port",
+    "0",
+    "--csrf_token",
+    "csrf-uuid",
+    "--app_data_dir",
+    "antigravity",
+    "--api_server_url",
+    "https://generativelanguage.googleapis.com",
+    "--cloud_code_endpoint",
+    "https://daily-cloudcode-pa.googleapis.com",
+  ]);
 });
 
 test("google parseAgyKeyringBlob extracts tokens and converts the RFC3339 expiry", () => {

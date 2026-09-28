@@ -480,7 +480,7 @@ async function runProbe(p: ProviderModule, opts: FetchOpts): Promise<ProviderRes
         ok: false,
         stale: false,
         fetchedAt,
-        error: { kind: "timeout", message: `probe exceeded ${timeoutMs}ms budget` },
+        error: { kind: "timeout", message: `probe exceeded ${Math.round(timeoutMs / 1000)}s budget` },
       };
     }
     return {
@@ -605,7 +605,7 @@ export async function fetchJson(
   } catch (err) {
     if (err instanceof HttpError) throw err;
     if (ac.signal.aborted && err instanceof Error && err.name === "AbortError") {
-      throw new TimeoutError(`request timed out after ${timeoutMs}ms`);
+      throw new TimeoutError(`request timed out after ${Math.round(timeoutMs / 1000)}s`);
     }
     throw err;
   } finally {
@@ -615,7 +615,7 @@ export async function fetchJson(
 
 export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new TimeoutError(`timed out after ${ms}ms`)), ms);
+    const timer = setTimeout(() => reject(new TimeoutError(`timed out after ${Math.round(ms / 1000)}s`)), ms);
     promise.then(
       (value) => {
         clearTimeout(timer);

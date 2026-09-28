@@ -329,7 +329,15 @@ probe reads two sources in order:
    Response `groups[].displayName` → scope (e.g. `gemini-models`,
    `claude-and-gpt-models`), `buckets[].{window, remainingFraction, resetTime}`
    → windows; `disabled: true` buckets (e.g. the 5h bucket while the weekly
-   limit is hit) are skipped.
+   limit is hit) are skipped. Parsed windows are ordered 5h before 7d (payload
+   order within a rank) so the card reads top-to-bottom like every other
+   provider's. When no language server process is running (app closed or still
+   starting), the probe briefly spawns the app's own `language_server.exe`
+   standalone (`--standalone` with the app's flags, a freshly generated CSRF
+   token, random ports), polls readiness with the same discovery script
+   filtered to the spawned pid, queries it, and kills the process tree before
+   returning – bounded by the probe budget; a failed spawn degrades to the
+   remote fallback.
 2. **Remote REST fallback (any platform, any running state)** – credential
    discovery, first match wins:
 
