@@ -234,7 +234,10 @@ function parseHidden(value: unknown): string[] | undefined {
 // Read-modify-write of the whole config file: unknown pre-existing keys are
 // preserved, only the patch keys are overwritten. Temp file + rename (the
 // writeCacheEntry discipline). Throws on write failure – callers decide.
-export function saveConfig(subtrkDir: string, patch: { enabled?: ProviderId[]; order?: ProviderId[]; hidden?: string[] }): void {
+export function saveConfig(
+  subtrkDir: string,
+  patch: { enabled?: ProviderId[]; order?: ProviderId[]; hidden?: string[] },
+): void {
   const path = join(subtrkDir, "config.json");
   let file: Record<string, unknown> = {};
   try {
