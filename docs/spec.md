@@ -308,28 +308,48 @@ has no usage surface of its own.
   fixed-literal `bl auth login --console --console-site international`, 300s
   budget) or the same step inside `subtrk init`.
 
-### google – Google AI Pro (via agy, Antigravity CLI)
+### google – Google AI Pro (via the Antigravity desktop app and agy)
 
 Google sunset consumer Gemini CLI service on 2026-06-18; consumer accounts
 authenticate through the closed-source `agy` binary, which holds an Antigravity
-OAuth login. Credential discovery, first match wins:
+OAuth login. Google keeps separate quota domains per surface (the Gemini app
+web dashboard, Antigravity agent usage, the Code Assist REST view), so the
+probe reads two sources in order:
 
-1. Windows Credential Manager target `gemini:antigravity` (agy's OAuth blob): a
-   fixed-literal PowerShell `CredReadW` P/Invoke snippet (spawned via `execFile`,
-   ~5s budget, win32 only) returns a plaintext JSON blob
-   `{token:{access_token, refresh_token, expiry}, auth_method, id_token}`.
-2. `~/.gemini/oauth_creds.json` (legacy gemini).
-3. `~/.gemini/antigravity-cli/antigravity-oauth-token` (legacy antigravity).
+1. **Local language server (primary, win32)** – the Antigravity desktop app's
+   `language_server.exe` serves the same `RetrieveUserQuotaSummary` payload its
+   Model Quota panel renders: the authoritative numbers. Discovery is a
+   fixed-literal PowerShell script (argument-vector spawn, ~4s budget) reading
+   the process command line (`--app_data_dir antigravity`, `--csrf_token`) and
+   its 127.0.0.1 listeners via `Get-NetTCPConnection`; the RPC is a loopback
+   HTTPS Connect call (`X-Codeium-Csrf-Token` header, body `{}`) and needs no
+   OAuth material. The listener's certificate is self-signed, so TLS
+   verification is relaxed for that literal-host 127.0.0.1 request only.
+   Response `groups[].displayName` → scope (e.g. `gemini-models`,
+   `claude-and-gpt-models`), `buckets[].{window, remainingFraction, resetTime}`
+   → windows; `disabled: true` buckets (e.g. the 5h bucket while the weekly
+   limit is hit) are skipped.
+2. **Remote REST fallback (any platform, any running state)** – credential
+   discovery, first match wins:
+
+   a. Windows Credential Manager target `gemini:antigravity` (agy's OAuth blob):
+      a fixed-literal PowerShell `CredReadW` P/Invoke snippet (spawned via
+      `execFile`, ~5s budget, win32 only) returns a plaintext JSON blob
+      `{token:{access_token, refresh_token, expiry}, auth_method, id_token}`.
+   b. `~/.gemini/oauth_creds.json` (legacy gemini).
+   c. `~/.gemini/antigravity-cli/antigravity-oauth-token` (legacy antigravity).
 
 The `implicit/*.pb` files are encrypted trajectory data – never read.
 
-- Quota call (verified against agy 1.2.11): `POST
+- Quota call (fallback, verified against agy 1.2.11): `POST
   https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary` with
   `Authorization: Bearer <token>`, `User-Agent: antigravity`, body **`{}`** – no
   `ideType`, no project, no `loadCodeAssist` (that recipe belongs to the legacy
-  `retrieveUserQuota` endpoint). Response `groups[].displayName` → scope (e.g.
-  `gemini-models`, `claude-and-gpt-models`), `buckets[].{window, remainingFraction,
-  resetTime}` → windows. On 403/404, one retry against
+  `retrieveUserQuota` endpoint). Same response parsing as the local source.
+  Live-verified 2026-09-28: this REST view answers from the Code Assist quota
+  domain with synthetic resets (fetch time +5h/+7d to the second) that do not
+  reflect Antigravity usage, so ok results carry a note that the numbers may
+  not match the Antigravity dashboard. On 403/404, one retry against
   `daily-cloudcode-pa.googleapis.com`, then `not-readable-remotely`, hint
   `run agy /usage`.
 - Self-refresh (keyring lineage): a missing access token or an expiry inside a

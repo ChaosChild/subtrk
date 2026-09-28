@@ -6,8 +6,21 @@
 //   3. ~/.gemini/antigravity-cli/antigravity-oauth-token (legacy antigravity).
 // The implicit/*.pb files under antigravity-cli are encrypted trajectory data – never read.
 // No third-party credential stores are read or written.
-// Quota: POST /v1internal:retrieveUserQuotaSummary with an EMPTY {} body (the request
-// proto has no other fields; unknown fields 400). No loadCodeAssist step.
+// Quota sources, in order:
+//   1. The Antigravity DESKTOP app's local language server (win32) – the
+//      authoritative view: the same two-group RetrieveUserQuotaSummary payload
+//      the app's Model Quota panel renders. Discovery is a FIXED literal
+//      PowerShell script (Win32_Process command line + Get-NetTCPConnection,
+//      argument-vector spawn); the RPC is a loopback HTTPS Connect call
+//      carrying the process's --csrf_token and needs NO OAuth material. The
+//      listener's certificate is self-signed, so TLS verification is relaxed
+//      for this literal-host 127.0.0.1 request only.
+//   2. Remote fallback (any platform): POST /v1internal:retrieveUserQuotaSummary
+//      with an EMPTY {} body (no loadCodeAssist step). This is the Code Assist
+//      quota domain – live-verified 2026-09-28 to return synthetic full-quota
+//      resets (fetch time +5h/+7d to the second) that do NOT reflect
+//      Antigravity usage – so ok results carry a note saying the numbers may
+//      not match the Antigravity dashboard.
 // The agy-keyring lineage self-refreshes: the stored refresh token mints access
 // tokens via the PUBLIC Antigravity client constants from ~/.subtrk/env.
 // Google's refresh tokens are non-rotating (verified 2026-09-25) – the minted token
@@ -19,6 +32,7 @@
 
 import { execFile } from "node:child_process";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { request as httpsRequest } from "node:https";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProviderError, ProviderModule, ProviderResult, Window } from "../core.ts";
@@ -33,6 +47,18 @@ const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const PRIMARY_HOST = "https://cloudcode-pa.googleapis.com";
 const FALLBACK_HOST = "https://daily-cloudcode-pa.googleapis.com";
 const QUOTA_PATH = "/v1internal:retrieveUserQuotaSummary";
+
+// Local language server (Antigravity desktop app) – the dashboard's own source.
+const LS_QUOTA_PATH = "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
+const LS_PS_TIMEOUT_MS = 4_000; // PowerShell CIM + TCP enumeration startup
+const LS_PORT_TIMEOUT_MS = 1_500;
+const LS_MAX_CANDIDATES = 3;
+const LS_MAX_PORTS = 3;
+// The remote REST view reads a different quota domain than the Antigravity
+// dashboard (synthetic resets; agent usage never shows up) – label the result
+// wherever it is the best available read.
+const REMOTE_VIEW_NOTE =
+  "remote Code Assist quota view – may not match the Antigravity dashboard; start the Antigravity app for its exact limits";
 
 // The OAuth client constants for token refresh live in ~/.subtrk/env
 // (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / ANTIGRAVITY_CLIENT_ID /
@@ -167,11 +193,23 @@ function kindFromBucketId(bucketId: unknown): string | null {
   return slugify(bucketId) || null;
 }
 
+// Pure: the desktop language server nests the summary under `response`; the
+// remote REST call does not. Accept both shapes.
+export function googleSummaryRoot(body: unknown): unknown {
+  if (typeof body === "object" && body !== null) {
+    const inner = (body as { response?: unknown }).response;
+    if (typeof inner === "object" && inner !== null && Array.isArray((inner as { groups?: unknown }).groups)) {
+      return inner;
+    }
+  }
+  return body;
+}
+
 // Pure: groups[].displayName -> scope, buckets[] -> windows. null when groups is absent
 // or not an array; empty groups array is a valid (degraded) shape -> [].
 export function parseGoogleSummary(body: unknown): Window[] | null {
   if (typeof body !== "object" || body === null) return null;
-  const groups = (body as { groups?: unknown }).groups;
+  const groups = (googleSummaryRoot(body) as { groups?: unknown }).groups;
   if (!Array.isArray(groups)) return null;
   const windows: Window[] = [];
   for (const rawGroup of groups) {
@@ -181,7 +219,16 @@ export function parseGoogleSummary(body: unknown): Window[] | null {
     if (!Array.isArray(g.buckets)) continue;
     for (const rawBucket of g.buckets) {
       if (typeof rawBucket !== "object" || rawBucket === null) continue;
-      const b = rawBucket as { window?: unknown; bucketId?: unknown; remainingFraction?: unknown; resetTime?: unknown };
+      const b = rawBucket as {
+        window?: unknown;
+        bucketId?: unknown;
+        remainingFraction?: unknown;
+        resetTime?: unknown;
+        disabled?: unknown;
+      };
+      // A disabled bucket carries no measurement (e.g. the 5h bucket while the
+      // weekly limit is hit: "the 5-hour limit does not currently apply").
+      if (b.disabled === true) continue;
       if (typeof b.remainingFraction !== "number" || typeof b.resetTime !== "string") continue;
       // "weekly" is normalized to "7d" for cross-provider consistency (claude/glm report the same measure as "7d").
       const rawKind = typeof b.window === "string" && b.window !== "" ? b.window : kindFromBucketId(b.bucketId);
@@ -494,12 +541,165 @@ async function mintAccessToken(refreshToken: string): Promise<RefreshOutcome> {
   return parseMintResponse(out.text, Date.now());
 }
 
+// ---- Antigravity desktop language server (the dashboard's own source) ----
+
+export interface LsCandidate {
+  pid: number;
+  csrf: string;
+  ports: number[];
+}
+
+// FIXED literal discovery script (argument-vector spawn, nothing interpolated):
+// desktop-app language servers only (`--app_data_dir antigravity` – the IDE
+// extension's `antigravity-ide` does not match) that carry a --csrf_token,
+// with their loopback HTTPS listeners. Windows PowerShell 5.1 compatible;
+// -InputObject keeps the empty/single-element result a JSON array.
+const LS_DISCOVERY_PS_SCRIPT = `$ErrorActionPreference = 'SilentlyContinue'
+$out = @()
+Get-CimInstance Win32_Process -Filter "Name='language_server.exe'" | ForEach-Object {
+  $cl = [string]$_.CommandLine
+  if ($cl -match '--app_data_dir\\s+antigravity(\\s|$)' -and $cl -match '--csrf_token\\s+([0-9a-fA-F-]{8,64})') {
+    $ports = @(Get-NetTCPConnection -OwningProcess $_.ProcessId -State Listen |
+      Where-Object { $_.LocalAddress -eq '127.0.0.1' } |
+      Select-Object -ExpandProperty LocalPort -Unique | Sort-Object)
+    $out += [pscustomobject]@{ pid = $_.ProcessId; csrf = $Matches[1]; ports = $ports }
+  }
+}
+ConvertTo-Json -InputObject $out -Compress`;
+
+// Pure: parse the discovery script's JSON. Malformed, credential-less or
+// port-invalid entries are dropped, ports deduped. A bare single object (a PS
+// pipeline quirk) is tolerated alongside the array form.
+export function parseLsCandidates(text: string): LsCandidate[] {
+  const trimmed = text.trim();
+  if (trimmed === "") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return [];
+  }
+  const list = Array.isArray(parsed) ? parsed : [parsed];
+  const out: LsCandidate[] = [];
+  for (const raw of list) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const o = raw as { pid?: unknown; csrf?: unknown; ports?: unknown };
+    if (typeof o.pid !== "number" || !Number.isInteger(o.pid) || o.pid <= 0) continue;
+    if (typeof o.csrf !== "string" || o.csrf === "") continue;
+    if (!Array.isArray(o.ports)) continue;
+    const ports = [
+      ...new Set(
+        o.ports.filter((p): p is number => typeof p === "number" && Number.isInteger(p) && p >= 1 && p <= 65_535),
+      ),
+    ];
+    if (ports.length === 0) continue;
+    out.push({ pid: o.pid, csrf: o.csrf, ports });
+  }
+  return out;
+}
+
+// Thin wrapper (untested, like runKeyringScript): any failure is simply "no
+// local source". Output is tiny; the 1MB cap is generous.
+function runLsDiscovery(): Promise<string | null> {
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", LS_DISCOVERY_PS_SCRIPT],
+        { timeout: LS_PS_TIMEOUT_MS, windowsHide: true, maxBuffer: 1_000_000 },
+        (err, stdout) => resolve(err ? null : String(stdout ?? "")),
+      );
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+// Thin wrapper (untested): loopback Connect-RPC POST to the language server.
+// The certificate is self-signed and the host is the fixed literal 127.0.0.1,
+// so TLS verification is relaxed for THIS request only – the peer is pinned by
+// the literal loopback host, the CSRF header, and the local process boundary.
+function lsQuotaPost(csrf: string, port: number): Promise<{ ok: true; text: string } | { ok: false }> {
+  return new Promise((resolve) => {
+    const req = httpsRequest(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "POST",
+        path: LS_QUOTA_PATH,
+        timeout: LS_PORT_TIMEOUT_MS,
+        rejectUnauthorized: false,
+        headers: {
+          "X-Codeium-Csrf-Token": csrf,
+          "Connect-Protocol-Version": "1",
+          "Content-Type": "application/json",
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        let total = 0;
+        res.on("data", (chunk: Buffer) => {
+          total += chunk.length;
+          if (total <= MAX_RESPONSE_CHARS) chunks.push(chunk);
+        });
+        res.on("error", () => resolve({ ok: false }));
+        res.on("end", () => {
+          if (res.statusCode !== 200 || total > MAX_RESPONSE_CHARS) {
+            resolve({ ok: false });
+            return;
+          }
+          resolve({ ok: true, text: Buffer.concat(chunks).toString("utf8") });
+        });
+      },
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      resolve({ ok: false });
+    });
+    req.on("error", () => resolve({ ok: false }));
+    req.end("{}");
+  });
+}
+
+type LocalProbe = { windows: Window[] } | { windows: null; reason?: string };
+
+// The desktop app's language server serves the same two-group payload its
+// Model Quota panel renders – the authoritative Antigravity view, reachable
+// with no OAuth material. Every failure degrades to a reason string; the
+// remote fallback decides what the operator sees.
+async function probeLocalLanguageServer(): Promise<LocalProbe> {
+  if (process.platform !== "win32") return { windows: null };
+  const text = await runLsDiscovery();
+  const candidates = text === null ? [] : parseLsCandidates(text);
+  if (candidates.length === 0) {
+    return { windows: null, reason: "no Antigravity desktop language server process" };
+  }
+  for (const cand of candidates.slice(0, LS_MAX_CANDIDATES)) {
+    await registerSecret(cand.csrf);
+    for (const port of cand.ports.slice(0, LS_MAX_PORTS)) {
+      const out = await lsQuotaPost(cand.csrf, port);
+      if (!out.ok) continue;
+      let body: unknown;
+      try {
+        body = JSON.parse(out.text);
+      } catch {
+        continue; // a listener that is not the Connect endpoint (empty or other body)
+      }
+      const windows = parseGoogleSummary(body);
+      if (windows && windows.length > 0) return { windows };
+    }
+  }
+  return { windows: null, reason: "quota RPC unreachable on all language server ports" };
+}
+
 function fail(error: ProviderError, fetchedAt: string): ProviderResult {
   return { id: "google", ok: false, stale: false, fetchedAt, error };
 }
 
-async function probeInner(): Promise<ProviderResult> {
-  const fetchedAt = new Date().toISOString();
+// Remote Code Assist REST fallback: credential load + (stale -> mint) + quota
+// read. The response is the Code Assist quota domain – synthetic resets, not
+// the Antigravity dashboard's numbers – so ok results carry REMOTE_VIEW_NOTE.
+async function probeRemote(fetchedAt: string): Promise<ProviderResult> {
   const found = await discoverCreds();
   if (!found) {
     return fail(
@@ -612,8 +812,30 @@ async function probeInner(): Promise<ProviderResult> {
   return { id: "google", ok: true, stale: false, fetchedAt, windows };
 }
 
-// probe = credential load + (stale -> mint for the self-refresh lineage) + quota
-// read. refresh reuses it: the self-refresh path already mints from the stored
+async function probeInner(): Promise<ProviderResult> {
+  const fetchedAt = new Date().toISOString();
+  // 1) The Antigravity desktop app's language server – the dashboard's exact
+  //    numbers, no OAuth material involved.
+  const local = await probeLocalLanguageServer();
+  if (local.windows) return { id: "google", ok: true, stale: false, fetchedAt, windows: local.windows };
+  // 2) Remote REST fallback (any platform, any running state).
+  const remote = await probeRemote(fetchedAt);
+  if (remote.ok) return { ...remote, note: REMOTE_VIEW_NOTE };
+  const err: ProviderError = remote.error ?? { kind: "not-readable-remotely", message: "quota read failed" };
+  if (local.reason) {
+    return {
+      ...remote,
+      error: {
+        ...err,
+        message: `${err.message}; local Antigravity language server unavailable (${local.reason})`,
+      },
+    };
+  }
+  return { ...remote, error: err };
+}
+
+// probe = local language server first, then the remote REST fallback.
+// refresh reuses it: the remote path already mints from the stored
 // non-rotating refresh token (read-only, no write-back), so "refresh" is simply
 // "probe now".
 function probe(): Promise<ProviderResult> {
@@ -634,7 +856,7 @@ const provider: ProviderModule = {
     const r = await probe();
     return {
       ok: r.ok,
-      message: r.ok ? "google token refreshed" : (r.error?.message ?? "google refresh failed"),
+      message: r.ok ? "google quota refreshed" : (r.error?.message ?? "google refresh failed"),
     };
   },
 };
