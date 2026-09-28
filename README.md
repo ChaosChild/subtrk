@@ -25,7 +25,7 @@ $ subtrk
 claude     5h 13% (reset 18:04) · 7d 89% !
 glm        5h 4% (reset 19:47) · 7d 61%
 alibaba    credits 31,240/45,000 · cycle ends 2026-10-12
-google     5h 62% left · 7d 81% left   [stale]
+google     gemini-models 7d 0% left · claude-and-gpt-models 5h 100% left !
 opencode   PAYG · no usage API (signals only)
 openrouter $74.75 left · key today $1.20
 next: claude 5h at 18:09 (4h 49m)
