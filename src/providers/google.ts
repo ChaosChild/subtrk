@@ -11,10 +11,11 @@
 //      authoritative view: the same two-group RetrieveUserQuotaSummary payload
 //      the app's Model Quota panel renders. Discovery is a FIXED literal
 //      PowerShell script (Win32_Process command line + Get-NetTCPConnection,
-//      argument-vector spawn); the RPC is a loopback HTTPS Connect call
-//      carrying the process's --csrf_token and needs NO OAuth material. The
-//      listener's certificate is self-signed, so TLS verification is relaxed
-//      for this literal-host 127.0.0.1 request only.
+//      argument-vector spawn); the RPC is a loopback Connect call carrying the
+//      process's --csrf_token and needs NO OAuth material. The process serves
+//      plain HTTP on one listener and TLS on the other; the probe tries each
+//      discovered listener over plain HTTP (loopback + CSRF token are the
+//      local boundary – no certificate exception anywhere).
 //   2. Remote fallback (any platform): POST /v1internal:retrieveUserQuotaSummary
 //      with an EMPTY {} body (no loadCodeAssist step). This is the Code Assist
 //      quota domain – live-verified 2026-09-28 to return synthetic full-quota
@@ -32,7 +33,7 @@
 
 import { execFile } from "node:child_process";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
-import { request as httpsRequest } from "node:https";
+import { request as httpRequest } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProviderError, ProviderModule, ProviderResult, Window } from "../core.ts";
@@ -615,20 +616,19 @@ function runLsDiscovery(): Promise<string | null> {
   });
 }
 
-// Thin wrapper (untested): loopback Connect-RPC POST to the language server.
-// The certificate is self-signed and the host is the fixed literal 127.0.0.1,
-// so TLS verification is relaxed for THIS request only – the peer is pinned by
-// the literal loopback host, the CSRF header, and the local process boundary.
+// Thin wrapper (untested): loopback Connect-RPC POST to the language server
+// over plain HTTP. One listener speaks HTTP, the other TLS (an HTTP request to
+// it is answered with a non-200 protocol notice and moves the probe on). The
+// host is the fixed literal 127.0.0.1 – no certificate handling anywhere.
 function lsQuotaPost(csrf: string, port: number): Promise<{ ok: true; text: string } | { ok: false }> {
   return new Promise((resolve) => {
-    const req = httpsRequest(
+    const req = httpRequest(
       {
         host: "127.0.0.1",
         port,
         method: "POST",
         path: LS_QUOTA_PATH,
         timeout: LS_PORT_TIMEOUT_MS,
-        rejectUnauthorized: false,
         headers: {
           "X-Codeium-Csrf-Token": csrf,
           "Connect-Protocol-Version": "1",

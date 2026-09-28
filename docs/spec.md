@@ -322,9 +322,10 @@ probe reads two sources in order:
    fixed-literal PowerShell script (argument-vector spawn, ~4s budget) reading
    the process command line (`--app_data_dir antigravity`, `--csrf_token`) and
    its 127.0.0.1 listeners via `Get-NetTCPConnection`; the RPC is a loopback
-   HTTPS Connect call (`X-Codeium-Csrf-Token` header, body `{}`) and needs no
-   OAuth material. The listener's certificate is self-signed, so TLS
-   verification is relaxed for that literal-host 127.0.0.1 request only.
+   Connect call over plain HTTP (`X-Codeium-Csrf-Token` header, body `{}`) and
+   needs no OAuth material. The process serves plain HTTP on one listener and
+   TLS on the other; the probe tries each discovered listener over plain HTTP
+   (loopback + CSRF token are the local boundary – no certificate handling).
    Response `groups[].displayName` → scope (e.g. `gemini-models`,
    `claude-and-gpt-models`), `buckets[].{window, remainingFraction, resetTime}`
    → windows; `disabled: true` buckets (e.g. the 5h bucket while the weekly
