@@ -172,6 +172,16 @@ function sleep(ms: number): Promise<void> {
 export interface SubtrkConfig {
   enabled: ProviderId[];
   order?: ProviderId[]; // display order – listed ids first, rest keeps registry order
+  hidden?: string[]; // hidden console cards: "<providerId>" or "<providerId>:<scope>"
+}
+
+// A card key is a known provider id, optionally scoped: "<id>:<slug>". The slug
+// is a slugify() output (lowercase letters, digits, dashes). Console-display
+// hint only – probing and the CLI are unaffected by hidden cards.
+export function isValidCardKey(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const m = /^([a-z][a-z0-9-]{0,63})(:([a-z0-9-]{1,64}))?$/.exec(value);
+  return m !== null && (ALL_PROVIDER_IDS as readonly string[]).includes(m[1]);
 }
 
 // Known ids only, duplicates dropped; a non-array of strings yields undefined
@@ -197,22 +207,34 @@ export function loadConfig(subtrkDir: string = SUBTRK_DIR): SubtrkConfig {
   } catch {
     throw new ConfigError(`config is not valid JSON: ${path}`);
   }
-  const file = raw as { enabled?: unknown; order?: unknown } | null;
+  const file = raw as { enabled?: unknown; order?: unknown; hidden?: unknown } | null;
   const enabled = file?.enabled;
-  if (enabled === undefined) return { enabled: [...ALL_PROVIDER_IDS], order: parseOrder(file?.order) };
+  if (enabled === undefined) {
+    return { enabled: [...ALL_PROVIDER_IDS], order: parseOrder(file?.order), hidden: parseHidden(file?.hidden) };
+  }
   if (!Array.isArray(enabled) || enabled.some((e) => typeof e !== "string")) {
     throw new ConfigError(`config.enabled must be an array of provider ids: ${path}`);
   }
   return {
     enabled: enabled.filter((id): id is ProviderId => (ALL_PROVIDER_IDS as readonly string[]).includes(id)),
     order: parseOrder(file?.order),
+    hidden: parseHidden(file?.hidden),
   };
+}
+
+// Display hint like order: a non-array or malformed entries are dropped, never
+// a hard failure – the file is written by the validated /api/config endpoint.
+function parseHidden(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return undefined;
+  const keys = value.filter((k) => isValidCardKey(k));
+  return keys.length > 0 ? [...new Set(keys)] : undefined;
 }
 
 // Read-modify-write of the whole config file: unknown pre-existing keys are
 // preserved, only the patch keys are overwritten. Temp file + rename (the
 // writeCacheEntry discipline). Throws on write failure – callers decide.
-export function saveConfig(subtrkDir: string, patch: { enabled?: ProviderId[]; order?: ProviderId[] }): void {
+export function saveConfig(subtrkDir: string, patch: { enabled?: ProviderId[]; order?: ProviderId[]; hidden?: string[] }): void {
   const path = join(subtrkDir, "config.json");
   let file: Record<string, unknown> = {};
   try {
@@ -225,6 +247,7 @@ export function saveConfig(subtrkDir: string, patch: { enabled?: ProviderId[]; o
   }
   if (patch.enabled !== undefined) file.enabled = [...patch.enabled];
   if (patch.order !== undefined) file.order = [...patch.order];
+  if (patch.hidden !== undefined) file.hidden = [...patch.hidden];
   mkdirSync(subtrkDir, { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`);

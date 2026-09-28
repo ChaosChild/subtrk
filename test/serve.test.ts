@@ -373,14 +373,20 @@ describe("POST /api/config", () => {
     });
   });
 
-  it("GET → 405 with allow: POST", async () => {
+  it("GET with a token → current display config; without → 401", async () => {
     const subtrkDir = mkdtempSync(join(tmpdir(), "subtrk-serve-"));
     await withServer({ subtrkDir }, async (h) => {
-      const r = await get(h.port, "/api/config", { headers: { authorization: `Bearer ${h.token}` } });
-      assert.equal(r.status, 405);
-      assert.equal(r.headers.allow, "POST");
-      assert.deepEqual(JSON.parse(r.body), { error: "method not allowed" });
-      noCors(r.headers);
+      const noToken = await get(h.port, "/api/config", {});
+      assert.equal(noToken.status, 401);
+      assert.deepEqual(JSON.parse(noToken.body), { error: "unauthorized" });
+      noCors(noToken.headers);
+      const ok = await get(h.port, "/api/config", { headers: { authorization: `Bearer ${h.token}` } });
+      assert.equal(ok.status, 200);
+      const body = JSON.parse(ok.body) as { enabled: string[]; order: string[]; hidden: string[] };
+      assert.ok(Array.isArray(body.enabled) && body.enabled.length > 0);
+      assert.deepEqual(body.order, []);
+      assert.deepEqual(body.hidden, []);
+      noCors(ok.headers);
     });
   });
 
@@ -392,7 +398,7 @@ describe("POST /api/config", () => {
       assert.deepEqual(JSON.parse(broken.body), { error: "invalid config body" });
       const noKeys = await postConfig(h, JSON.stringify({ foo: ["claude"] }));
       assert.equal(noKeys.status, 400);
-      assert.deepEqual(JSON.parse(noKeys.body), { error: "config body must include enabled or order" });
+      assert.deepEqual(JSON.parse(noKeys.body), { error: "config body must include enabled, order or hidden" });
       noCors(broken.headers);
     });
   });
@@ -446,6 +452,41 @@ describe("POST /api/config", () => {
         enabled: ["claude"],
         order: ["claude", "openai"],
       });
+    });
+  });
+
+  it("hidden card keys: written deduped, malformed rejected, unknown prefix rejected", async () => {
+    const subtrkDir = mkdtempSync(join(tmpdir(), "subtrk-serve-"));
+    await withServer({ subtrkDir }, async (h) => {
+      const ok = await postConfig(
+        h,
+        JSON.stringify({ hidden: ["google:gemini-models", "google:gemini-models", "claude"] }),
+      );
+      assert.equal(ok.status, 200);
+      assert.deepEqual(JSON.parse(ok.body), { ok: true });
+      assert.deepEqual(JSON.parse(readFileSync(join(subtrkDir, "config.json"), "utf8")), {
+        hidden: ["google:gemini-models", "claude"],
+      });
+
+      const badSlug = await postConfig(h, JSON.stringify({ hidden: ["google:Gemini"] }));
+      assert.equal(badSlug.status, 400);
+      assert.deepEqual(JSON.parse(badSlug.body), { error: "invalid card key in hidden" });
+
+      const badPrefix = await postConfig(h, JSON.stringify({ hidden: ["nope"] }));
+      assert.equal(badPrefix.status, 400);
+      assert.deepEqual(JSON.parse(badPrefix.body), { error: "invalid card key in hidden" });
+
+      // a valid write followed by a rejected one keeps the earlier file intact
+      assert.deepEqual(JSON.parse(readFileSync(join(subtrkDir, "config.json"), "utf8")), {
+        hidden: ["google:gemini-models", "claude"],
+      });
+
+      const cleared = await postConfig(h, JSON.stringify({ hidden: [] }));
+      assert.equal(cleared.status, 200);
+      assert.deepEqual(JSON.parse(readFileSync(join(subtrkDir, "config.json"), "utf8")), { hidden: [] });
+
+      const roundtrip = await get(h.port, "/api/config", { headers: { authorization: `Bearer ${h.token}` } });
+      assert.deepEqual(JSON.parse(roundtrip.body).hidden, []);
     });
   });
 

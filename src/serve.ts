@@ -22,9 +22,11 @@ import {
   type ProviderModule,
   type RefreshResult,
   removeCachedProvider,
+  loadConfig,
   SUBTRK_DIR,
   saveConfig,
   scrubValue,
+  isValidCardKey,
 } from "./core.ts";
 import { allProviders, refreshableProviders } from "./providers/index.ts";
 
@@ -98,16 +100,17 @@ async function readBody(req: IncomingMessage, cap = CONFIG_BODY_CAP_BYTES): Prom
   }
 }
 
-type ConfigPatch = { enabled?: ProviderId[]; order?: ProviderId[] };
+type ConfigPatch = { enabled?: ProviderId[]; order?: ProviderId[]; hidden?: string[] };
 
 // Pure: validate a parsed /api/config body. Fixed-literal errors; unknown extra
 // keys are ignored. enabled: all ids known, ≥1. order: all ids known, deduped,
-// may name currently-disabled providers.
+// may name currently-disabled providers. hidden: valid card keys
+// ("<providerId>" or "<providerId>:<scope>"), deduped, capped at 64.
 function parseConfigPatch(raw: unknown): { patch: ConfigPatch } | { error: string } {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { error: "invalid config body" };
-  const body = raw as { enabled?: unknown; order?: unknown };
-  if (body.enabled === undefined && body.order === undefined) {
-    return { error: "config body must include enabled or order" };
+  const body = raw as { enabled?: unknown; order?: unknown; hidden?: unknown };
+  if (body.enabled === undefined && body.order === undefined && body.hidden === undefined) {
+    return { error: "config body must include enabled, order or hidden" };
   }
   const known = (v: unknown): v is ProviderId =>
     typeof v === "string" && (ALL_PROVIDER_IDS as readonly string[]).includes(v);
@@ -120,6 +123,13 @@ function parseConfigPatch(raw: unknown): { patch: ConfigPatch } | { error: strin
   if (body.order !== undefined) {
     if (!Array.isArray(body.order) || !body.order.every(known)) return { error: "unknown provider id in order" };
     patch.order = [...new Set(body.order)];
+  }
+  if (body.hidden !== undefined) {
+    if (!Array.isArray(body.hidden) || !body.hidden.every((k) => isValidCardKey(k))) {
+      return { error: "invalid card key in hidden" };
+    }
+    if (body.hidden.length > 64) return { error: "hidden must hold at most 64 card keys" };
+    patch.hidden = [...new Set(body.hidden)];
   }
   return { patch };
 }
@@ -215,8 +225,25 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
         return;
       }
       if (path === "/api/config") {
+        if (req.method === "GET") {
+          // Current display config for the console's menus (provider selection,
+          // card manager). Bearer-protected like the other endpoints; the file
+          // holds no secrets – these are the same fields init writes.
+          if (!tokenOk(req.headers.authorization, token)) {
+            respond(res, 401, JSON.stringify({ error: "unauthorized" }));
+            return;
+          }
+          try {
+            const cfg = loadConfig(deps.subtrkDir ?? SUBTRK_DIR);
+            respond(res, 200, JSON.stringify({ enabled: cfg.enabled, order: cfg.order ?? [], hidden: cfg.hidden ?? [] }));
+          } catch (err) {
+            console.error(`subtrk: ${errorMessage(err)}`);
+            respond(res, 500, JSON.stringify({ error: "config unavailable" }));
+          }
+          return;
+        }
         if (req.method !== "POST") {
-          respond(res, 405, JSON.stringify({ error: "method not allowed" }), "application/json", { allow: "POST" });
+          respond(res, 405, JSON.stringify({ error: "method not allowed" }), "application/json", { allow: "GET, POST" });
           return;
         }
         if (!tokenOk(req.headers.authorization, token)) {

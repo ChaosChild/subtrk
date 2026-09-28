@@ -43,11 +43,14 @@ subtrk serve
 Starts the dashboard on a random `127.0.0.1` port and prints the URL to open –
 one page for every tracked provider: usage bars per window (with ≥80%/≥95% warning
 levels), credit pools, a 7-day reset timeline, upcoming resets, and the same
-agent view the CLI prints, auto-refreshing on the cache heartbeat. When a
-provider's error says it is refreshable, its card shows a **Refresh now** button
-that re-runs that provider's own refresh action on the host. A plus-icon menu in
-the header toggles providers on/off and cards drag to reorder – both persist
-across restarts (saved to `~/.subtrk/config.json`, like `subtrk init`).
+agent view the CLI prints, auto-refreshing on the cache heartbeat. A provider
+that reports several model classes (Google's Gemini and Claude/GPT, for example)
+renders one card per class. When a provider's error says it is refreshable, its
+card shows a **Refresh now** button that re-runs that provider's own refresh
+action on the host. A gear-icon menu in the header toggles providers on/off, an
+eye-icon menu shows or hides individual cards, and every card has an × to hide
+itself – all persist across restarts (saved to `~/.subtrk/config.json`, like
+`subtrk init`).
 
 ![Web console](docs/img/console.png)
 

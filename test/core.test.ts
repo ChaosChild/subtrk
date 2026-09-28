@@ -14,6 +14,7 @@ import {
   computeRecheckAfter,
   fetchProvider,
   getSecret,
+  isValidCardKey,
   loadConfig,
   type ProviderModule,
   type ProviderResult,
@@ -166,6 +167,44 @@ describe("config", () => {
     rmSync(join(dir, "config.json"));
     saveConfig(dir, { enabled: ["claude"] });
     assert.deepEqual(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")), { enabled: ["claude"] });
+  });
+
+  it("isValidCardKey: known provider id with an optional slug scope", () => {
+    assert.equal(isValidCardKey("claude"), true);
+    assert.equal(isValidCardKey("google:gemini-models"), true);
+    assert.equal(isValidCardKey("google:claude-and-gpt-models"), true);
+    assert.equal(isValidCardKey("nope"), false, "unknown provider id");
+    assert.equal(isValidCardKey("google:"), false, "empty slug");
+    assert.equal(isValidCardKey("google:Gemini"), false, "slug is lowercase-only");
+    assert.equal(isValidCardKey("google:a b"), false, "spaces rejected");
+    assert.equal(isValidCardKey(""), false);
+    assert.equal(isValidCardKey(42), false);
+    assert.equal(isValidCardKey(null), false);
+  });
+
+  it("reads an optional hidden card list: malformed entries dropped, duplicates removed", (t) => {
+    const dir = tempDir();
+    t.after(cleanup(dir));
+    writeFileSync(
+      join(dir, "config.json"),
+      JSON.stringify({ enabled: ["claude"], hidden: ["google:gemini-models", "google:gemini-models", "nope", 7] }),
+    );
+    assert.deepEqual(loadConfig(dir).hidden, ["google:gemini-models"]);
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ enabled: ["claude"], hidden: "google" }));
+    assert.equal(loadConfig(dir).hidden, undefined, "non-array hidden is not a hard failure");
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ enabled: ["claude"] }));
+    assert.equal(loadConfig(dir).hidden, undefined);
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ enabled: ["claude"], hidden: ["nope"] }));
+    assert.equal(loadConfig(dir).hidden, undefined, "all-invalid hidden is undefined, not an empty list");
+  });
+
+  it("saveConfig writes hidden and loadConfig reads it back", (t) => {
+    const dir = tempDir();
+    t.after(cleanup(dir));
+    saveConfig(dir, { enabled: ["claude"], hidden: ["google:claude-and-gpt-models"] });
+    assert.deepEqual(loadConfig(dir).hidden, ["google:claude-and-gpt-models"]);
+    saveConfig(dir, { hidden: [] });
+    assert.equal(loadConfig(dir).hidden, undefined, "an empty hidden list is stored and reads back undefined");
   });
 
   it("collectStatus orders providers by config order, unlisted last in registry order", async (t) => {
