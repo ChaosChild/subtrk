@@ -15,7 +15,12 @@
 //      process's --csrf_token and needs NO OAuth material. The process serves
 //      plain HTTP on one listener and TLS on the other; the probe tries each
 //      discovered listener over plain HTTP (loopback + CSRF token are the
-//      local boundary – no certificate exception anywhere).
+//      local boundary – no certificate exception anywhere). When NO language
+//      server process is running (app closed or still starting), the probe
+//      briefly spawns the app's own language_server.exe in standalone mode
+//      with a freshly generated CSRF token, queries it, and kills it – the
+//      managed spawn reads the same machine-local login and is torn down in
+//      the same probe. Only if that fails does the probe fall back to (2).
 //   2. Remote fallback (any platform): POST /v1internal:retrieveUserQuotaSummary
 //      with an EMPTY {} body (no loadCodeAssist step). This is the Code Assist
 //      quota domain – live-verified 2026-09-28 to return synthetic full-quota
@@ -31,8 +36,9 @@
 // and the call retried once. Legacy gemini/antigravity file lineages keep
 // their own refresh (write-back for the gemini lineage only).
 
-import { execFile } from "node:child_process";
-import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -55,6 +61,12 @@ const LS_PS_TIMEOUT_MS = 4_000; // PowerShell CIM + TCP enumeration startup
 const LS_PORT_TIMEOUT_MS = 1_500;
 const LS_MAX_CANDIDATES = 3;
 const LS_MAX_PORTS = 3;
+// Managed spawn: overall budget for the local source inside the 10s probe cap,
+// the poll cadence while a freshly spawned server warms up, and the headroom
+// the spawn path needs left in the budget before it is even attempted.
+const LS_LOCAL_BUDGET_MS = 8_000;
+const LS_SPAWN_MIN_LEFT_MS = 3_000;
+const LS_SPAWN_POLL_GAP_MS = 400;
 // The remote REST view reads a different quota domain than the Antigravity
 // dashboard (synthetic resets; agent usage never shows up) – label the result
 // wherever it is the best available read.
@@ -242,6 +254,11 @@ export function parseGoogleSummary(body: unknown): Window[] | null {
       windows.push(w);
     }
   }
+  // Human order: 5h windows first, then 7d, then anything else, payload order
+  // preserved within a rank – every provider's card reads top-to-bottom as
+  // 5h before 7d (the payload itself lists weekly first). Array.sort is stable.
+  const rank = (kind: string): number => (kind === "5h" ? 0 : kind === "7d" ? 1 : 2);
+  windows.sort((a, b) => rank(a.kind) - rank(b.kind));
   return windows;
 }
 
@@ -663,17 +680,62 @@ function lsQuotaPost(csrf: string, port: number): Promise<{ ok: true; text: stri
 
 type LocalProbe = { windows: Window[] } | { windows: null; reason?: string };
 
-// The desktop app's language server serves the same two-group payload its
-// Model Quota panel renders – the authoritative Antigravity view, reachable
-// with no OAuth material. Every failure degrades to a reason string; the
-// remote fallback decides what the operator sees.
-async function probeLocalLanguageServer(): Promise<LocalProbe> {
-  if (process.platform !== "win32") return { windows: null };
-  const text = await runLsDiscovery();
-  const candidates = text === null ? [] : parseLsCandidates(text);
-  if (candidates.length === 0) {
-    return { windows: null, reason: "no Antigravity desktop language server process" };
+// Pure: the managed-spawn command line mirrors the desktop app's own flags,
+// with a freshly generated CSRF token and the random-port setting.
+export function buildLsSpawnArgs(csrf: string): string[] {
+  return [
+    "--standalone",
+    "--override_ide_name",
+    "antigravity",
+    "--subclient_type",
+    "hub",
+    "--override_ide_version",
+    "2.17.0",
+    "--override_user_agent_name",
+    "antigravity",
+    "--https_server_port",
+    "0",
+    "--csrf_token",
+    csrf,
+    "--app_data_dir",
+    "antigravity",
+    "--api_server_url",
+    "https://generativelanguage.googleapis.com",
+    "--cloud_code_endpoint",
+    "https://daily-cloudcode-pa.googleapis.com",
+  ];
+}
+
+// The standalone binary the desktop app ships; null when absent.
+function lsExePath(): string | null {
+  const base = process.env.LOCALAPPDATA;
+  if (!base) return null;
+  const exe = join(base, "Programs", "Antigravity", "resources", "bin", "language_server.exe");
+  return existsSync(exe) ? exe : null;
+}
+
+function lsAlive(child: ChildProcess): boolean {
+  return child.pid !== undefined && child.exitCode === null && child.signalCode === null;
+}
+
+// Best-effort tree kill (the server spawns sidecars); nothing may throw.
+function killLsTree(child: ChildProcess): void {
+  if (child.pid !== undefined) {
+    try {
+      execFile("taskkill", ["/PID", String(child.pid), "/T", "/F"], { timeout: 5_000 }, () => {}).unref();
+    } catch {
+      /* fall through to the direct kill */
+    }
   }
+  try {
+    child.kill();
+  } catch {
+    /* already gone */
+  }
+}
+
+// Try a set of discovered candidates; the first parseable non-empty summary wins.
+async function probeCandidates(candidates: LsCandidate[]): Promise<Window[] | null> {
   for (const cand of candidates.slice(0, LS_MAX_CANDIDATES)) {
     await registerSecret(cand.csrf);
     for (const port of cand.ports.slice(0, LS_MAX_PORTS)) {
@@ -686,10 +748,71 @@ async function probeLocalLanguageServer(): Promise<LocalProbe> {
         continue; // a listener that is not the Connect endpoint (empty or other body)
       }
       const windows = parseGoogleSummary(body);
-      if (windows && windows.length > 0) return { windows };
+      if (windows && windows.length > 0) return windows;
     }
   }
-  return { windows: null, reason: "quota RPC unreachable on all language server ports" };
+  return null;
+}
+
+// Managed spawn for the app-closed / app-still-starting case: start the app's
+// own language_server.exe standalone (it authenticates from the same
+// machine-local login), poll readiness with the discovery script filtered to
+// the spawned pid, query it, and tear it down before returning. Exported for
+// live smoke tests; the probe reaches it through probeLocalLanguageServer.
+export async function spawnLsAndProbe(deadlineMs: number): Promise<LocalProbe> {
+  const exe = lsExePath();
+  if (!exe) {
+    return {
+      windows: null,
+      reason: "no Antigravity desktop language server and the standalone binary is not installed",
+    };
+  }
+  if (Date.now() >= deadlineMs - LS_SPAWN_MIN_LEFT_MS) {
+    return { windows: null, reason: "no probe budget left for a managed language server" };
+  }
+  const csrf = randomUUID();
+  await registerSecret(csrf);
+  let child: ChildProcess;
+  try {
+    child = spawn(exe, buildLsSpawnArgs(csrf), { stdio: "ignore", windowsHide: true });
+  } catch {
+    return { windows: null, reason: "the Antigravity language server binary could not be started" };
+  }
+  child.on("error", () => {}); // ENOENT etc. surfaces async on win32 – never crash the probe
+  try {
+    while (lsAlive(child) && Date.now() < deadlineMs) {
+      await sleep(LS_SPAWN_POLL_GAP_MS);
+      if (!lsAlive(child) || Date.now() >= deadlineMs) break;
+      const text = await runLsDiscovery();
+      const mine = (text === null ? [] : parseLsCandidates(text)).filter((c) => c.pid === child.pid);
+      if (mine.length === 0) continue;
+      const windows = await probeCandidates(mine);
+      if (windows) return { windows };
+    }
+  } finally {
+    killLsTree(child);
+  }
+  return { windows: null, reason: "the spawned language server did not become ready" };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// The desktop app's language server serves the same two-group payload its
+// Model Quota panel renders – the authoritative Antigravity view, reachable
+// with no OAuth material. Every failure degrades to a reason string; the
+// remote fallback decides what the operator sees.
+async function probeLocalLanguageServer(): Promise<LocalProbe> {
+  if (process.platform !== "win32") return { windows: null };
+  const deadline = Date.now() + LS_LOCAL_BUDGET_MS;
+  const text = await runLsDiscovery();
+  const candidates = text === null ? [] : parseLsCandidates(text);
+  if (candidates.length > 0) {
+    const windows = await probeCandidates(candidates);
+    return windows ? { windows } : { windows: null, reason: "quota RPC unreachable on all language server ports" };
+  }
+  return spawnLsAndProbe(deadline);
 }
 
 function fail(error: ProviderError, fetchedAt: string): ProviderResult {
@@ -705,8 +828,8 @@ async function probeRemote(fetchedAt: string): Promise<ProviderResult> {
     return fail(
       {
         kind: "no-credentials",
-        message: "no Google/Antigravity credential found (agy keyring and file lineages)",
-        hint: "log in once with agy (irm https://antigravity.google/cli/install.ps1 | iex)",
+        message: "no Google credential found for the remote fallback (agy keyring and file lineages)",
+        hint: "start the Antigravity desktop app, or log in once inside agy",
       },
       fetchedAt,
     );

@@ -236,9 +236,14 @@ Antigravity desktop app showed the weekly Gemini limit exhausted. The
 authoritative source is therefore the desktop app's local language server: the
 same `RetrieveUserQuotaSummary` Connect RPC the Model Quota panel renders, with
 the process command line (`--csrf_token`) and 127.0.0.1 listeners read through
-a fixed-literal PowerShell script. It needs no OAuth material. When the app is
-not running (or off-Windows), the probe falls back to the remote REST call and
+a fixed-literal PowerShell script. It needs no OAuth material. When no
+language server process is running at all (app closed or still starting), the
+probe briefly spawns the app's own `language_server.exe` standalone with a
+freshly generated CSRF token, queries it, and kills it within the same probe –
+the dashboard's numbers are available without keeping the app open. When even
+that fails (or off-Windows), the probe falls back to the remote REST call and
 labels the result as the Code Assist view instead of presenting it as the
-dashboard's numbers. The same evidence explained the third-party trackers:
+dashboard's numbers. Parsed windows are ordered 5h before 7d (payload order
+within a rank), so the card reads top-to-bottom like every other provider's. The same evidence explained the third-party trackers:
 CLIProxyAPI agreed with reality because it counted requests and 429s locally,
 never because it read a remote summary.
