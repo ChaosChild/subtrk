@@ -36,9 +36,9 @@
 // and the call retried once. Legacy gemini/antigravity file lineages keep
 // their own refresh (write-back for the gemini lineage only).
 
-import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -810,9 +810,7 @@ async function probeLocalLanguageServer(): Promise<LocalProbe> {
   const candidates = text === null ? [] : parseLsCandidates(text);
   if (candidates.length > 0) {
     const windows = await probeCandidates(candidates);
-    return windows
-      ? { windows }
-      : { windows: null, reason: "quota RPC unreachable on all language server ports" };
+    return windows ? { windows } : { windows: null, reason: "quota RPC unreachable on all language server ports" };
   }
   return spawnLsAndProbe(deadline);
 }

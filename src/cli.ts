@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { realpathSync, readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 // cli.ts – subtrk entry point. `subtrk` / `subtrk status` / `subtrk init` /
