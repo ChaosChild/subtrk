@@ -8,9 +8,10 @@
 **AI subscription quotas in one command.** `subtrk` reports remaining usage for
 the plans its contributors use – today Claude Pro, Z.ai GLM Coding Plan, Alibaba
 Cloud Model Studio, Google AI Pro, OpenCode Zen, OpenRouter, the ChatGPT plans
-(via the OpenAI Codex CLI) and the Kimi coding plans (via the Kimi Desktop app
-or the Kimi Code CLI) – in one compact
-view, designed first for the AI agents that work for you and second for you.
+(via the OpenAI Codex CLI), the Kimi coding plans (via the Kimi Desktop app or
+the Kimi Code CLI) and the z.ai Start Plan bundles (via the ZCode desktop app) –
+in one compact view, designed first for the AI agents that work for you and
+second for you.
 Coverage expands as needs or requests come in: adding a provider is a contained
 change (see the [implementation guide](docs/implementation-plan.md)), and PRs
 adding providers are welcome.
@@ -178,6 +179,7 @@ is the machine-readable contract:
 | OpenRouter | pay-as-you-go | `/api/v1/key` (+ `/api/v1/credits` with a management key) | – | official |
 | OpenAI | ChatGPT plan via Codex | the Codex CLI's own ChatGPT usage endpoint, read from its stored login | free: one 30-day window; paid: 5h + weekly | official client endpoint, not a documented public API |
 | Kimi | Kimi Desktop / Kimi Code CLI coding plans | the Kimi Desktop app's key or the Kimi Code CLI's OAuth login against the coding usage endpoints | free: one quota window; CLI login: 5h + 7d + monthly | official client endpoints, not a documented public API |
+| ZCode | z.ai Start Plan bundles | the z.ai balance API via the local credential store (the ZCode desktop app's stored login) | one window per per-model token bucket, bucket expiry as reset | official client endpoint, undocumented |
 
 None of these vendors officially supports third-party quota readers except Alibaba
 and OpenRouter; the others are the same calls their own CLIs make, and can change.

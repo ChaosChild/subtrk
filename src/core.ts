@@ -18,7 +18,16 @@ import { dirname, join } from "node:path";
 
 // ---------- shared contract (docs/spec.md §ProviderResult) ----------
 
-export type ProviderId = "claude" | "glm" | "alibaba" | "google" | "opencode" | "openrouter" | "openai" | "kimi";
+export type ProviderId =
+  | "claude"
+  | "glm"
+  | "alibaba"
+  | "google"
+  | "opencode"
+  | "openrouter"
+  | "openai"
+  | "kimi"
+  | "zcode";
 
 export type ErrorKind =
   | "no-credentials"
@@ -115,6 +124,7 @@ export const ALL_PROVIDER_IDS: readonly ProviderId[] = [
   "openrouter",
   "openai",
   "kimi",
+  "zcode",
 ];
 export const PROBE_TIMEOUT_MS = 10_000;
 // --fresh never bypasses these providers' TTL floors (claude's usage endpoint

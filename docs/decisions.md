@@ -272,3 +272,22 @@ ranks that provider's whole group (legacy configs keep working), a scoped key
 positions a single class, and the CLI's provider ordering projects from the
 first mentioning entry – so model-class cards reorder and interleave
 independently and a dragged card never drags its siblings along.
+
+## D16 · ZCode – z.ai Start Plan bundles read from the desktop's local credential store
+
+z.ai issues token bundles (Start Plan builds such as "ZCode Trust Build": a fixed
+token pool per model with an expiry) that arrive through ZCode as a separate
+provider surface, distinct from the GLM coding plan. The balance API
+(zcode.z.ai /api/v1/zcode-plan/billing/balance) is undocumented; the credential
+is the machine-local store the desktop app itself maintains
+(~/.zcode/v2/credentials.json, AES-256-GCM "enc:v1:" values with a key derived
+from the local account) plus the telemetry-state.json deviceMid header – a
+presence check the server does not validate. subtrk decrypts the stored login
+read-only in-process and registers it for redaction; nothing is ever written
+back, and the token goes nowhere except the balance call. Each balance bucket
+becomes one window scoped by model slug, so a multi-model bundle renders one
+card per model under the same rules as D15, and "accepted by the operator" is
+the existing machinery: init's check-only step, the header toggle, and the
+per-card hide. A lapsed bundle is an honest error state (no active Start Plan
+bundle), not a hidden provider. No refresh verb – the desktop owns the login,
+mirroring D12.

@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { clearSecrets, registerSecret, scrub, scrubValue } from "../src/core.ts";
 import {
   deriveCredits,
   extractJson,
@@ -162,4 +163,23 @@ test("google credential parsing extracts exactly the known fields (bare token st
   assert.ok(bare);
   assert.equal(bare.accessToken, SECRET);
   assert.equal(bare.refreshToken, undefined);
+});
+
+test("zcode registered JWT is scrubbed from plausible error and note strings", () => {
+  const JWT = "FAKE.zcode.jwt.header.payload.sig";
+  registerSecret(JWT);
+  try {
+    const note = `balance request failed: token ${JWT} was rejected upstream`;
+    const scrubbedNote = scrub(note);
+    assert.ok(!scrubbedNote.includes(JWT));
+    assert.ok(scrubbedNote.includes("***"));
+    const err = scrubValue({
+      error: { kind: "expired-token", message: `ZCode rejected the stored login near ${JWT}` },
+      note,
+    });
+    assert.ok(!json(err).includes(JWT));
+    assert.ok(json(err).includes("***"));
+  } finally {
+    clearSecrets();
+  }
 });

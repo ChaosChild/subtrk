@@ -178,6 +178,7 @@ Default TTLs (the policy – no user knobs in v0):
 | openrouter | 60 000 | official API, cheap |
 | openai | 60 000 | vendor's own client endpoint, cheap |
 | kimi | 300 000 | vendor client endpoints, cheap |
+| zcode | 60 000 | vendor client endpoint, cheap |
 | opencode | 0 | local presence check only – bypasses cache entirely |
 
 ## Configuration & secrets
@@ -494,9 +495,39 @@ Neither file → `no-credentials`, hint naming both paths.
   `http-error`, 10s AbortController timeout); 401/403 on the API-key path fall
   through to the CLI OAuth source once before erroring.
 
+### zcode – z.ai Start Plan bundles (via the ZCode desktop app)
+
+Credential: the desktop app's machine-local encrypted store
+`~/.zcode/v2/credentials.json` – key `zcodejwttoken`, an AES-256-GCM blob
+(`enc:v1:<iv>.<tag>.<ciphertext>`, base64url parts; key = sha256 of a
+machine-derived secret, `ZCODE_CREDENTIAL_SECRET` in `~/.subtrk/env` overrides).
+subtrk decrypts the stored login read-only in-process and registers the token
+for redaction – nothing is ever written back, and the token goes nowhere except
+the balance call. `~/.zcode/v2/telemetry-state.json` `deviceMid` rides along as
+the `X-Device-Mid` header – a presence check the server does not validate
+(zero-UUID fallback). Store missing, key absent or undecryptable →
+`no-credentials`.
+
+- `GET https://zcode.z.ai/api/v1/zcode-plan/billing/balance` with
+  `Authorization: Bearer <jwt>` – an undocumented endpoint, so desktop parity
+  rules: an absent `code` field is success, a non-zero `code` →
+  `not-readable-remotely` with the server's `msg`; 401 → `expired-token`, hint
+  `log in again in the ZCode desktop app`.
+- Parse: active plans (`status: "active"`, `ends_at` ahead of `server_time`)
+  join their per-model balance buckets (`total_units`/`used_units`/
+  `expires_at`) by `user_plan_id` → one window per bucket, scoped by model slug
+  (entitlement `show_name`, else the `model:` capability), kind from the
+  entitlement period (`one_time` → `bundle`, so a multi-model bundle renders
+  one card per model under the D15 rules), `resetsAt` = the bucket's
+  `expires_at`. Plan label = the active plan's name. Orphaned and unusable
+  buckets are skipped; no active plan → honest error `not-readable-remotely`
+  ("no active Start Plan bundle for this ZCode account"); a plan with no
+  balances yet → ok, note "bundle active but no balances reported yet".
+- No `refresh()` – the desktop owns the login, mirroring D12.
+
 ## `subtrk init` (one-time interactive setup)
 
-First, init asks which providers to track: a numbered listing of all eight,
+First, init asks which providers to track: a numbered listing of all nine,
 answered with numbers and/or ids (`1 3 5`, `claude, google`); empty input keeps
 the current selection, invalid input re-prompts (bounded), and non-TTY stdin
 skips the question. The answer is stored as `~/.subtrk/config.json`
@@ -540,6 +571,10 @@ Checks, in order, printing a checklist with pass/fail per provider:
    `KIMI_CLIENT_ID` is not yet stored, the PUBLIC OAuth client id is fetched
    from MoonshotAI/kimi-code's published source into `~/.subtrk/env` (the
    probe's token refresh needs it).
+9. Zcode: check-only – `~/.zcode/v2/credentials.json` carries a
+   `zcodejwttoken` (presence only – the store is encrypted, decryption is the
+   probe's job, never init's) → `[ok]`; else `[missing]` with the ZCode
+   desktop login as the fix.
 
 `subtrk init` never sends a secret anywhere except the owning provider's endpoint, and
 never writes secrets anywhere except `~/.subtrk/env` and vendor-owned files.
