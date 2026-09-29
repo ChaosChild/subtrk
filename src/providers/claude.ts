@@ -95,9 +95,13 @@ interface ClaudeUsageWin {
 
 // Pure: map the usage endpoint body to spec windows; null when the shape is unrecognized.
 // resets_at null or missing marks an inactive window (e.g. no open 5h session) – skip it, never a parse failure.
-export function parseClaudeUsage(body: unknown): { windows: Window[] } | null {
+// seven_day_breakdown (per-surface mix: Claude Code / Chats / Cowork) rides along as
+// `surfaces` when present – percentages, no tokens; absent/degenerate shapes are ignored.
+export function parseClaudeUsage(
+  body: unknown,
+): { windows: Window[]; surfaces?: { key: string; name: string; percent: number }[] } | null {
   if (typeof body !== "object" || body === null) return null;
-  const b = body as { five_hour?: ClaudeUsageWin; seven_day?: ClaudeUsageWin };
+  const b = body as { five_hour?: ClaudeUsageWin; seven_day?: ClaudeUsageWin; seven_day_breakdown?: unknown };
   const windows: Window[] = [];
   const pairs: Array<[string, ClaudeUsageWin | undefined]> = [
     ["5h", b.five_hour],
@@ -112,7 +116,22 @@ export function parseClaudeUsage(body: unknown): { windows: Window[] } | null {
     windows.push({ kind, usedPercent: w.utilization, resetsAt: new Date(t).toISOString() });
   }
   if (windows.length === 0) return null;
-  return { windows };
+  const bd = b.seven_day_breakdown as { rows?: unknown } | undefined;
+  const surfaces: { key: string; name: string; percent: number }[] = [];
+  if (Array.isArray(bd?.rows)) {
+    for (const raw of bd.rows) {
+      if (typeof raw !== "object" || raw === null) continue;
+      const r = raw as { key?: unknown; display_name?: unknown; percent?: unknown };
+      if (typeof r.key !== "string" || r.key === "" || typeof r.percent !== "number" || !Number.isFinite(r.percent))
+        continue;
+      surfaces.push({
+        key: r.key,
+        name: typeof r.display_name === "string" && r.display_name !== "" ? r.display_name : r.key,
+        percent: r.percent,
+      });
+    }
+  }
+  return surfaces.length > 0 ? { windows, surfaces } : { windows };
 }
 
 type FetchOutcome =
@@ -332,7 +351,14 @@ async function probeInner(): Promise<ProviderResult> {
   const parsed = parseClaudeUsage(body);
   if (!parsed)
     return fail({ kind: "parse-failure", message: "usage response missing five_hour/seven_day keys" }, fetchedAt);
-  return { id: "claude", ok: true, stale: false, fetchedAt, windows: parsed.windows };
+  return {
+    id: "claude",
+    ok: true,
+    stale: false,
+    fetchedAt,
+    windows: parsed.windows,
+    ...(parsed.surfaces ? { surfaces: parsed.surfaces } : {}),
+  };
 }
 
 // probe = credential load + (expired -> self-refresh + write-back) + usage read.

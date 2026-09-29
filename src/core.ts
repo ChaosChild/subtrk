@@ -75,6 +75,9 @@ export interface ProviderResult {
   windows?: Window[];
   credits?: Credits;
   note?: string;
+  // Additive (schemaVersion stays 1): per-surface usage mix where a provider
+  // exposes one (claude's seven_day_breakdown: Claude Code / Chats / Cowork).
+  surfaces?: { key: string; name: string; percent: number }[];
   refreshable?: true; // module supports interactive refresh (subtrk auth refresh / POST /api/refresh)
   error?: ProviderError;
 }
@@ -488,7 +491,10 @@ function readLock(lockPath: string): LockInfo | null {
   return null;
 }
 
-function acquireLock(lockPath: string): boolean {
+// Existence-only lockfile (spec §Cache): created with exclusive create, GC'd
+// when the holder is provably dead or too old, never stolen otherwise. Shared
+// by the quota cache (cache.json.lock) and the usage store (usage.json.lock).
+export function acquireLock(lockPath: string): boolean {
   if (tryCreateLock(lockPath)) return true;
   const info = readLock(lockPath);
   if (!info) return false; // no stealing: cannot prove the holder is dead
@@ -503,7 +509,7 @@ function acquireLock(lockPath: string): boolean {
   return tryCreateLock(lockPath);
 }
 
-function releaseLock(lockPath: string): void {
+export function releaseLock(lockPath: string): void {
   try {
     unlinkSync(lockPath);
   } catch {

@@ -25,6 +25,7 @@ import {
 } from "./core.ts";
 import { runInit } from "./init.ts";
 import { runServe } from "./serve.ts";
+import { aggregateUsage, harvestUsage, mutateUsageStore, readUsageStore } from "./usage.ts";
 
 export interface CliDirs {
   subtrk?: string; // override ~/.subtrk (tests)
@@ -44,6 +45,7 @@ const USAGE = `subtrk – remaining quota across your tracked providers
 usage:
   subtrk                  same as: subtrk status
   subtrk status [flags]   probe enabled providers, compact text
+  subtrk usage [flags]    token usage + API-equivalent cost from the local store
   subtrk init             one-time interactive setup
   subtrk init --agent <id>  write agent instructions for a harness and exit
                           (claude|zcode|codex|opencode|agy)
@@ -57,6 +59,14 @@ status flags:
   --fields a,b          text filter: windows,credits,errors,hints
   --fresh               bypass cache TTLs once (claude keeps its 300s floor)
   --strict              exit 3 if any provider failed
+  -h, --help            this screen
+
+usage flags:
+  --json                machine-readable output (schemaVersion 1)
+  --provider <id>       restrict to provider (repeatable)
+  --days N              look back N days (default: month-to-date, local month)
+  --hour                hourly buckets instead of daily
+  --rebuild             drop re-derivable history and refetch from the sources
   -h, --help            this screen
 
 exit codes: 0 ran · 1 runtime failure · 2 usage error · 3 --strict violation`;
@@ -210,6 +220,9 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
         fields: { type: "string" },
         fresh: { type: "boolean", default: false },
         strict: { type: "boolean", default: false },
+        days: { type: "string" },
+        hour: { type: "boolean", default: false },
+        rebuild: { type: "boolean", default: false },
         port: { type: "string" },
         agent: { type: "string" },
         help: { type: "boolean", short: "h", default: false },
@@ -242,6 +255,9 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     fields,
     fresh,
     strict,
+    days,
+    hour,
+    rebuild,
     port,
     agent,
     help,
@@ -252,6 +268,9 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     fields?: string;
     fresh?: boolean;
     strict?: boolean;
+    days?: string;
+    hour?: boolean;
+    rebuild?: boolean;
     port?: string;
     agent?: string;
     help?: boolean;
@@ -297,6 +316,8 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     }
   }
   if (cmd === "auth refresh") return authRefresh(provider, deps);
+  if (cmd === "usage")
+    return usageCommand({ json: json === true, provider, days, hour: hour === true, rebuild: rebuild === true }, deps);
   if (cmd !== "status") {
     console.error(`subtrk: unknown command '${cmd}' – try subtrk --help`);
     return 2;
@@ -336,6 +357,16 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     return 1;
   }
   const { out, ttlById } = collected;
+
+  // Usage harvest rides every status call (M3): window-% samples from this
+  // round plus the due token-history sources, under a short budget so an
+  // interactive `subtrk status` never hangs on it. Best-effort – failures
+  // land in stderr, the status output is untouched.
+  try {
+    await harvestUsage(out.providers, { subtrkDir: deps.dirs?.subtrk, budgetMs: 4_000 });
+  } catch {
+    /* never fail status over usage bookkeeping */
+  }
 
   if (json) console.log(JSON.stringify(scrubValue(out)));
   else for (const line of renderText(out, fieldSet, Date.now(), ttlById)) console.log(line);
@@ -382,6 +413,157 @@ async function authRefresh(providerIds: string[], deps: CliDeps): Promise<number
     console.error(`subtrk: ${errorMessage(err)}`);
     return 1;
   }
+}
+
+// ---------- usage (M3) ----------
+
+interface UsageArgs {
+  json: boolean;
+  provider: string[];
+  days?: string;
+  hour: boolean;
+  rebuild: boolean;
+}
+
+function fmtTok(n: number): string {
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return `${(n / 1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (abs >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
+  return String(Math.round(n));
+}
+
+// `subtrk usage` – reads the local usage store (refreshing due sources first,
+// short budget) and prints per-provider token totals with API-equivalent cost.
+// Split-less providers (zcode) show blended estimates; %-only providers
+// (claude, google, kimi) say so instead of inventing tokens.
+async function usageCommand(args: UsageArgs, deps: CliDeps): Promise<number> {
+  const dir = deps.dirs?.subtrk ?? SUBTRK_DIR;
+  let daysN: number | null = null;
+  if (args.days !== undefined) {
+    if (!/^\d+$/.test(args.days) || Number(args.days) < 1 || Number(args.days) > 365) {
+      console.error("subtrk: --days must be an integer between 1 and 365");
+      return 2;
+    }
+    daysN = Number(args.days);
+  }
+  const badProvider = args.provider.find((id) => !(ALL_PROVIDER_IDS as readonly string[]).includes(id));
+  if (badProvider) {
+    console.error(`subtrk: unknown provider '${badProvider}'`);
+    return 2;
+  }
+
+  if (args.rebuild) {
+    // Drop everything re-derivable from vendor range APIs. zcode deltas and
+    // probe samples are NOT re-derivable and stay.
+    mutateUsageStore(dir, (store) => {
+      delete store.daily.glm;
+      delete store.hourly.glm;
+      delete store.state.glm;
+      delete store.daily.openrouter;
+      delete store.hourly.openrouter;
+      delete store.state.openrouter;
+    });
+    console.error("usage: rebuild queued – refetching glm + openrouter history");
+  }
+
+  const harvest = await harvestUsage([], { subtrkDir: dir, budgetMs: args.rebuild ? 30_000 : 4_000 });
+  for (const e of harvest.errors) console.error(`subtrk: usage harvest: ${e}`);
+
+  const nowMs = Date.now();
+  const now = new Date(nowMs);
+  const fromMs =
+    daysN !== null
+      ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - (daysN - 1)).getTime()
+      : new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  const granularity: "day" | "hour" = args.hour ? "hour" : "day";
+  const store = readUsageStore(dir);
+  const scope = args.provider.length > 0 ? args.provider : null;
+  const merged: Record<string, ReturnType<typeof aggregateUsage>["providers"][string]> = {};
+  const ids = scope ?? [
+    ...new Set([...Object.keys(store.daily), ...Object.keys(store.hourly), ...Object.keys(store.samples)]),
+  ];
+  for (const id of ids) {
+    const agg = aggregateUsage(store, { provider: id, granularity, fromMs, toMs: nowMs });
+    for (const [id2, usage] of Object.entries(agg.providers)) merged[id2] = usage;
+  }
+  const rangeLabel = daysN !== null ? `last ${daysN}d` : "month-to-date";
+
+  if (args.json) {
+    console.log(
+      JSON.stringify(
+        scrubValue({
+          schemaVersion: 1,
+          from: new Date(fromMs).toISOString(),
+          to: new Date(nowMs).toISOString(),
+          granularity,
+          providers: merged,
+        }),
+      ),
+    );
+    return 0;
+  }
+
+  const lines: string[] = [`subtrk usage – ${rangeLabel} · from ${new Date(fromMs).toLocaleDateString("en-CA")}`];
+  const grand = { in: 0, cr: 0, out: 0, usdActual: 0, usdEst: 0 };
+  let anyLine = false;
+  for (const id of Object.keys(merged).sort((a, b) => a.localeCompare(b))) {
+    const u = merged[id];
+    if (u.in + u.cr + u.cw + u.out + u.tot + u.req === 0 && u.samples.length === 0) continue;
+    anyLine = true;
+    if (u.samples.length > 0 && u.in + u.cr + u.cw + u.out + u.tot === 0) {
+      const latest: string[] = [];
+      const seenKinds = new Set<string>();
+      for (let i = u.samples.length - 1; i >= 0; i--) {
+        const s = u.samples[i];
+        const kind = s.k.split("·")[0];
+        if (seenKinds.has(kind)) continue;
+        seenKinds.add(kind);
+        latest.push(`${kind} ${Math.round(s.u)}%`);
+        if (latest.length >= 3) break;
+      }
+      lines.push(`${id.padEnd(10)} % history only (no vendor token counts) · latest ${latest.join(" · ")}`);
+      continue;
+    }
+    const usdParts: string[] = [];
+    if (u.usdActual > 0) usdParts.push(`$${u.usdActual.toFixed(2)} actual`);
+    if (u.usdEst > 0) usdParts.push(`$${u.usdEst.toFixed(2)} est`);
+    const usdLabel = usdParts.length > 0 ? ` · ${usdParts.join(" + ")}` : "";
+    if (u.splitless) {
+      lines.push(
+        `${id.padEnd(10)} ${fmtTok(u.tot)} tok (totals only) · blended ${usdLabel.replace(" · ", "") || "unpriced"}`.replace(
+          " · ·",
+          " ·",
+        ),
+      );
+      grand.usdActual += u.usdActual;
+      grand.usdEst += u.usdEst;
+      continue;
+    }
+    const hit = u.cacheHit !== null ? `${Math.round(u.cacheHit * 100)}%` : "–";
+    lines.push(
+      `${id.padEnd(10)} ${fmtTok(u.in + u.cr + u.out)} tok · in ${fmtTok(u.in)} · cached ${fmtTok(u.cr)} · hit ${hit} · out ${fmtTok(u.out)}${usdLabel}`,
+    );
+    grand.in += u.in;
+    grand.cr += u.cr;
+    grand.out += u.out;
+    grand.usdActual += u.usdActual;
+    grand.usdEst += u.usdEst;
+  }
+  if (!anyLine) {
+    lines.push("(no usage recorded yet – it accumulates from status calls, dashboard refreshes and subtrk usage)");
+  } else {
+    const totalTok = grand.in + grand.cr + grand.out;
+    const usdBits: string[] = [];
+    if (grand.usdActual > 0) usdBits.push(`actual $${grand.usdActual.toFixed(2)}`);
+    if (grand.usdEst > 0) usdBits.push(`est $${grand.usdEst.toFixed(2)}`);
+    lines.push(
+      `${"totals".padEnd(10)} ${fmtTok(totalTok)} tok · in ${fmtTok(grand.in)} · cached ${fmtTok(grand.cr)} · out ${fmtTok(grand.out)}${usdBits.length ? ` · ${usdBits.join(" + ")}` : ""}`,
+    );
+  }
+  lines.push("help: subtrk usage --json | subtrk usage --provider <id> | subtrk usage --rebuild");
+  for (const line of lines) console.log(scrub(line));
+  return 0;
 }
 
 const isDirectRun =

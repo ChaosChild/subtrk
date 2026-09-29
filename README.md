@@ -176,7 +176,7 @@ is the machine-readable contract:
 | Alibaba Cloud | Model Studio Token Plan (intl) | official `bl` CLI raw gateway passthrough (`bl console call`) | 30-day credits pool (monthly-only since 2026-09-22) | official (via bl) |
 | Google | AI Pro (personal) | Antigravity desktop app's local language server (the dashboard's own view); remote Code Assist summary fallback with read-only self-refresh | per-family 5h/7d (gemini + claude-and-gpt families) | best-effort – without the app it briefly runs the app's own language server standalone; labeled remote fallback as last resort |
 | OpenCode | Zen pay-as-you-go | no usage/balance API exists for PAYG | – | signals only (honest note) |
-| OpenRouter | pay-as-you-go | `/api/v1/key` (+ `/api/v1/credits` with a management key) | – | official |
+| OpenRouter | pay-as-you-go | `/api/v1/key` (+ `/api/v1/credits` and usage history via a management key) | – | official |
 | OpenAI | ChatGPT plan via Codex | the Codex CLI's own ChatGPT usage endpoint, read from its stored login | free: one 30-day window; paid: 5h + weekly | official client endpoint, not a documented public API |
 | Kimi | Kimi Desktop / Kimi Code CLI coding plans | the Kimi Desktop app's key or the Kimi Code CLI's OAuth login against the coding usage endpoints | free: one quota window; CLI login: 5h + 7d + monthly | official client endpoints, not a documented public API |
 | ZCode | z.ai Start Plan bundles | the z.ai balance API via the local credential store (the ZCode desktop app's stored login) | one window per per-model token bucket, bucket expiry as reset | official client endpoint, undocumented |
@@ -187,6 +187,38 @@ and OpenRouter; the others are the same calls their own CLIs make, and can chang
 These are the providers the contributors use today – the set grows as needs or
 requests come in, and additions are welcome as PRs (the
 [implementation guide](docs/implementation-plan.md) walks through it).
+
+## Usage history
+
+Beyond the quota snapshot, `subtrk` keeps a local usage ledger in
+`~/.subtrk/usage.json` (hourly and daily token buckets per provider and model,
+window-% samples, a weekly pricing cache). It fills from the calls you already
+make – every `subtrk status`, dashboard refresh and `subtrk usage` harvests
+the due sources, best-effort, and history is only ever written idempotently so
+concurrent agents cannot double count.
+
+```bash
+subtrk usage                     # month-to-date tokens + API-equivalent cost
+subtrk usage --json              # machine-readable (per-provider, per-model)
+subtrk usage --days 7 --hour     # last 7 days, hourly buckets
+subtrk usage --rebuild           # re-derive range-API history from the sources
+```
+
+What you get per provider depends on what the vendor exposes: GLM, OpenRouter
+and Alibaba report token splits; OpenRouter and OpenAI costs are the vendor's
+own numbers (actual) while the rest are list-price estimates, always labeled;
+zcode bundles report totals only and are priced with your observed z.ai mix;
+Claude, Google and Kimi expose percentages only, so their usage pages show
+window-% history instead of tokens. The web console renders the same store as
+clickable per-provider usage pages plus month-to-date summary cards.
+
+**Management key note.** OpenRouter's usage history needs a *management key*
+(openrouter.ai/settings/management-keys), which `subtrk init` offers as an
+explicit option. It is account-admin scoped – it can read usage across all
+your OpenRouter keys and create keys – and it is stored plaintext in
+`~/.subtrk/env` like every other subtrk secret, inside your user profile's
+trust envelope. Skipping it costs nothing else: everything keeps working and
+OpenRouter history just says "unavailable". Decide for yourself.
 
 ## For agents
 
@@ -228,6 +260,11 @@ meantime – no intervention needed.
   provider's own interactive login when asked.
 - Secrets are mechanically redacted from all output; the cache stores normalized
   quota data only. See `docs/spec.md` §Redaction.
+- The usage ledger (`~/.subtrk/usage.json`) holds token counts, window
+  percentages and list prices – never credentials. The optional OpenRouter
+  management key is more powerful than an inference key (account-admin
+  scoped); storing it is an explicit opt-in with the trade-off spelled out in
+  `subtrk init` and §Usage history.
 - `~/.subtrk/env` holds plaintext keys inside your user profile – the same trust
   envelope as the vendor credential files it reads. Design decisions and known
   trade-offs are tracked in `docs/decisions.md`.

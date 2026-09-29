@@ -29,6 +29,7 @@ import {
   scrubValue,
 } from "./core.ts";
 import { allProviders, refreshableProviders } from "./providers/index.ts";
+import { aggregateUsage, harvestUsage, readUsageStore } from "./usage.ts";
 
 export interface ServeDeps {
   providers?: ProviderModule[]; // stub registry (tests)
@@ -189,12 +190,72 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
           return;
         }
         void collectStatus({ subtrkDir: deps.subtrkDir, providers: deps.providers }).then(
-          (c) => respond(res, 200, JSON.stringify(scrubValue(c.out))),
+          (c) => {
+            respond(res, 200, JSON.stringify(scrubValue(c.out)));
+            // Usage harvest rides every dashboard refresh (M3): fire-and-forget
+            // with its own budget – never blocks the response, never throws.
+            void harvestUsage(c.out.providers, { subtrkDir: deps.subtrkDir, budgetMs: 30_000 }).catch(() => {});
+          },
           (err: unknown) => {
             console.error(`subtrk: ${errorMessage(err)}`);
             respond(res, 500, JSON.stringify({ error: "status unavailable" }));
           },
         );
+        return;
+      }
+      if (path === "/api/usage") {
+        if (req.method !== "GET") {
+          respond(res, 405, JSON.stringify({ error: "method not allowed" }), "application/json", { allow: "GET" });
+          return;
+        }
+        if (!tokenOk(req.headers.authorization, token)) {
+          respond(res, 401, JSON.stringify({ error: "unauthorized" }));
+          return;
+        }
+        // Reads the store only – no vendor calls. Defaults: local month-to-date
+        // across every provider with stored data, day granularity.
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        const provider = url.searchParams.get("provider");
+        if (provider && !(ALL_PROVIDER_IDS as readonly string[]).includes(provider)) {
+          respond(res, 400, JSON.stringify({ error: "unknown provider" }));
+          return;
+        }
+        const granularity = url.searchParams.get("granularity") === "hour" ? "hour" : "day";
+        const parseMs = (name: string): number | null => {
+          const raw = url.searchParams.get(name);
+          if (raw === null) return null;
+          if (/^\d+$/.test(raw)) return Number(raw);
+          const t = Date.parse(raw);
+          return Number.isFinite(t) ? t : null;
+        };
+        const fromParam = parseMs("from");
+        const toParam = parseMs("to");
+        const nowMs = Date.now();
+        const from = fromParam ?? new Date(new Date(nowMs).getFullYear(), new Date(nowMs).getMonth(), 1).getTime();
+        const to = toParam ?? nowMs;
+        if (from > to) {
+          respond(res, 400, JSON.stringify({ error: "from is after to" }));
+          return;
+        }
+        try {
+          const store = readUsageStore(deps.subtrkDir ?? SUBTRK_DIR);
+          const agg = aggregateUsage(store, { provider: provider ?? undefined, granularity, fromMs: from, toMs: to });
+          respond(
+            res,
+            200,
+            JSON.stringify({
+              schemaVersion: 1,
+              generatedAt: new Date(nowMs).toISOString(),
+              from: new Date(from).toISOString(),
+              to: new Date(to).toISOString(),
+              granularity,
+              providers: agg.providers,
+            }),
+          );
+        } catch (err) {
+          console.error(`subtrk: ${errorMessage(err)}`);
+          respond(res, 500, JSON.stringify({ error: "usage unavailable" }));
+        }
         return;
       }
       if (path === "/api/refresh") {

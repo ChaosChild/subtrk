@@ -18,6 +18,12 @@ shared cache so concurrent agents never hammer provider endpoints.
 | `subtrk status --fields a,b` | Text mode: opt-in extras (`hints`); `windows`/`credits`/`errors` are default segments |
 | `subtrk status --fresh` | Bypass cache TTLs once (Claude's 300s floor still applies – warns) |
 | `subtrk status --strict` | Exit 3 if any provider failed |
+| `subtrk usage` | Token usage + API-equivalent cost from the local usage store (§Usage store); harvests due sources first (4s budget) |
+| `subtrk usage --json` | Full structured aggregate: per provider, per model, series + % samples |
+| `subtrk usage --provider <id>` | Restrict to one provider (repeatable) |
+| `subtrk usage --days N` | Look back N days (1–365); default is the local calendar month to date |
+| `subtrk usage --hour` | Hourly buckets instead of daily |
+| `subtrk usage --rebuild` | Drop and refetch re-derivable range-API history (glm, openrouter); zcode deltas and % samples are never rebuilt (not re-derivable) |
 | `subtrk init` | One-time interactive setup (the only interactive command) |
 | `subtrk init --agent <harness>` | Non-interactive: write subtrk's instructions into a harness's global agent file (see §`subtrk init`) |
 | `subtrk auth refresh` | Re-run one provider's interactive credential refresh (`--provider <id>`, see §`subtrk auth refresh`) |
@@ -119,6 +125,7 @@ interface ProviderResult {
   windows?: Window[];           // on error-fallback these are the cached values
   credits?: Credits;            // ditto
   note?: string;                // e.g. opencode's constant PAYG note
+  surfaces?: { key: string; name: string; percent: number }[]; // per-surface usage mix where a provider exposes one (claude's seven_day_breakdown); additive, schemaVersion stays 1
   refreshable?: true;           // module supports interactive refresh (additive, schemaVersion stays 1)
   error?: ProviderError;        // present iff ok === false
 }
@@ -180,6 +187,64 @@ Default TTLs (the policy – no user knobs in v0):
 | kimi | 300 000 | vendor client endpoints, cheap |
 | zcode | 60 000 | vendor client endpoint, cheap |
 | opencode | 0 | local presence check only – bypasses cache entirely |
+
+## Usage store
+
+File `~/.subtrk/usage.json` – the local usage ledger behind `subtrk usage`,
+`GET /api/usage` and the console's usage pages. Schema version 1; corrupt or
+mismatched files are discarded (the quota-cache discipline). **Never holds
+secrets** – token counts, window percentages, watermarks and list prices only.
+
+```jsonc
+{ "schemaVersion": 1,
+  "hourly":  { "<providerId>": { "2026-09-29T13": { "<model>":
+                { "in": 0, "cw": 0, "cr": 0, "out": 0, "tot": 0, "req": 0, "usd": 0 } } } },
+  "daily":   { "<providerId>": { "2026-09-29":   { "<model>": { … } } } },
+  "samples": { "<providerId>": [ { "t": 1789500000000, "k": "5h", "u": 42.0,
+               "r": "<resetsAt ISO>", "sf?": [{ "key", "name", "percent" }] } ] },
+  "state":   { "<source>": { … } },       // watermarks / cursors, no secrets
+  "pricing": { "fetchedAt": 0, "usdPerTok": { "<slug>": { "in", "out", "cr?", "cw?" } } } }
+```
+
+Bucket keys are UTC (`T13` = hour 13, day keys `YYYY-MM-DD`); the CLI and
+console aggregate to the operator's local calendar at read time. `in` is
+UNCACHED input, `cr` cache-read, `cw` cache-write, `tot` a split-less total
+(zcode), `usd` a vendor-ACTUAL cost. Estimates are computed at read time so a
+pricing refresh reprices history.
+
+**Writes are idempotent.** History is immutable – no operation "adds what it
+observed". Three write semantics, applied inside one locked read-modify-write
+(`usage.json.lock`, the same existence-only lockfile as the quota cache; a busy
+lock skips BOTH buckets and watermarks so the next harvest redoes the work):
+
+| Source type | Sources | Write rule |
+|---|---|---|
+| Range / time-series APIs | glm usage-detail, openrouter activity + analytics | **Replace.** Overwrite the fetched bucket keys (openrouter activity replaces its whole vendor retention window); keys inside a fetched hourly range that the API no longer reports are deleted. Refetching a range is a no-op. |
+| Cumulative counters | zcode `used_units` per bundle bucket | **Delta vs watermark**, evaluated inside the locked apply – a duplicate observation adds zero. Expired bundles retire their watermark. |
+| Probe samples | every probe's windows | **Append-or-replace** per window generation (`resetsAt` distinguishes them); repeats within 15 min are dropped, sub-minute doubles replaced. |
+
+Every `subtrk status`, `subtrk usage`, `/api/status` and `/api/usage`-adjacent
+refresh harvests due sources after the probes, best-effort under a time budget
+(4s CLI, 30s serve) – a harvest failure never fails status, and a lost write
+costs one future re-apply. `subtrk usage --rebuild` drops range-API buckets
+(they are re-derivable); watermarks and samples are never rebuilt.
+
+Harvest TTLs (independent of the quota TTLs above): glm usage-detail 15 min
+(30-day backfill once, then a ≤48h hourly window moving forward; vendor buckets
+switch hourly→daily beyond ~7d ranges), openrouter activity 6 h (vendor
+retention: last 30 completed UTC days), openrouter analytics 15 min (48h
+window), zcode balance 10 min, pricing 7 days.
+
+**Pricing.** Canonical source: OpenRouter's public `/api/v1/models` (no auth,
+~460 models incl. cache-read/write prices, refreshed weekly into `pricing`).
+Fallback: a bundled vendor-doc table (z.ai GLM, Alibaba qwen international,
+≤32K tier) matched through normalization + prefix aliases. Unpriced models are
+listed and excluded from sums – never priced at zero. Cost kinds: `actual`
+(vendor's own `usd`/`cost_usd`: openrouter, openai), `estimate` (list price
+formula `in·P_in + cr·P_cr + cw·P_cw + out·P_out`), `blended` (split-less
+zcode totals priced with the operator's observed z.ai in/cache/out mix, labeled
+an estimate). Providers with no token surface (claude, google, kimi) surface
+window-% history from `samples` instead of tokens.
 
 ## Configuration & secrets
 
@@ -672,7 +737,14 @@ One page for every enabled provider, served from the same cache the CLI reads.
   tells the user to restart `subtrk serve` and open the fresh URL.
 - `GET /api/status` → the identical scrubbed StatusOutput JSON that
   `subtrk status --json` prints, refreshed through the same cache (TTLs
-  honored). The Bearer compare is timing-safe; missing/wrong token → 401.
+  honored). Every response also fires the usage harvest (§Usage store)
+  fire-and-forget under a 30s budget. The Bearer compare is timing-safe;
+  missing/wrong token → 401.
+- `GET /api/usage?provider=&granularity=day|hour&from=&to=` → aggregates from
+  the usage store only – no vendor calls, so it stays fast. Defaults: local
+  month-to-date, every provider with stored data, day granularity. `from`/`to`
+  accept epoch-ms or ISO instants (`from > to` → 400); an unknown `provider`
+  → 400; non-GET → 405 with `allow: GET`; same Bearer token as `/api/status`.
 - `POST /api/refresh?provider=<id>` → re-authorises one provider, behind the
   same Bearer token as `/api/status` (401 on failure). The id must belong to a
   refresh-capable provider (400 `unknown or non-refreshable provider`
