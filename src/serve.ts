@@ -100,17 +100,18 @@ async function readBody(req: IncomingMessage, cap = CONFIG_BODY_CAP_BYTES): Prom
   }
 }
 
-type ConfigPatch = { enabled?: ProviderId[]; order?: string[]; hidden?: string[] };
+type ConfigPatch = { enabled?: ProviderId[]; order?: string[]; hidden?: string[]; theme?: "light" | "dark" };
 
 // Pure: validate a parsed /api/config body. Fixed-literal errors; unknown extra
 // keys are ignored. enabled: all ids known, ≥1. order: valid card keys
 // ("<providerId>" or "<providerId>:<scope>"), deduped, may name
 // currently-disabled providers. hidden: valid card keys, deduped, capped at 64.
+// theme: exactly "light" or "dark".
 function parseConfigPatch(raw: unknown): { patch: ConfigPatch } | { error: string } {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { error: "invalid config body" };
-  const body = raw as { enabled?: unknown; order?: unknown; hidden?: unknown };
-  if (body.enabled === undefined && body.order === undefined && body.hidden === undefined) {
-    return { error: "config body must include enabled, order or hidden" };
+  const body = raw as { enabled?: unknown; order?: unknown; hidden?: unknown; theme?: unknown };
+  if (body.enabled === undefined && body.order === undefined && body.hidden === undefined && body.theme === undefined) {
+    return { error: "config body must include enabled, order, hidden or theme" };
   }
   const known = (v: unknown): v is ProviderId =>
     typeof v === "string" && (ALL_PROVIDER_IDS as readonly string[]).includes(v);
@@ -132,6 +133,10 @@ function parseConfigPatch(raw: unknown): { patch: ConfigPatch } | { error: strin
     }
     if (body.hidden.length > 64) return { error: "hidden must hold at most 64 card keys" };
     patch.hidden = [...new Set(body.hidden)];
+  }
+  if (body.theme !== undefined) {
+    if (body.theme !== "light" && body.theme !== "dark") return { error: "invalid theme" };
+    patch.theme = body.theme;
   }
   return { patch };
 }
@@ -240,7 +245,12 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
             respond(
               res,
               200,
-              JSON.stringify({ enabled: cfg.enabled, order: cfg.order ?? [], hidden: cfg.hidden ?? [] }),
+              JSON.stringify({
+                enabled: cfg.enabled,
+                order: cfg.order ?? [],
+                hidden: cfg.hidden ?? [],
+                theme: cfg.theme ?? null,
+              }),
             );
           } catch (err) {
             console.error(`subtrk: ${errorMessage(err)}`);

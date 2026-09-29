@@ -356,6 +356,7 @@ function windowHTML(w) {
 const prettyScope = s => s.split("-").join(" ");
 
 let HIDDEN = new Set(); // hidden card keys (config.json `hidden`) – display hint only
+const root = document.documentElement; // <html> – carries data-theme for the CSS
 
 // Split a provider's windows into display groups, one per reported model class
 // (scope); a provider without scopes gets a single provider-level group. The
@@ -374,10 +375,10 @@ function scopeGroups(p) {
   return groups;
 }
 
-function cardBadge(p, ws, isFirst) {
+function cardBadge(p, ws) {
   if (p.error && p.stale) return `<span class="badge b-warn">stale · ${esc(p.error.kind)}</span>`;
-  if (isFirst && p.error) return `<span class="badge b-crit">${esc(p.error.kind)}</span>`;
-  if (!ws.length && isFirst && !p.windows && !p.credits) return `<span class="badge b-muted">signals only</span>`;
+  if (p.error) return `<span class="badge b-crit">${esc(p.error.kind)}</span>`;
+  if (!ws.length && !p.windows && !p.credits) return `<span class="badge b-muted">signals only</span>`;
   const worst = Math.max(0, ...ws.map(used));
   return worst >= 95 ? `<span class="badge b-crit">window exhausted</span>`
        : worst >= 80 ? `<span class="badge b-warn">running low</span>`
@@ -387,11 +388,14 @@ function cardBadge(p, ws, isFirst) {
 // One card per model class: a multi-class provider (windows carrying distinct
 // scopes – Google today, any aggregator-shaped provider later) renders a card
 // per scope; single-class providers render one provider card exactly as before.
-// Credits, errors, notes and the footer are provider-level and ride the first
-// card. Hiding is display-only: hidden classes keep being probed and still
-// feed the summary, timeline and resets table. Cards are ordered independently
-// per card key (config `order` holds "<id>"/"<id>:<scope>" entries) – dragging
-// one model-class card never moves its siblings.
+// Provider-level furniture (credits, error, note, footer) rides EVERY card of
+// the provider: allCardsHTML re-sorts the flat card list by config `order`
+// after rendering, so DOM position is decided independently of payload order
+// and the furniture must not move with it. Hiding is display-only: hidden
+// classes keep being probed and still feed the summary, timeline and resets
+// table. Cards are ordered independently per card key (config `order` holds
+// "<id>"/"<id>:<scope>" entries) – dragging one model-class card never moves
+// its siblings.
 let ORDER = []; // card keys in display order (config.json `order`) – display hint only
 
 function cardRank(key) {
@@ -401,11 +405,11 @@ function cardRank(key) {
   return j >= 0 ? j : Number.MAX_SAFE_INTEGER; // unlisted cards keep payload order, after listed ones
 }
 
-function providerCardHTML(p, g, first, multi) {
+function providerCardHTML(p, g, multi) {
   const m = META[p.id] || { name: p.id, color: "#6b7280", ttl: 0 };
   const worst = Math.max(0, ...g.ws.map(used));
   let body = "";
-  if (first && p.credits) {
+  if (p.credits) {
     const c = p.credits, pct = c.total != null ? clampPct((1 - Number(c.remaining) / Number(c.total)) * 100) : null;
     body += `<div><div class="label">${c.unit === "usd" ? "Balance" : "Credits left"}</div>
       <div class="credits"><span class="big">${money(c.remaining, c.unit)}</span>${c.total != null ? `<span class="of">/ ${money(c.total, c.unit)}</span>` : ""}</div>
@@ -413,18 +417,18 @@ function providerCardHTML(p, g, first, multi) {
       <div class="wreset" style="margin-top:5px"><span>${c.cycleEndsAt ? `cycle ends ${when(c.cycleEndsAt)}` : "no expiry"}</span><span>${c.source === "derived" ? "derived from %" : "from API"}</span></div></div>`;
   }
   if (g.ws.length && !p.credits) body += g.ws.map(windowHTML).join("");
-  if (first && p.error) {
+  if (p.error) {
     const remedy = p.error.remedy ? `<div class="h"><code>${esc(p.error.remedy)}</code></div>` : "";
     const ctl = p.refreshable ? `<div class="rrow"><button type="button" class="btn-refresh" data-refresh="${esc(p.id)}">Refresh now</button><span class="rnote"></span></div>` : "";
     body += `<div class="err"><span class="k">${esc(p.error.kind)}</span> – ${esc(p.error.message)}${p.error.hint ? `<div class="h">${esc(p.error.hint)}</div>` : ""}${remedy}${ctl}</div>`;
   }
-  if (first && p.note) body += `<div class="note">${esc(p.note)}</div>`;
+  if (p.note) body += `<div class="note">${esc(p.note)}</div>`;
   const hideLabel = multi ? "Hide this model class card" : `Hide ${m.name}`;
   return `<article class="card prov ${worst >= 95 ? "crit" : ""}" draggable="true" data-key="${esc(g.key)}">
     <div class="phead"><span class="drag" title="Drag to reorder" aria-hidden="true">⠿</span><div class="pmark" style="background:${m.color}">${esc(String(p.id).slice(0, 2).toUpperCase())}</div>
-      <div><div class="pname">${esc(m.name)}${multi && g.scope ? ` · ${esc(prettyScope(g.scope))}` : ""}</div><div class="pplan">${esc(p.plan || "")}</div></div>${cardBadge(p, g.ws, first)}<button type="button" class="cardx" data-x="${esc(g.key)}" data-multi="${multi ? "1" : ""}" aria-label="${esc(hideLabel)}" title="${esc(hideLabel)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div>
+      <div><div class="pname">${esc(m.name)}${multi && g.scope ? ` · ${esc(prettyScope(g.scope))}` : ""}</div><div class="pplan">${esc(p.plan || "")}</div></div>${cardBadge(p, g.ws)}<button type="button" class="cardx" data-x="${esc(g.key)}" data-multi="${multi ? "1" : ""}" aria-label="${esc(hideLabel)}" title="${esc(hideLabel)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div>
     ${body}
-    ${first ? `<div class="pfoot"><span>fetched <b data-ago="${esc(p.fetchedAt)}"></b></span><span>ttl <b>${m.ttl ? m.ttl + "s" : "none"}</b></span><span>id <b>${esc(p.id)}</b></span></div>` : ""}
+    <div class="pfoot"><span>fetched <b data-ago="${esc(p.fetchedAt)}"></b></span><span>ttl <b>${m.ttl ? m.ttl + "s" : "none"}</b></span><span>id <b>${esc(p.id)}</b></span></div>
   </article>`;
 }
 
@@ -438,11 +442,9 @@ function allCardsHTML() {
   for (const p of STATUS.providers) {
     const all = scopeGroups(p);
     const multi = all.length > 1;
-    let first = true;
     for (const g of all) {
       if (HIDDEN.has(g.key)) continue;
-      cards.push({ key: g.key, html: providerCardHTML(p, g, first, multi) });
-      first = false;
+      cards.push({ key: g.key, html: providerCardHTML(p, g, multi) });
     }
   }
   return cards.sort((a, b) => cardRank(a.key) - cardRank(b.key)).map(c => c.html).join("");
@@ -588,6 +590,10 @@ async function refresh() {
         const cfg = await cres.json();
         HIDDEN = new Set(Array.isArray(cfg.hidden) ? cfg.hidden : []);
         ORDER = Array.isArray(cfg.order) ? cfg.order : [];
+        if (cfg.theme === "light" || cfg.theme === "dark") {
+          root.dataset.theme = cfg.theme; // server truth wins on boot – see the theme note below
+          try { localStorage.setItem("subtrk-theme", cfg.theme); } catch {}
+        }
       }
     } catch {}
     render(data);
@@ -895,14 +901,17 @@ addEventListener("hashchange", () => {
   if (t && t !== token) { token = t; refresh(); }
 });
 
-// Theme: follows the OS until toggled; the choice is a per-browser convenience only.
-// (Only the theme is persisted – the bearer token never touches storage.)
-const root = document.documentElement;
+// Theme: follows the OS until toggled. The choice persists in config.json via
+// /api/config like the other console preferences; localStorage is only an
+// instant cache for same-session reloads – the per-run random port gives every
+// new serve a fresh origin, so server truth wins on boot. (Only the theme is
+// persisted – the bearer token never touches storage.)
 try { const t = localStorage.getItem("subtrk-theme"); if (t) root.dataset.theme = t; } catch {}
 $("theme").onclick = () => {
   const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
   root.dataset.theme = dark ? "light" : "dark";
   try { localStorage.setItem("subtrk-theme", root.dataset.theme); } catch {}
+  void postConfig({ theme: root.dataset.theme }); // persist server-side; postConfig ends with a refresh
 };
 </script>
 </body>
