@@ -184,7 +184,8 @@ Default TTLs (the policy – no user knobs in v0):
 ## Configuration & secrets
 
 - `~/.subtrk/config.json` – `{ "enabled": ["claude", "glm", …], "order": ["kimi",
-  "claude", …], "hidden": ["google:claude-and-gpt-models", …] }`. `enabled` gates
+  "claude", …], "hidden": ["google:claude-and-gpt-models", …], "theme": "dark" }`.
+  `enabled` gates
   which providers are tracked (absent ⇒ all enabled); `order` is the optional
   display order of console cards – entries are card keys (`"<providerId>"` or
   `"<providerId>:<scope>"`; malformed entries and duplicates dropped on read).
@@ -193,7 +194,10 @@ Default TTLs (the policy – no user knobs in v0):
   listed ones;
   `hidden` is the console's hidden-card list (`"<providerId>"` or
   `"<providerId>:<scope>"`, malformed entries dropped on read) – a display hint
-  that never affects probing or the CLI. All keys are written by `subtrk init`
+  that never affects probing or the CLI;
+  `theme` is the console's colour preference (`"light"` or `"dark"`, any other
+  value dropped on read) – also a display hint only. All keys are written by
+  `subtrk init`
   and by the web console (`POST /api/config`) through one shared `saveConfig`: a
   read-modify-write that preserves unknown pre-existing keys and lands
   atomically (temp file + rename). That is the entire config in v0 (no knobs).
@@ -682,25 +686,29 @@ One page for every enabled provider, served from the same cache the CLI reads.
   provider's cache entry is dropped so the next `/api/status` re-probes.
   Non-POST → 405 with `allow: POST`. No request body – the provider id comes
   from the query string only.
-- `POST /api/config` → persists the console's provider selection, card order and
-  hidden cards to `config.json` via `saveConfig` (atomic temp+rename; unknown
+- `POST /api/config` → persists the console's provider selection, card order,
+  hidden cards and theme to `config.json` via `saveConfig` (atomic temp+rename;
+  unknown
   pre-existing keys are preserved), behind the same Bearer token as
   `/api/status` (401 on failure). The body is a JSON object carrying at least
-  one of the three keys (a body with none → 400, so a typo'd key cannot
+  one of the four keys (a body with none → 400, so a typo'd key cannot
   silently no-op): `enabled` must be a non-empty array of known provider ids
   (unknown or empty → 400); `order` must be an array of valid card keys (malformed or
   unknown-prefix → 400, duplicates dropped, currently-disabled providers
   allowed); `hidden` must be an
   array of valid card keys (`"<providerId>"` or `"<providerId>:<scope>"`,
-  malformed or unknown-prefix → 400, duplicates dropped, capped at 64).
+  malformed or unknown-prefix → 400, duplicates dropped, capped at 64);
+  `theme` must be exactly `"light"` or `"dark"` (anything else → 400).
   Unknown extra body keys are ignored; a body over the 10KB cap, or one that
   is not valid JSON / not a plain object, → 400. Success answers 200
   `{"ok": true}` – fixed literals only, the file itself is never echoed (read
   it back through `GET /api/config`). Non-POST/GET → 405 with
   `allow: GET, POST`.
 - `GET /api/config` → the current display config for the console's menus, same
-  Bearer token, GET-only: `{"enabled": […], "order": […], "hidden": […]}`.
-  These are the fields `subtrk init` writes – the file holds no secrets.
+  Bearer token, GET-only: `{"enabled": […], "order": […], "hidden": […],
+  "theme": "light" | "dark" | null}`.
+  These are the fields `subtrk init` writes plus the console's theme – the file
+  holds no secrets.
 - Hardening: the Host header must be `127.0.0.1[:port]` or
   `localhost[:port]` (403 otherwise – DNS-rebinding defense); no CORS headers
   are ever emitted, so cross-site pages can neither read responses nor pass

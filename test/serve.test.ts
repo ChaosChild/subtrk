@@ -382,10 +382,16 @@ describe("POST /api/config", () => {
       noCors(noToken.headers);
       const ok = await get(h.port, "/api/config", { headers: { authorization: `Bearer ${h.token}` } });
       assert.equal(ok.status, 200);
-      const body = JSON.parse(ok.body) as { enabled: string[]; order: string[]; hidden: string[] };
+      const body = JSON.parse(ok.body) as {
+        enabled: string[];
+        order: string[];
+        hidden: string[];
+        theme: string | null;
+      };
       assert.ok(Array.isArray(body.enabled) && body.enabled.length > 0);
       assert.deepEqual(body.order, []);
       assert.deepEqual(body.hidden, []);
+      assert.equal(body.theme, null, "theme is null when unset");
       noCors(ok.headers);
     });
   });
@@ -398,7 +404,7 @@ describe("POST /api/config", () => {
       assert.deepEqual(JSON.parse(broken.body), { error: "invalid config body" });
       const noKeys = await postConfig(h, JSON.stringify({ foo: ["claude"] }));
       assert.equal(noKeys.status, 400);
-      assert.deepEqual(JSON.parse(noKeys.body), { error: "config body must include enabled, order or hidden" });
+      assert.deepEqual(JSON.parse(noKeys.body), { error: "config body must include enabled, order, hidden or theme" });
       noCors(broken.headers);
     });
   });
@@ -494,6 +500,29 @@ describe("POST /api/config", () => {
 
       const roundtrip = await get(h.port, "/api/config", { headers: { authorization: `Bearer ${h.token}` } });
       assert.deepEqual(JSON.parse(roundtrip.body).hidden, []);
+    });
+  });
+
+  it("theme: theme-only body passes the guard, written and read back; invalid value rejected", async () => {
+    const subtrkDir = mkdtempSync(join(tmpdir(), "subtrk-serve-"));
+    await withServer({ subtrkDir }, async (h) => {
+      const r = await postConfig(h, JSON.stringify({ theme: "dark" }));
+      assert.equal(r.status, 200);
+      assert.deepEqual(JSON.parse(r.body), { ok: true });
+      assert.deepEqual(JSON.parse(readFileSync(join(subtrkDir, "config.json"), "utf8")), { theme: "dark" });
+      noCors(r.headers);
+
+      const bad = await postConfig(h, JSON.stringify({ theme: "banana" }));
+      assert.equal(bad.status, 400);
+      assert.deepEqual(JSON.parse(bad.body), { error: "invalid theme" });
+      assert.deepEqual(
+        JSON.parse(readFileSync(join(subtrkDir, "config.json"), "utf8")),
+        { theme: "dark" },
+        "rejected patches write nothing",
+      );
+
+      const roundtrip = await get(h.port, "/api/config", { headers: { authorization: `Bearer ${h.token}` } });
+      assert.equal(JSON.parse(roundtrip.body).theme, "dark");
     });
   });
 

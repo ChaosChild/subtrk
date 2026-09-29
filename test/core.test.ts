@@ -207,6 +207,22 @@ describe("config", () => {
     assert.equal(loadConfig(dir).hidden, undefined, "an empty hidden list is stored and reads back undefined");
   });
 
+  it("theme roundtrip: exact light/dark kept on read, anything else dropped; saveConfig writes it", (t) => {
+    const dir = tempDir();
+    t.after(cleanup(dir));
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ enabled: ["claude"], theme: "dark" }));
+    assert.equal(loadConfig(dir).theme, "dark");
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ enabled: ["claude"], theme: "system" }));
+    assert.equal(loadConfig(dir).theme, undefined, "a non-light/dark theme is not a hard failure");
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ enabled: ["claude"], custom: { keep: true } }));
+    saveConfig(dir, { theme: "dark" });
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")), {
+      enabled: ["claude"],
+      theme: "dark",
+      custom: { keep: true },
+    });
+  });
+
   it("collectStatus orders providers by config order, unlisted last in registry order", async (t) => {
     const dir = tempDir();
     t.after(cleanup(dir));

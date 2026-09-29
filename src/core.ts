@@ -183,6 +183,7 @@ export interface SubtrkConfig {
   enabled: ProviderId[];
   order?: string[]; // display order of cards – "<id>" or "<id>:<scope>", unlisted keep registry order
   hidden?: string[]; // hidden console cards: "<providerId>" or "<providerId>:<scope>"
+  theme?: "light" | "dark"; // console colour theme – display hint only
 }
 
 // A card key is a known provider id, optionally scoped: "<id>:<slug>". The slug
@@ -219,10 +220,12 @@ export function loadConfig(subtrkDir: string = SUBTRK_DIR): SubtrkConfig {
   } catch {
     throw new ConfigError(`config is not valid JSON: ${path}`);
   }
-  const file = raw as { enabled?: unknown; order?: unknown; hidden?: unknown } | null;
+  const file = raw as { enabled?: unknown; order?: unknown; hidden?: unknown; theme?: unknown } | null;
+  // Display hint like order/hidden: only exact "light"/"dark" strings survive.
+  const theme = file?.theme === "light" || file?.theme === "dark" ? file.theme : undefined;
   const enabled = file?.enabled;
   if (enabled === undefined) {
-    return { enabled: [...ALL_PROVIDER_IDS], order: parseOrder(file?.order), hidden: parseHidden(file?.hidden) };
+    return { enabled: [...ALL_PROVIDER_IDS], order: parseOrder(file?.order), hidden: parseHidden(file?.hidden), theme };
   }
   if (!Array.isArray(enabled) || enabled.some((e) => typeof e !== "string")) {
     throw new ConfigError(`config.enabled must be an array of provider ids: ${path}`);
@@ -231,6 +234,7 @@ export function loadConfig(subtrkDir: string = SUBTRK_DIR): SubtrkConfig {
     enabled: enabled.filter((id): id is ProviderId => (ALL_PROVIDER_IDS as readonly string[]).includes(id)),
     order: parseOrder(file?.order),
     hidden: parseHidden(file?.hidden),
+    theme,
   };
 }
 
@@ -248,7 +252,7 @@ function parseHidden(value: unknown): string[] | undefined {
 // writeCacheEntry discipline). Throws on write failure – callers decide.
 export function saveConfig(
   subtrkDir: string,
-  patch: { enabled?: ProviderId[]; order?: string[]; hidden?: string[] },
+  patch: { enabled?: ProviderId[]; order?: string[]; hidden?: string[]; theme?: "light" | "dark" },
 ): void {
   const path = join(subtrkDir, "config.json");
   let file: Record<string, unknown> = {};
@@ -263,6 +267,7 @@ export function saveConfig(
   if (patch.enabled !== undefined) file.enabled = [...patch.enabled];
   if (patch.order !== undefined) file.order = [...patch.order];
   if (patch.hidden !== undefined) file.hidden = [...patch.hidden];
+  if (patch.theme !== undefined) file.theme = patch.theme;
   mkdirSync(subtrkDir, { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`);

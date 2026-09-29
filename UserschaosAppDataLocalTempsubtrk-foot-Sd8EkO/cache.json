@@ -1,0 +1,1 @@
+{"google":{"data":{"id":"google","ok":true,"stale":false,"fetchedAt":"2026-09-29T12:05:07.049Z","windows":[{"kind":"7d","scope":"gemini-models","remainingFraction":0.4,"resetsAt":"2026-09-30T09:34:02.000Z"},{"kind":"5h","scope":"claude-and-gpt-models","remainingFraction":0.8,"resetsAt":"2026-09-29T20:00:00.000Z"}]},"fetchedAt":1790683507049,"ttlMs":60000},"schemaVersion":1}

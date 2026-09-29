@@ -226,6 +226,10 @@ after the listed ones, so a newly added provider always appears. The console
 refuses to disable the last enabled provider (the server rejects an empty
 list with 400 as backstop).
 
+The console's colour theme is carried in config.json too; its localStorage use
+is demoted to an instant cache, since the random per-run port gives every
+serve a fresh origin and server truth wins on boot.
+
 ## D14 · Google – the local language server is the quota source, REST is a labeled fallback
 
 Google keeps separate quota domains per surface for one account. The remote
