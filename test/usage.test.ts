@@ -724,6 +724,16 @@ describe("GET /api/usage", () => {
         assert.equal(badProvider.status, 400);
         const badMethod = await fetch(`http://127.0.0.1:${handle.port}/api/usage`, { method: "POST", headers: auth });
         assert.equal(badMethod.status, 405);
+
+        // The drill-down route serves the same static shell for known ids and
+        // nothing else – no file serving, ever.
+        const shellRes = await fetch(`http://127.0.0.1:${handle.port}/provider/glm`);
+        assert.equal(shellRes.status, 200);
+        assert.match(shellRes.headers.get("content-type") ?? "", /text\/html/);
+        assert.ok((shellRes.headers.get("content-security-policy") ?? "").length > 0);
+        assert.ok((await shellRes.text()).includes("subtrk console"));
+        assert.equal((await fetch(`http://127.0.0.1:${handle.port}/provider/nope`)).status, 404);
+
         for (const r of [res, scoped, noAuth, badProvider, badMethod]) {
           for (const key of Object.keys(r.headers)) {
             assert.ok(!key.toLowerCase().startsWith("access-control-"), "no CORS headers, ever");

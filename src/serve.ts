@@ -168,7 +168,7 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
         return;
       }
       const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
-      if (path === "/") {
+      if (path === "/" || path.startsWith("/provider/")) {
         if (req.method !== "GET") {
           respond(res, 405, JSON.stringify({ error: "method not allowed" }));
           return;
@@ -176,6 +176,16 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
         if (shell === null) {
           respond(res, 404, "console shell missing", "text/plain");
           return;
+        }
+        // /provider/<id> serves the SAME static shell – the page reads the path
+        // and renders the drill-down view. Only known provider ids route here;
+        // anything else is a plain 404 (no file serving, ever).
+        if (path !== "/") {
+          const id = path.slice("/provider/".length);
+          if (!(ALL_PROVIDER_IDS as readonly string[]).includes(id)) {
+            respond(res, 404, "unknown provider", "text/plain");
+            return;
+          }
         }
         respond(res, 200, shell, "text/html", { "content-security-policy": CSP });
         return;

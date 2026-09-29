@@ -52,6 +52,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; }
 body {
   background: var(--bg); color: var(--text); font: 14px/1.5 var(--font);
@@ -190,6 +191,36 @@ td.r, th.r { text-align: right; }
 .cardhead h3 { margin: 0; font-size: 13.5px; font-weight: 650; }
 .cardhead span { font-size: 12px; color: var(--text-3); font-family: var(--mono); }
 
+/* usage drill-down */
+.prov { cursor: pointer; }
+.prov:hover { border-color: var(--border-strong); }
+.chartwrap { position: relative; padding: 30px 18px 8px; }
+.bars2 { position: relative; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; align-items: end; height: 170px; }
+.bcol2 { position: relative; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; min-width: 0; }
+.bseg2 { width: 100%; max-width: 44px; margin: 0 auto; min-width: 0; border-radius: 2px 2px 0 0; }
+.b-in { background: color-mix(in srgb, var(--accent) 75%, transparent); }
+.b-cr { background: color-mix(in srgb, var(--ok) 65%, transparent); }
+.b-out { background: color-mix(in srgb, var(--warn) 75%, transparent); }
+.b-tot { background: color-mix(in srgb, var(--text-2) 45%, transparent); }
+.cmark { position: absolute; top: -8px; bottom: -2px; border-left: 2px dashed var(--crit); z-index: 1; }
+.cmark span { position: absolute; top: -14px; left: 4px; font: 600 10px var(--mono); color: var(--crit); white-space: nowrap; }
+.xlabs { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; margin-top: 6px; color: var(--text-3); font: 10.5px var(--mono); }
+.xlabs span { text-align: center; overflow: hidden; white-space: nowrap; }
+.legend2 { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-2); margin-top: 10px; }
+.legend2 i { display: inline-block; width: 10px; height: 8px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+.tots2 { display: flex; gap: 20px; flex-wrap: wrap; font-size: 13px; color: var(--text-2); margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.tots2 b { color: var(--text); font-family: var(--mono); font-weight: 650; }
+.seg2 { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg2 button { border: 0; background: transparent; color: var(--text-2); font: 600 12px var(--font); padding: 4px 12px; cursor: pointer; }
+.seg2 button.on { background: var(--accent-soft); color: var(--accent); }
+.chips2 { display: inline-flex; gap: 6px; }
+.chips2 button { font: 600 11.5px var(--mono); border: 1px solid var(--border); background: var(--surface); border-radius: 999px; padding: 2px 10px; color: var(--text-2); cursor: pointer; }
+.chips2 button.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: var(--accent-soft); }
+.kindchip { font: 600 10px var(--mono); border-radius: 5px; padding: 1px 6px; margin-left: 6px; vertical-align: 1px; }
+.kindchip.actual { color: var(--ok); background: var(--ok-soft); }
+.kindchip.estimate, .kindchip.blended { color: var(--warn); background: var(--warn-soft); }
+.empty { color: var(--text-3); font-size: 13px; padding: 22px 18px; text-align: center; }
+
 footer { color: var(--text-3); font-size: 12px; border-top: 1px solid var(--border); padding: 18px 0 32px; }
 footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; justify-content: space-between; }
 footer code { font-family: var(--mono); color: var(--text-2); }
@@ -260,6 +291,40 @@ footer code { font-family: var(--mono); color: var(--text-2); }
     <div class="card">
       <div class="cardhead"><h3>Same data, agent view</h3><span>subtrk status</span></div>
       <pre class="term" id="term">…</pre>
+    </div>
+  </section>
+</main>
+
+<!-- M3 drill-down: same shell, path-routed view (serve only sends known ids) -->
+<main class="wrap" id="provview" hidden>
+  <div class="sechead" style="margin-top:0">
+    <div>
+      <h2 id="dvtitle" style="font-size:19px">…</h2>
+      <p id="dvsub">…</p>
+    </div>
+    <span style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <span class="seg2" id="dvgran"><button type="button" data-g="day" class="on">Day</button><button type="button" data-g="hour">Hour</button></span>
+      <span class="chips2" id="dvr">
+        <button type="button" data-r="7">7d</button>
+        <button type="button" data-r="30" class="on">30d</button>
+        <button type="button" data-r="mtd">MTD</button>
+      </span>
+      <a href="/" style="font-size:12.5px;color:var(--accent);text-decoration:none">← dashboard</a>
+    </span>
+  </div>
+  <section class="summary" id="dvstats" aria-label="Usage summary"></section>
+  <section>
+    <div class="sechead"><h2>Usage</h2><p id="dvhint">stacked tokens per bucket · dashed lines mark window resets</p></div>
+    <div class="card" id="dvchart"><div class="empty">loading…</div></div>
+  </section>
+  <section class="two">
+    <div class="card">
+      <div class="cardhead"><h3>Per model</h3><span id="dvmnote"></span></div>
+      <div class="tablewrap"><table id="dvmodels"><thead><tr><th>Model</th><th class="r">Input</th><th class="r">Cached</th><th class="r">Output</th><th class="r">Requests</th><th class="r">Cost</th></tr></thead><tbody><tr><td colspan="6">…</td></tr></tbody></table></div>
+    </div>
+    <div class="card">
+      <div class="cardhead"><h3>Window % history</h3><span>sampled at every probe</span></div>
+      <div class="tablewrap"><table id="dvwin"><thead><tr><th>Window</th><th class="r">Now</th><th class="r">Resets</th><th class="r">Samples</th></tr></thead><tbody><tr><td colspan="4">…</td></tr></tbody></table></div>
     </div>
   </section>
 </main>
@@ -398,6 +463,35 @@ function cardBadge(p, ws) {
 // its siblings.
 let ORDER = []; // card keys in display order (config.json `order`) – display hint only
 
+// M3 usage views: /provider/<id> renders the drill-down (serve only routes
+// known provider ids here); everything else is the dashboard. USAGE_MTD feeds
+// the two month-to-date summary cards, USAGE_PROV the drill-down – both come
+// from GET /api/usage, which reads the local store only.
+const PROVIDER_VIEW = (() => {
+  const m = /^\/provider\/([a-z][a-z0-9-]*)$/.exec(location.pathname);
+  return m && META[m[1]] ? m[1] : null;
+})();
+let USAGE_MTD = null;
+let USAGE_PROV = null;
+let DV = { gran: "day", range: "30" }; // hour view always covers the last 48h
+
+const fmtTok = n => {
+  const a = Math.abs(n);
+  if (a >= 1e9) return (n / 1e9).toFixed(2) + "B";
+  if (a >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (a >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(Math.round(n));
+};
+const authHeaders = () => (token ? { Authorization: `Bearer ${token}` } : {});
+function usageUrl() {
+  const nowMs = now();
+  let from;
+  if (DV.gran === "hour") from = nowMs - 48 * 36e5;
+  else if (DV.range === "mtd") { const d = new Date(); from = new Date(d.getFullYear(), d.getMonth(), 1).getTime(); }
+  else from = nowMs - Number(DV.range) * 864e5;
+  return `/api/usage?provider=${encodeURIComponent(PROVIDER_VIEW)}&granularity=${DV.gran}&from=${from}&to=${nowMs}`;
+}
+
 function cardRank(key) {
   const i = ORDER.indexOf(key);
   if (i >= 0) return i;
@@ -424,7 +518,7 @@ function providerCardHTML(p, g, multi) {
   }
   if (p.note) body += `<div class="note">${esc(p.note)}</div>`;
   const hideLabel = multi ? "Hide this model class card" : `Hide ${m.name}`;
-  return `<article class="card prov ${worst >= 95 ? "crit" : ""}" draggable="true" data-key="${esc(g.key)}">
+  return `<article class="card prov ${worst >= 95 ? "crit" : ""}" draggable="true" data-key="${esc(g.key)}" data-provider="${esc(p.id)}">
     <div class="phead"><span class="drag" title="Drag to reorder" aria-hidden="true">⠿</span><div class="pmark" style="background:${m.color}">${esc(String(p.id).slice(0, 2).toUpperCase())}</div>
       <div><div class="pname">${esc(m.name)}${multi && g.scope ? ` · ${esc(prettyScope(g.scope))}` : ""}</div><div class="pplan">${esc(p.plan || "")}</div></div>${cardBadge(p, g.ws)}<button type="button" class="cardx" data-x="${esc(g.key)}" data-multi="${multi ? "1" : ""}" aria-label="${esc(hideLabel)}" title="${esc(hideLabel)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div>
     ${body}
@@ -468,20 +562,34 @@ function summaryHTML() {
   }
   const hot = allWindows().filter(x => x.u >= 80);
   const stale = ps.filter(p => p.stale).length, errs = ps.filter(p => p.error).length;
-  const usd = ps.filter(p => p.credits && p.credits.unit === "usd").reduce((s, p) => s + (Number(p.credits.remaining) || 0), 0);
-  const ali = ps.find(p => p.id === "alibaba");
-  let aliCard;
-  if (ali && ali.credits) {
-    const c = ali.credits, rem = Number(c.remaining);
-    aliCard = `<div class="card stat"><div class="label">Alibaba credits</div><div class="value num">${Number.isFinite(rem) ? (rem / 1000).toFixed(1) + "k" : "…"}</div><div class="sub">of ${c.total != null ? money(c.total, c.unit) : "?"}${c.cycleEndsAt ? ` · ${rel(new Date(c.cycleEndsAt) - now()).split(" ")[0]} left in cycle` : ""}</div></div>`;
-  } else {
-    aliCard = `<div class="card stat"><div class="label">Alibaba credits</div><div class="value" style="font-size:20px;color:var(--text-3)">–</div><div class="sub">no credit data reported</div></div>`;
-  }
   return nextCard + `
   <div class="card stat"><div class="label">Providers</div><div class="value">${ps.filter(p => p.ok).length}<span style="color:var(--text-3);font-size:18px"> / ${ps.length}</span></div><div class="sub">${errs ? `${errs} degraded` : "all reporting"}${stale ? ` · ${stale} stale` : ""}</div></div>
   <div class="card stat"><div class="label">Windows ≥80%</div><div class="value" style="color:${hot.length ? "var(--crit)" : "var(--ok)"}">${hot.length}</div><div class="sub">${hot.map(x => `${esc(x.p.id)} ${esc(x.w.scope ? x.w.scope.split("-")[0] + " " : "")}${esc(x.w.kind)}`).join(", ") || "none"}</div></div>
-  <div class="card stat"><div class="label">Pay-as-you-go</div><div class="value num">$${usd.toFixed(2)}</div><div class="sub">OpenRouter balance · OpenCode untracked</div></div>
-  ${aliCard}`;
+  ${mtdCardsHTML()}`;
+}
+
+// Month-to-date summary cards (M3): the local calendar month across every
+// provider with stored usage, from GET /api/usage (store-only). The old
+// Pay-as-you-go / Alibaba-credits stat cards are gone – balances live on
+// their provider cards, where they always were.
+function mtdCardsHTML() {
+  const aggs = USAGE_MTD && USAGE_MTD.providers ? Object.values(USAGE_MTD.providers) : [];
+  if (aggs.length === 0) {
+    return `<div class="card stat"><div class="label">Month-to-date tokens</div><div class="value" style="font-size:20px;color:var(--text-3)">–</div><div class="sub">accumulates from status calls and dashboard refreshes</div></div>
+  <div class="card stat"><div class="label">Month-to-date value</div><div class="value" style="font-size:20px;color:var(--text-3)">–</div><div class="sub">API-equivalent, once usage is recorded</div></div>`;
+  }
+  let tin = 0, tcr = 0, tout = 0, ua = 0, ue = 0, actualN = 0, hitDen = 0;
+  for (const u of aggs) {
+    tin += u.in; tcr += u.cr; tout += u.out; ua += u.usdActual; ue += u.usdEst;
+    hitDen += u.in + u.cr;
+    if ((u.models || []).some(m => m.usdKind === "actual")) actualN++;
+  }
+  const hit = hitDen > 0 ? Math.round((tcr / hitDen) * 100) + "%" : "–";
+  const usdLabel = [];
+  if (ua > 0) usdLabel.push(`$${ua.toFixed(2)} actual`);
+  if (ue > 0) usdLabel.push(`$${ue.toFixed(2)} est`);
+  return `<div class="card stat"><div class="label">Month-to-date tokens</div><div class="value num">${fmtTok(tin + tcr + tout)}</div><div class="sub">in ${fmtTok(tin)} · out ${fmtTok(tout)} · cache hit ${hit}</div></div>
+  <div class="card stat"><div class="label">Month-to-date value</div><div class="value num">${ua + ue > 0 ? "$" + (ua + ue).toFixed(2) : "–"}</div><div class="sub">${esc(usdLabel.join(" + ")) || "unpriced models only"}${actualN ? ` · ${actualN} provider${actualN > 1 ? "s" : ""} actual` : ""}</div></div>`;
 }
 
 function timelineHTML() {
@@ -552,6 +660,10 @@ function render(data) {
   STATUS = data && typeof data === "object" ? data : {};
   STATUS.providers = Array.isArray(STATUS.providers) ? STATUS.providers.filter(p => p && typeof p === "object") : [];
   clearBanner();
+  if (PROVIDER_VIEW) {
+    renderProviderView();
+    return;
+  }
   renderAll();
   syncProviderMenu(); // the dropdown lives outside the re-rendered innerHTML
   syncCardsMenu();
@@ -596,6 +708,15 @@ async function refresh() {
         }
       }
     } catch {}
+    // M3: the drill-down needs per-provider aggregates, the dashboard the
+    // month-to-date totals – both are store-only reads via /api/usage.
+    try {
+      const ures = await fetch(PROVIDER_VIEW ? usageUrl() : "/api/usage", { cache: "no-store", headers: authHeaders() });
+      if (ures.ok) {
+        if (PROVIDER_VIEW) USAGE_PROV = await ures.json();
+        else USAGE_MTD = await ures.json();
+      }
+    } catch {}
     render(data);
     const ms = STATUS.recheckAfter ? new Date(STATUS.recheckAfter) - now() : NaN;
     schedule(Number.isFinite(ms) && ms > 0 ? Math.max(1000, ms) : FALLBACK_MS);
@@ -609,6 +730,206 @@ async function refresh() {
       void refresh();
     }
   }
+}
+
+// ---------- M3 drill-down renderer (path-routed) ----------
+
+const shortBucket = t => (t.length === 10 ? t.slice(5) : `${t.slice(8, 10)} ${t.slice(11)}h`);
+
+function latestWindows(u) {
+  const byK = new Map();
+  for (const s of (u && u.samples) || []) {
+    const cur = byK.get(s.k);
+    if (!cur) byK.set(s.k, { ...s, n: 1 });
+    else { cur.n++; if (s.t > cur.t) Object.assign(cur, { t: s.t, u: s.u, r: s.r, sf: s.sf }); }
+  }
+  return [...byK.values()].sort((a, b) => (a.k < b.k ? -1 : 1));
+}
+
+// Reset markers: a sample whose resetsAt differs from the previous sample's
+// marks a new window generation – place the boundary by timestamp.
+function resetMarks(u, series) {
+  const samples = (u.samples || []).slice().sort((a, b) => a.t - b.t);
+  const bounds = [];
+  let prevR = null;
+  for (const s of samples) {
+    if (prevR !== null && s.r !== prevR) bounds.push(s.t);
+    prevR = s.r;
+  }
+  if (!bounds.length || !series.length) return "";
+  const t0 = series[0].t;
+  const t1 = series[series.length - 1].t + (DV.gran === "hour" ? 36e5 : 864e5);
+  return bounds
+    .filter(b => b >= t0 && b <= t1)
+    .map(b => {
+      const x = Math.min(99.5, Math.max(0, ((b - t0) / (t1 - t0)) * 100));
+      return `<div class="cmark" style="left:${x}%"><span>⟲ reset</span></div>`;
+    })
+    .join("");
+}
+
+function chartHTML(u) {
+  const hasSeries = (u.series || []).some(b => b.in + b.cr + b.out + b.tot > 0);
+  if (!hasSeries && !(u.samples || []).length) {
+    return `<div class="empty">no usage recorded yet – it accumulates from status calls, dashboard refreshes and subtrk usage</div>`;
+  }
+  if (hasSeries) {
+    const series = u.series.filter(b => b.in + b.cr + b.out + b.tot > 0);
+    const max = Math.max(1, ...series.map(b => Math.max(b.in + b.cr + b.out, b.tot)));
+    const marks = resetMarks(u, series);
+    const bars = series
+      .map(b => {
+        const seg = (v, cls) =>
+          v > 0 ? `<div class="bseg2 ${cls}" style="height:${Math.max(1.5, (v / max) * 100)}%" title="${esc(shortBucket(b.t))}: ${fmtTok(v)}"></div>` : "";
+        const inner = u.splitless ? seg(b.tot, "b-tot") : seg(b.in, "b-in") + seg(b.cr, "b-cr") + seg(b.out, "b-out");
+        return `<div class="bcol2">${inner}</div>`;
+      })
+      .join("");
+    const labs = series.map(b => `<span title="${esc(b.t)}">${esc(shortBucket(b.t))}</span>`).join("");
+    const legend = u.splitless
+      ? `<span><i class="b-tot"></i>tokens (vendor reports totals only)</span>`
+      : `<span><i class="b-in"></i>input (uncached)</span><span><i style="background:color-mix(in srgb, var(--ok) 65%, transparent)"></i>cached input</span><span><i style="background:color-mix(in srgb, var(--warn) 75%, transparent)"></i>output</span>`;
+    const total = u.splitless ? u.tot : u.in + u.cr + u.out;
+    return `<div class="chartwrap"><div class="bars2">${marks}${bars}</div><div class="xlabs">${labs}</div></div>
+      <div style="padding:0 18px 16px"><div class="legend2">${legend}<span><i style="background:var(--crit);width:2px;height:12px;border-radius:1px"></i>window reset – usage between lines</span></div>
+      <div class="tots2"><span>buckets <b>${series.length}</b></span><span>range total <b>${fmtTok(total)} tok</b></span>${u.req ? `<span>requests <b>${fmtTok(u.req)}</b></span>` : ""}${u.usdActual + u.usdEst > 0 ? `<span>cost <b>$${(u.usdActual + u.usdEst).toFixed(2)}</b></span>` : ""}</div></div>`;
+  }
+  // Tokenless provider: daily strip of the latest sampled window %.
+  const byDay = new Map();
+  for (const s of u.samples || []) {
+    const d = new Date(s.t);
+    const key = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const cur = byDay.get(key);
+    if (!cur || s.t > cur.t) byDay.set(key, s);
+  }
+  const days = [...byDay.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).slice(-60);
+  if (!days.length) return `<div class="empty">no samples yet</div>`;
+  const bars = days
+    .map(([, s]) => {
+      const col = s.u >= 95 ? "var(--crit)" : s.u >= 80 ? "var(--warn)" : "color-mix(in srgb, var(--ok) 65%, transparent)";
+      return `<div class="bcol2"><div class="bseg2" style="height:${Math.max(2, s.u)}%;background:${col}" title="${esc(s.k)} ${s.u.toFixed(0)}% used"></div></div>`;
+    })
+    .join("");
+  const labs = days.map(([k]) => `<span>${esc(k.slice(5))}</span>`).join("");
+  return `<div class="chartwrap"><div class="bars2">${bars}</div><div class="xlabs">${labs}</div></div>
+    <div style="padding:0 18px 16px"><div class="legend2"><span>bar height = latest sampled window % that day · <b>${esc(META[PROVIDER_VIEW] ? META[PROVIDER_VIEW].name : PROVIDER_VIEW)}</b> exposes no token counts, so its history is percentages</span></div></div>`;
+}
+
+function renderModelTable(u) {
+  const tb = document.querySelector("#dvmodels tbody");
+  const models = (u && u.models) || [];
+  if (!models.length) {
+    tb.innerHTML = `<tr><td colspan="6" class="empty">no per-model usage recorded yet</td></tr>`;
+    $("dvmnote").textContent = "";
+    return;
+  }
+  $("dvmnote").textContent = u.splitless ? "vendor reports totals only – priced with your observed z.ai mix" : "";
+  tb.innerHTML = models
+    .map(
+      m => `<tr>
+    <td class="mono">${esc(m.model)}</td>
+    ${u.splitless
+      ? `<td class="r num">–</td><td class="r num">–</td><td class="r num">–</td>`
+      : `<td class="r num">${fmtTok(m.in)}</td><td class="r num">${fmtTok(m.cr)}</td><td class="r num">${fmtTok(m.out)}</td>`}
+    <td class="r num">${m.req ? fmtTok(m.req) : "–"}</td>
+    <td class="r num">${m.usd != null ? `$${m.usd.toFixed(2)}<span class="kindchip ${m.usdKind}">${m.usdKind}</span>` : `<span class="kindchip">unpriced</span>`}</td>
+  </tr>`,
+    )
+    .join("");
+}
+
+function renderWindowTable(u) {
+  const tb = document.querySelector("#dvwin tbody");
+  const latest = latestWindows(u);
+  if (!latest.length) {
+    tb.innerHTML = `<tr><td colspan="4" class="empty">no samples yet – every status call and dashboard refresh adds one</td></tr>`;
+    return;
+  }
+  tb.innerHTML = latest
+    .map(
+      w => `<tr>
+    <td class="mono">${esc(w.k)}</td>
+    <td class="r num" style="color:var(--${level(w.u) === "ok" ? "text" : level(w.u)})">${w.u.toFixed(0)}%</td>
+    <td class="r num">${esc(when(w.r))}</td>
+    <td class="r num">${w.n}</td>
+  </tr>`,
+    )
+    .join("");
+}
+
+function renderProviderView() {
+  const p = (STATUS.providers || []).find(x => x.id === PROVIDER_VIEW);
+  const m = META[PROVIDER_VIEW] || { name: PROVIDER_VIEW, color: "#6b7280", ttl: 0 };
+  $("dvtitle").innerHTML = `<span style="display:inline-block;width:14px;height:14px;border-radius:4px;background:${m.color};vertical-align:-1px;margin-right:8px"></span>${esc(m.name)} · usage`;
+  $("dvsub").textContent = p
+    ? `${p.plan ? p.plan + " · " : ""}fetched ${ago(p.fetchedAt)} · local usage store, no vendor calls on this page`
+    : "provider not reporting right now – showing whatever the store holds";
+  const u = USAGE_PROV && USAGE_PROV.providers ? USAGE_PROV.providers[PROVIDER_VIEW] : null;
+  const stats = [];
+  if (u && u.in + u.cr + u.out + u.tot > 0) {
+    const total = u.splitless ? u.tot : u.in + u.cr + u.out;
+    stats.push({
+      label: "Tokens",
+      value: fmtTok(total),
+      sub: u.splitless ? "totals only – no vendor split" : `in ${fmtTok(u.in)} · cached ${fmtTok(u.cr)} · out ${fmtTok(u.out)}`,
+    });
+    stats.push({ label: "Cache hit", value: u.cacheHit != null ? Math.round(u.cacheHit * 100) + "%" : "–", sub: "cached / (cached + uncached input)" });
+    const costParts = [];
+    const blended = (u.models || []).some(x => x.usdKind === "blended");
+    if (u.usdActual > 0) costParts.push(`$${u.usdActual.toFixed(2)} actual`);
+    if (u.usdEst > 0) costParts.push(`$${u.usdEst.toFixed(2)} ${blended ? "blended est" : "est"}`);
+    stats.push({
+      label: "API-equivalent",
+      value: u.usdActual + u.usdEst > 0 ? "$" + (u.usdActual + u.usdEst).toFixed(2) : "–",
+      sub: costParts.join(" + ") || "unpriced models excluded from sums",
+    });
+  } else {
+    stats.push({ label: "Tokens", value: "–", sub: PROVIDER_VIEW === "claude" ? "Anthropic exposes no token counts" : "this provider exposes no token counts" });
+    stats.push({ label: "API-equivalent", value: "–", sub: "nothing to price" });
+  }
+  const latest = latestWindows(u);
+  stats.push({
+    label: "Windows now",
+    value: latest.length ? latest.slice(0, 3).map(w => `${esc(w.k.split("·")[0])} ${Math.round(w.u)}%`).join(" · ") : "–",
+    sub: "sampled at every probe",
+  });
+  stats.push({ label: "Requests", value: u && u.req ? fmtTok(u.req) : "–", sub: "reported by the vendor where available" });
+  $("dvstats").innerHTML = stats
+    .map(s => `<div class="card stat"><div class="label">${s.label}</div><div class="value num">${s.value}</div><div class="sub">${s.sub}</div></div>`)
+    .join("");
+  $("dvchart").innerHTML = chartHTML(u || {});
+  renderModelTable(u || {});
+  renderWindowTable(u || {});
+  $("provview").hidden = false;
+  const dash = document.querySelector("main.wrap");
+  if (dash && dash.id !== "provview") dash.hidden = true;
+}
+
+if (PROVIDER_VIEW) {
+  $("dvgran").addEventListener("click", e => {
+    const b = e.target instanceof Element ? e.target.closest("button[data-g]") : null;
+    if (!b || b.classList.contains("on")) return;
+    DV.gran = b.dataset.g;
+    $("dvgran").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+    $("dvhint").textContent = DV.gran === "hour" ? "stacked tokens per hour · last 48 hours" : "stacked tokens per day · dashed lines mark window resets";
+    refresh();
+  });
+  $("dvr").addEventListener("click", e => {
+    const b = e.target instanceof Element ? e.target.closest("button[data-r]") : null;
+    if (!b || b.classList.contains("on")) return;
+    DV.range = b.dataset.r;
+    $("dvr").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+    refresh();
+  });
+  document.querySelector("main.wrap").hidden = true; // dashboard sections stay out of the drill-down page
+} else {
+  // Whole provider cards are clickable (M3): navigate to the drill-down.
+  // Drag handle, buttons and the card's × stay click-exempt.
+  $("providers").addEventListener("click", e => {
+    if (e.target instanceof Element && e.target.closest("button, a, .drag")) return;
+    const card = e.target instanceof Element ? e.target.closest("article[data-provider]") : null;
+    if (card && card.dataset.provider) location.href = `/provider/${card.dataset.provider}`;
+  });
 }
 
 $("host").textContent = HOST;

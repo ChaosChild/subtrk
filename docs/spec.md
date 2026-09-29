@@ -784,7 +784,8 @@ One page for every enabled provider, served from the same cache the CLI reads.
 - Hardening: the Host header must be `127.0.0.1[:port]` or
   `localhost[:port]` (403 otherwise – DNS-rebinding defense); no CORS headers
   are ever emitted, so cross-site pages can neither read responses nor pass
-  the preflight a custom header requires; `/` and `/api/status` stay
+  the preflight a custom header requires; `/`, `/provider/<id>` and
+  `/api/status` stay
   GET-only, `/api/refresh` and `/api/config` stay POST-only (405 otherwise);
   handlers never throw. Ctrl-C shuts down cleanly.
 - The dashboard: per-provider cards (usage bars per window with ≥80%/≥95%
@@ -806,6 +807,20 @@ One page for every enabled provider, served from the same cache the CLI reads.
   provider reorder and interleave freely; the saved card-key `order` persists
   through `/api/config`, governs the grid, and its per-provider projection
   governs `subtrk status` output order.
+
+- Usage views (M3): the top summary row carries **Month-to-date tokens** and
+  **Month-to-date value** cards (local calendar month, all providers, fed by
+  `GET /api/usage` store reads – the former pay-as-you-go/credits stat cards
+  are gone; balances live on their provider cards). Every provider card is
+  clickable → `GET /provider/<id>`, which serves the same static shell with a
+  path-routed drill-down: a Day/Hour toggle (hour = last 48h) and 7d/30d/MTD
+  chips, a stats row (tokens, cache hit, API-equivalent with actual/est/
+  blended labeling, window %, requests), a stacked token chart with window-
+  reset markers (a %-per-day strip instead for providers with no token
+  surface), a per-model table (costs carry their kind chip; split-less
+  providers render totals and a table-only layout note) and a window-%
+  history table sampled from every probe. The drill-down reads the store and
+  the status cache only – it never calls vendors.
 
 ## Not in v0 (parked)
 
