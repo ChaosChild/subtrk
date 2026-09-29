@@ -1,6 +1,7 @@
 // Pure-parser tests for every provider – fixtures only, no network, no real user files.
 
 import assert from "node:assert/strict";
+import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
@@ -45,6 +46,14 @@ import {
 import { parseOpenaiAuth, parseOpenaiUsage, windowKindFromSeconds } from "../src/providers/openai.ts";
 import { extractOpencodeKey } from "../src/providers/opencode.ts";
 import { parseOpenrouterCredits, parseOpenrouterKey } from "../src/providers/openrouter.ts";
+import {
+  decryptZcodeValue,
+  deriveCredentialSecret,
+  parseZcodeBalance,
+  parseZcodeCredentials,
+  periodKind,
+  readDeviceMid,
+} from "../src/providers/zcode.ts";
 
 function fixture(name: string): unknown {
   return JSON.parse(readFileSync(new URL(`./fixtures/${name}.json`, import.meta.url), "utf8"));
@@ -52,10 +61,10 @@ function fixture(name: string): unknown {
 
 // ---- module contract -------------------------------------------------------
 
-test("allProviders exposes the eight modules in spec order with spec TTLs", () => {
+test("allProviders exposes the nine modules in spec order with spec TTLs", () => {
   assert.deepEqual(
     allProviders.map((p) => p.id),
-    ["claude", "glm", "alibaba", "google", "opencode", "openrouter", "openai", "kimi"],
+    ["claude", "glm", "alibaba", "google", "opencode", "openrouter", "openai", "kimi", "zcode"],
   );
   const ttls: Record<string, number> = {};
   for (const p of allProviders) {
@@ -71,6 +80,7 @@ test("allProviders exposes the eight modules in spec order with spec TTLs", () =
     openrouter: 60000,
     openai: 60000,
     kimi: 300000,
+    zcode: 60000,
   });
 });
 
@@ -79,7 +89,8 @@ test("refreshableProviders lists exactly the modules with refresh – google sel
   // openai has no refresh: codex owns its tokens and subtrk never refreshes them.
   // kimi has none either: it refreshes its own CLI OAuth token in probe, and a
   // dead grant is an interactive re-login in the owning tool, never a flow here.
-  for (const id of ["glm", "opencode", "openrouter", "openai", "kimi"]) {
+  // zcode has none: the ZCode desktop owns the login (D12 precedent).
+  for (const id of ["glm", "opencode", "openrouter", "openai", "kimi", "zcode"]) {
     assert.equal(allProviders.find((p) => p.id === id)?.refresh, undefined);
   }
 });
@@ -893,4 +904,162 @@ test("kimi shouldTryFallbackTokenHost: invalid_grant on 400/401 retries the fall
   assert.equal(shouldTryFallbackTokenHost(400, "invalid_client"), false);
   assert.equal(shouldTryFallbackTokenHost(500, "invalid_grant"), false);
   assert.equal(shouldTryFallbackTokenHost(undefined, "invalid_grant"), false);
+});
+
+// ---- zcode -----------------------------------------------------------------
+
+// The store's own scheme: AES-256-GCM, 12-byte iv, 16-byte tag, base64url parts.
+function encStoreValue(plain: string, key: Buffer): string {
+  const iv = randomBytes(12);
+  const c = createCipheriv("aes-256-gcm", key, iv);
+  const ct = Buffer.concat([c.update(plain, "utf8"), c.final()]);
+  return `enc:v1:${iv.toString("base64url")}.${c.getAuthTag().toString("base64url")}.${ct.toString("base64url")}`;
+}
+
+test("zcode parseZcodeBalance maps the fixture to 2 scoped bundle windows + plan label", () => {
+  const parsed = parseZcodeBalance(fixture("zcode-balance"), Date.parse("2026-09-29T00:00:00Z"));
+  assert.ok(parsed);
+  assert.equal(parsed.plan, "ZCode Trust Build");
+  assert.deepEqual(parsed.windows, [
+    {
+      kind: "bundle",
+      scope: "glm-5-3-flash",
+      usedPercent: 7.1, // 7064843 / 100000000, 1 decimal
+      resetsAt: new Date(1790697600000).toISOString(),
+    },
+    { kind: "bundle", scope: "glm-5-3", usedPercent: 12, resetsAt: new Date(1790697600000).toISOString() },
+  ]);
+  assert.equal(parsed.expired, undefined);
+  assert.equal(parsed.empty, undefined);
+});
+
+test("zcode parseZcodeBalance: already-past ends_at (vs server_time) is the expired signal", () => {
+  const parsed = parseZcodeBalance(fixture("zcode-balance-expired"), Date.parse("2026-09-29T00:00:00Z"));
+  assert.deepEqual(parsed, { windows: [], expired: true });
+});
+
+test("zcode parseZcodeBalance: data absent or non-object body is a shape failure (null)", () => {
+  assert.equal(parseZcodeBalance({}, 0), null);
+  assert.equal(parseZcodeBalance({ code: 0, msg: "ok" }, 0), null, "data absent entirely");
+  assert.equal(parseZcodeBalance({ data: "nope" }, 0), null);
+  assert.equal(parseZcodeBalance({ data: [] }, 0), null);
+  assert.equal(parseZcodeBalance("garbage", 0), null);
+  assert.equal(parseZcodeBalance(null, 0), null);
+});
+
+test("zcode parseZcodeBalance: orphaned balance bucket (no matching active plan) is skipped", () => {
+  const body = {
+    code: 0,
+    data: {
+      server_time: 1790680608,
+      plans: [
+        {
+          plan_id: "plan-1",
+          user_plan_id: "upl_1",
+          name: "ZCode Trust Build",
+          status: "active",
+          ends_at: 1790697600,
+          entitlements: [{ entitlement_id: "ent-1", show_name: "GLM-5.3-Flash", period: "one_time" }],
+        },
+      ],
+      balances: [
+        { entitlement_id: "ent-1", user_plan_id: "upl_1", total_units: 100, used_units: 25, expires_at: 1790697600 },
+        {
+          entitlement_id: "ent-1",
+          plan_id: "plan-gone",
+          user_plan_id: "upl_gone",
+          total_units: 100,
+          used_units: 90,
+          expires_at: 1790697600,
+        },
+      ],
+    },
+  };
+  const parsed = parseZcodeBalance(body, 0);
+  assert.ok(parsed);
+  assert.deepEqual(parsed.windows, [
+    { kind: "bundle", scope: "glm-5-3-flash", usedPercent: 25, resetsAt: new Date(1790697600000).toISOString() },
+  ]);
+});
+
+test("zcode parseZcodeBalance: active plan with no usable balances is the empty state", () => {
+  const body = {
+    code: 0,
+    data: {
+      server_time: 1790680608,
+      plans: [{ plan_id: "plan-1", name: "ZCode Trust Build", status: "active", ends_at: 1790697600 }],
+      balances: [],
+    },
+  };
+  assert.deepEqual(parseZcodeBalance(body, 0), { windows: [], plan: "ZCode Trust Build", empty: true });
+});
+
+test("zcode periodKind maps the four known periods and slugifies the rest", () => {
+  assert.equal(periodKind("one_time"), "bundle");
+  assert.equal(periodKind("daily"), "1d");
+  assert.equal(periodKind("weekly"), "7d");
+  assert.equal(periodKind("monthly"), "30d");
+  assert.equal(periodKind("Hourly Cap"), "hourly-cap");
+  assert.equal(periodKind(""), "");
+});
+
+test("zcode deriveCredentialSecret: env wins, fallback is the exact machine template", () => {
+  assert.equal(deriveCredentialSecret("custom-secret", "win32", "C:\\u", "chaos"), "custom-secret");
+  assert.equal(
+    deriveCredentialSecret(undefined, "win32", "C:\\u", "chaos"),
+    "zcode-credential-fallback:win32:C:\\u:chaos",
+  );
+  assert.equal(deriveCredentialSecret("", "win32", "C:\\u", "chaos"), "zcode-credential-fallback:win32:C:\\u:chaos");
+});
+
+test("zcode decryptZcodeValue roundtrips the store scheme; tampered and malformed values fail", () => {
+  const key = createHash("sha256").update("subtrk-test-secret").digest();
+  assert.equal(decryptZcodeValue(encStoreValue("FAKE.zcode.jwt", key), key), "FAKE.zcode.jwt");
+
+  // tampered ciphertext -> GCM auth failure -> null
+  const good = encStoreValue("FAKE.zcode.jwt", key);
+  const parts = good.slice("enc:v1:".length).split(".");
+  const ct = Buffer.from(parts[2], "base64url");
+  ct[0] ^= 0xff;
+  assert.equal(decryptZcodeValue(`enc:v1:${parts[0]}.${parts[1]}.${ct.toString("base64url")}`, key), null);
+
+  const badIv = randomBytes(16).toString("base64url"); // 16 bytes, not 12
+  const badTag = randomBytes(15).toString("base64url"); // 15 bytes, not 16
+  for (const bad of [
+    "",
+    "plaintext-jwt",
+    "enc:v1:",
+    "enc:v1:a.b",
+    "enc:v1:a.b.c.d",
+    "enc:v1:!!.$.$",
+    `enc:v1:${parts[0]}.${parts[1]}.`,
+    `enc:v1:${badIv}.${parts[1]}.${parts[2]}`,
+    `enc:v1:${parts[0]}.${badTag}.${parts[2]}`,
+  ]) {
+    assert.equal(decryptZcodeValue(bad, key), null, JSON.stringify(bad));
+  }
+});
+
+test("zcode parseZcodeCredentials decrypts the store key, junk shapes are null", () => {
+  const key = createHash("sha256").update("subtrk-test-secret").digest();
+  assert.deepEqual(parseZcodeCredentials({ zcodejwttoken: encStoreValue("FAKE.zcode.jwt", key) }, key), {
+    jwt: "FAKE.zcode.jwt",
+  });
+  assert.equal(parseZcodeCredentials({ other: encStoreValue("FAKE.zcode.jwt", key) }, key), null);
+  assert.equal(parseZcodeCredentials({ zcodejwttoken: "plaintext-jwt" }, key), null, "passthrough rejected");
+  assert.equal(parseZcodeCredentials({ zcodejwttoken: 7 }, key), null);
+  assert.equal(parseZcodeCredentials({}, key), null);
+  assert.equal(parseZcodeCredentials(null, key), null);
+});
+
+test("zcode readDeviceMid returns the string field or null", () => {
+  assert.equal(
+    readDeviceMid({ deviceMid: "0e6FAKE-0000-4000-8000-000000000000" }),
+    "0e6FAKE-0000-4000-8000-000000000000",
+  );
+  assert.equal(readDeviceMid({}), null);
+  assert.equal(readDeviceMid({ deviceMid: "" }), null);
+  assert.equal(readDeviceMid({ deviceMid: 7 }), null);
+  assert.equal(readDeviceMid(null), null);
+  assert.equal(readDeviceMid("garbage"), null);
 });

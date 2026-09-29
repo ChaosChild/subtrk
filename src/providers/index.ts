@@ -9,8 +9,9 @@ import kimi from "./kimi.ts";
 import openai from "./openai.ts";
 import opencode from "./opencode.ts";
 import openrouter from "./openrouter.ts";
+import zcode from "./zcode.ts";
 
-export const allProviders: ProviderModule[] = [claude, glm, alibaba, google, opencode, openrouter, openai, kimi];
+export const allProviders: ProviderModule[] = [claude, glm, alibaba, google, opencode, openrouter, openai, kimi, zcode];
 
 // Ids whose module offers interactive refresh (subtrk auth refresh / POST /api/refresh).
 export function refreshableProviders(): ProviderId[] {

@@ -402,7 +402,7 @@ export async function runInit(opts: InitOpts = {}): Promise<number | undefined> 
 
   console.log("subtrk init – checking providers\n");
 
-  // 0. Provider selection: which of the eight does this machine actually use?
+  // 0. Provider selection: which of the nine does this machine actually use?
   //    Stored as ~/.subtrk/config.json `{ enabled: [...] }` – the same gate
   //    collectStatus reads – and honored by every step below. Re-run init (or
   //    edit the file) to change it; deleting the file restores all providers.
@@ -686,6 +686,23 @@ export async function runInit(opts: InitOpts = {}): Promise<number | undefined> 
           "          token refresh needs KIMI_CLIENT_ID in ~/.subtrk/env (public value – MoonshotAI/kimi-code's packages/oauth/src/constants.ts)",
         );
       }
+    }
+  }
+
+  // 9. Zcode: check-only – the ZCode desktop app owns its credential store,
+  //    nothing to collect. Presence only: the store's values are encrypted and
+  //    decryption is the probe's job, never init's. Selected only.
+  if (selected.has("zcode")) {
+    const store = readJson(join(homedir(), ".zcode", "v2", "credentials.json")) as {
+      zcodejwttoken?: unknown;
+    } | null;
+    if (typeof store?.zcodejwttoken === "string" && store.zcodejwttoken.length > 0) {
+      const mid = readJson(join(homedir(), ".zcode", "v2", "telemetry-state.json"))?.deviceMid;
+      const device = typeof mid === "string" && mid.length > 0 ? " – device id present" : "";
+      console.log(`[ok]      zcode – ZCode credential found (bundles appear when z.ai issues them)${device}`);
+    } else {
+      missing.push("zcode – log in once in the ZCode desktop app, then re-run subtrk init");
+      console.log("[missing] zcode – no zcodejwttoken in ~/.zcode/v2/credentials.json");
     }
   }
 
