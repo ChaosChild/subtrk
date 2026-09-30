@@ -235,6 +235,27 @@ switch hourly→daily beyond ~7d ranges), openrouter activity 6 h (vendor
 retention: last 30 completed UTC days), openrouter analytics 15 min (48h
 window), zcode balance 10 min, pricing 7 days.
 
+**This-machine sections.** `localHourly`/`localDaily` hold token harvests from
+LOCAL artifacts: claude transcripts (`~/.claude/projects/**/*.jsonl`, ccusage
+dedup rules, per-file byte-offset watermarks) and openai codex rollouts
+(`~/.codex/sessions/**/*.jsonl`, per-event `last_token_usage` deltas, model
+from the nearest `turn_context`). They are real tokens but cover only this
+machine, so month-to-date totals and `subtrk usage` all-provider lines exclude
+them; a provider drill-down merges them in, labeled "this machine". openai's
+server-side `wham/usage/daily-token-usage-breakdown` adds a per-model daily
+plan-% (`UsageRow.pct`, informational — never summed or priced). Stale
+error-fallback probe results ARE sampled, flagged `stale` (the vendor's
+last-known value); windows whose `resetsAt` has passed are never sampled.
+
+**Alibaba token telemetry.** The per-model/per-day split lives behind
+`zeldaEasy.bailian-telemetry.platform-model.getModelMonitorDataWithOss` with
+`productMode: "TokenPlanPersonal"` (discovered from the qwencloud console
+bundle, live-verified 2026-09-30) via the same bl passthrough as the quota
+probe: `model_usage` series per usage_type (input incl. cached, cached,
+output, total), daily step; model slugs from `listRecentlyModels`, one request
+per slug. Needs the bl console session – expiry degrades to skipped while the
+% sampler keeps history flowing.
+
 **Pricing.** Canonical source: OpenRouter's public `/api/v1/models` (no auth,
 ~460 models incl. cache-read/write prices, refreshed weekly into `pricing`).
 Fallback: a bundled vendor-doc table (z.ai GLM, Alibaba qwen international,

@@ -16,10 +16,23 @@
 // failures land in the summary, watermarks only advance together with the
 // buckets they produced. The store never holds secrets.
 
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { exec, execFile } from "node:child_process";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { acquireLock, errorMessage, getSecret, type ProviderResult, releaseLock, SUBTRK_DIR } from "./core.ts";
+import { extractJson } from "./providers/alibaba.ts";
 import { glmAuth } from "./providers/glm.ts";
 import { fetchZcodeBalance, zcodeBuckets } from "./providers/zcode.ts";
 import { fallbackPriceFor, normalizeModelKey, perToken } from "./usage-pricing.ts";
@@ -38,6 +51,7 @@ export interface UsageRow {
   tot?: number;
   req?: number;
   usd?: number;
+  pct?: number; // plan-usage percent for a day/model (openai wham) – informational, never summed
 }
 
 export interface UsageSample {
@@ -46,6 +60,7 @@ export interface UsageSample {
   u: number; // used percent 0–100
   r: string; // resetsAt ISO – distinguishes generations of the same window
   sf?: { key: string; name: string; percent: number }[]; // claude per-surface mix
+  stale?: boolean; // observed via error-fallback (the vendor's last-known value)
 }
 
 export interface ModelPrice {
@@ -57,8 +72,13 @@ export interface ModelPrice {
 
 export interface UsageStore {
   schemaVersion: 1;
-  hourly: Record<string, Record<string, Record<string, UsageRow>>>; // provider -> hourKey -> model -> row
-  daily: Record<string, Record<string, Record<string, UsageRow>>>; // provider -> dayKey -> model -> row
+  hourly: Record<string, Record<string, Record<string, UsageRow>>>; // provider -> hourKey -> model -> row (vendor-served)
+  daily: Record<string, Record<string, Record<string, UsageRow>>>; // provider -> dayKey -> model -> row (vendor-served)
+  // This-machine token harvests (claude transcripts, codex rollouts) live in
+  // their own sections: they are real tokens but cover only this machine, so
+  // month-to-date totals exclude them and the drill-downs show them labeled.
+  localHourly: Record<string, Record<string, Record<string, UsageRow>>>;
+  localDaily: Record<string, Record<string, Record<string, UsageRow>>>;
   samples: Record<string, UsageSample[]>;
   state: Record<string, Record<string, unknown>>; // per-source watermarks (never secrets)
   pricing: { fetchedAt?: number; usdPerTok?: Record<string, ModelPrice> };
@@ -125,6 +145,8 @@ function emptyStore(): UsageStore {
     schemaVersion: USAGE_SCHEMA_VERSION,
     hourly: {},
     daily: {},
+    localHourly: {},
+    localDaily: {},
     samples: {},
     state: {},
     pricing: {},
@@ -152,6 +174,8 @@ export function readUsageStore(subtrkDir: string = SUBTRK_DIR): UsageStore {
       schemaVersion: USAGE_SCHEMA_VERSION,
       hourly: parsed.hourly ?? {},
       daily: parsed.daily ?? {},
+      localHourly: parsed.localHourly ?? {},
+      localDaily: parsed.localDaily ?? {},
       samples: parsed.samples ?? {},
       state: parsed.state ?? {},
       pricing: parsed.pricing ?? {},
@@ -284,18 +308,26 @@ export function addDelta(store: UsageStore, provider: string, hKey: string, mode
 
 // Sample one probe round: append when a window's usage moved (or >15 min
 // passed), replace sub-minute doubles, ignore repeats. Window generations are
-// distinguished by resetsAt so post-reset usage starts a fresh series.
+// distinguished by resetsAt so post-reset usage starts a fresh series. Stale
+// error-fallback results ARE sampled (their windows are the vendor's
+// last-known values) and flagged `stale`; windows whose generation has already
+// reset are skipped in both cases – replaying them at "now" would plot a dead
+// window's usage on today's timeline (the phantom-row bug).
 export function recordSamples(store: UsageStore, results: ProviderResult[], nowMs: number): boolean {
   let changed = false;
   for (const result of results) {
-    if (!result.ok || !Array.isArray(result.windows)) continue;
+    if (!Array.isArray(result.windows)) continue;
+    const stale = result.ok !== true;
     if (!store.samples[result.id]) store.samples[result.id] = []; // arrays, not objects
     const list = store.samples[result.id];
     for (const w of result.windows) {
+      const resetMs = Date.parse(w.resetsAt);
+      if (Number.isFinite(resetMs) && resetMs <= nowMs) continue; // dead generation
       const u = w.usedPercent ?? (w.remainingFraction !== undefined ? (1 - w.remainingFraction) * 100 : undefined);
       if (u === undefined || !Number.isFinite(u)) continue;
       const k = w.scope ? `${w.kind}·${w.scope}` : w.kind;
       const sample: UsageSample = { t: nowMs, k, u: Math.round(u * 100) / 100, r: w.resetsAt };
+      if (stale) sample.stale = true;
       const surfaces = result.surfaces;
       if (surfaces && surfaces.length > 0) sample.sf = surfaces;
       let lastIdx = -1;
@@ -443,6 +475,7 @@ export interface ModelUsage {
   req: number;
   usd: number | null;
   usdKind: "actual" | "estimate" | "blended" | null;
+  pct?: number; // vendor-reported plan-usage percent (openai wham daily rows)
 }
 
 export interface ProviderUsage extends UsageTotals {
@@ -450,6 +483,7 @@ export interface ProviderUsage extends UsageTotals {
   unpriced: string[];
   series: { t: string; in: number; cr: number; cw: number; out: number; tot: number; req: number }[];
   splitless: boolean; // rows carry only `tot` (zcode) – the UI renders table-only
+  hasLocal: boolean; // this-machine rows are merged in (claude transcripts, codex rollouts)
   samples: UsageSample[]; // window-% history in range (the chart for %-only providers)
 }
 
@@ -478,25 +512,88 @@ function finalizeCacheHit(totals: UsageTotals): void {
   totals.cacheHit = denom > 0 ? totals.cr / denom : null;
 }
 
+// Merge one day/hour of model rows (openai: vendor rows carry the plan-%
+// while local rows carry tokens – one model row ends up holding both). Token
+// fields sum; pct is informational.
+function mergedDayRows(
+  a: Record<string, UsageRow> | undefined,
+  b: Record<string, UsageRow> | undefined,
+): Record<string, UsageRow> {
+  if (!a || Object.keys(a).length === 0) return b ?? {};
+  if (!b || Object.keys(b).length === 0) return a;
+  const out: Record<string, UsageRow> = {};
+  for (const [model, row] of Object.entries(a)) out[model] = { ...row };
+  for (const [model, row] of Object.entries(b)) {
+    const t = ensure(out, model);
+    for (const field of ["in", "cw", "cr", "out", "tot", "req", "usd"] as const) {
+      const v = row[field];
+      if (v !== undefined) t[field] = (t[field] ?? 0) + v;
+    }
+    if (row.pct !== undefined) t.pct = Math.max(t.pct ?? 0, row.pct);
+  }
+  return out;
+}
+
+// Merge a vendor-served section with its local counterpart.
+function mergedSection(
+  a: Record<string, Record<string, UsageRow>> | undefined,
+  b: Record<string, Record<string, UsageRow>> | undefined,
+): Record<string, Record<string, UsageRow>> {
+  if (!a || Object.keys(a).length === 0) return b ?? {};
+  if (!b || Object.keys(b).length === 0) return a;
+  const out: Record<string, Record<string, UsageRow>> = {};
+  for (const [key, rows] of Object.entries(a)) out[key] = { ...rows };
+  for (const [key, rows] of Object.entries(b)) {
+    out[key] = mergedDayRows(out[key], rows);
+  }
+  return out;
+}
+
 // Aggregate stored buckets over [fromMs,toMs]. Day view prefers daily rows
 // (they carry the vendor's authoritative split; glm backfills them beyond the
 // hourly window) and falls back to aggregating that day's hourly rows.
+// `local` controls the this-machine sections (claude transcripts, codex
+// rollouts): "exclude" keeps month-to-date totals vendor-served only,
+// "include" merges them into a provider view (labeled hasLocal), "only"
+// returns just the local rows for a drill-down's local block.
 export function aggregateUsage(
   store: UsageStore,
-  opts: { provider?: string; granularity: "day" | "hour"; fromMs: number; toMs: number },
+  opts: {
+    provider?: string;
+    granularity: "day" | "hour";
+    fromMs: number;
+    toMs: number;
+    local?: "exclude" | "include" | "only";
+  },
 ): UsageAggregate {
+  const mode = opts.local ?? "exclude";
+  const localKeys = [...Object.keys(store.localDaily), ...Object.keys(store.localHourly)];
   const providers = opts.provider
     ? [opts.provider]
-    : [...new Set([...Object.keys(store.daily), ...Object.keys(store.hourly), ...Object.keys(store.samples)])];
+    : mode === "only"
+      ? [...new Set(localKeys)]
+      : [
+          ...new Set([
+            ...Object.keys(store.daily),
+            ...Object.keys(store.hourly),
+            ...(mode === "include" ? localKeys : []),
+            ...Object.keys(store.samples),
+          ]),
+        ];
   const out: Record<string, ProviderUsage> = {};
   const seen = new Set<string>();
   for (const id of providers) {
     if (seen.has(id)) continue;
     seen.add(id);
+    const hasLocal = mode !== "exclude" && !!(store.localDaily[id] || store.localHourly[id]);
+    const daily =
+      mode === "only" ? (store.localDaily[id] ?? {}) : mergedSection(store.daily[id], mode === "include" ? store.localDaily[id] : undefined);
+    const hourly =
+      mode === "only" ? (store.localHourly[id] ?? {}) : mergedSection(store.hourly[id], mode === "include" ? store.localHourly[id] : undefined);
     const series: ProviderUsage["series"] = [];
     const byModel = new Map<
       string,
-      { row: UsageRow; actual: number | null; priced: number | null; kind: ModelUsage["usdKind"] }
+      { row: UsageRow; actual: number | null; priced: number | null; kind: ModelUsage["usdKind"]; pct: number | null }
     >();
     const totals = emptyTotals();
     let splitless = true;
@@ -514,11 +611,13 @@ export function aggregateUsage(
           actual: null as number | null,
           priced: null as number | null,
           kind: null as ModelUsage["usdKind"],
+          pct: null as number | null,
         };
         for (const field of ["in", "cw", "cr", "out", "tot", "req"] as const) {
           const v = row[field];
           if (v !== undefined) acc.row[field] = (acc.row[field] ?? 0) + v;
         }
+        if (row.pct !== undefined) acc.pct = Math.max(acc.pct ?? 0, row.pct);
         const resolved = priceForModel(store, model);
         if (row.usd !== undefined) {
           acc.actual = (acc.actual ?? 0) + row.usd;
@@ -550,20 +649,17 @@ export function aggregateUsage(
     if (opts.granularity === "day") {
       const fromKey = dayKey(opts.fromMs);
       const toKey = dayKey(opts.toMs);
-      const daily = store.daily[id] ?? {};
-      const hourly = store.hourly[id] ?? {};
       const dayKeys = new Set([...Object.keys(daily), ...Object.keys(hourly).map((k) => k.slice(0, 10))]);
       const sorted = [...dayKeys].filter((k) => k >= fromKey && k <= toKey).sort();
-      for (const dk of sorted) {
-        const rows = daily[dk];
-        if (rows) {
-          consume(dk, rows);
-          continue;
-        }
+      // include-mode: this-machine hourly rows combine with the vendor rows
+      // for the day (openai: pct daily + local tokens; claude: local only).
+      // They are NOT pre-merged into `hourly` here – that would double count.
+      const localHourly = mode === "include" ? (store.localHourly[id] ?? {}) : {};
+      const localAggForDay = (dk: string): Record<string, UsageRow> => {
         const agg: Record<string, UsageRow> = {};
-        for (const hk of Object.keys(hourly)) {
+        for (const hk of Object.keys(localHourly)) {
           if (!hk.startsWith(dk)) continue;
-          for (const [model, row] of Object.entries(hourly[hk])) {
+          for (const [model, row] of Object.entries(localHourly[hk])) {
             const target = ensure(agg, model);
             for (const field of ["in", "cw", "cr", "out", "tot", "req", "usd"] as const) {
               const v = row[field];
@@ -571,19 +667,42 @@ export function aggregateUsage(
             }
           }
         }
-        consume(dk, agg);
+        return agg;
+      };
+      for (const dk of sorted) {
+        const vendor = daily[dk]
+          ? daily[dk]
+          : (() => {
+              const agg: Record<string, UsageRow> = {};
+              for (const hk of Object.keys(hourly)) {
+                if (!hk.startsWith(dk)) continue;
+                for (const [model, row] of Object.entries(hourly[hk])) {
+                  const target = ensure(agg, model);
+                  for (const field of ["in", "cw", "cr", "out", "tot", "req", "usd", "pct"] as const) {
+                    const v = row[field];
+                    if (v !== undefined) {
+                      if (field === "pct") target.pct = Math.max(target.pct ?? 0, v);
+                      else target[field] = (target[field] ?? 0) + v;
+                    }
+                  }
+                }
+              }
+              return agg;
+            })();
+        const combined = mode === "include" ? mergedDayRows(vendor, localAggForDay(dk)) : vendor;
+        if (Object.keys(combined).length > 0) consume(dk, combined);
       }
     } else {
       const fromKey = hourKey(opts.fromMs);
       const toKey = hourKey(opts.toMs);
-      const hourly = store.hourly[id] ?? {};
       const keys = Object.keys(hourly)
         .filter((k) => k >= fromKey && k <= toKey)
         .sort();
       for (const hk of keys) consume(hk, hourly[hk]);
     }
 
-    if (!anyRow && (store.samples[id] ?? []).every((s) => s.t < opts.fromMs || s.t > opts.toMs)) continue;
+    const rangeSamples = (store.samples[id] ?? []).filter((s) => s.t >= opts.fromMs && s.t <= opts.toMs);
+    if (!anyRow && (mode === "only" || rangeSamples.every((s) => s.t < opts.fromMs || s.t > opts.toMs))) continue;
     finalizeCacheHit(totals);
 
     // Split-less providers (zcode): price totals with the observed z.ai mix.
@@ -608,7 +727,7 @@ export function aggregateUsage(
           kind = "blended";
         }
       }
-      if (usd === null) unpriced.push(model);
+      if (usd === null && acc.pct === null) unpriced.push(model);
       if (kind === "blended" && usd !== null) totals.usdEst += usd;
       models.push({
         model,
@@ -620,16 +739,17 @@ export function aggregateUsage(
         req: acc.row.req ?? 0,
         usd,
         usdKind: kind,
+        ...(acc.pct !== null ? { pct: acc.pct } : {}),
       });
     }
     models.sort((a, b) => b.tot + b.in + b.cr + b.out - (a.tot + a.in + a.cr + a.out));
-    const rangeSamples = (store.samples[id] ?? []).filter((s) => s.t >= opts.fromMs && s.t <= opts.toMs);
     out[id] = {
       ...totals,
       models,
       unpriced,
       series,
       splitless,
+      hasLocal,
       samples: rangeSamples,
     };
   }
@@ -1146,6 +1266,612 @@ export function extractOrPricing(body: unknown): Record<string, ModelPrice> | nu
   return out;
 }
 
+// --- alibaba: token-plan model telemetry via the bl passthrough ---
+// The qwencloud analytics page reads this exact API (verified live 2026-09-30):
+// getModelMonitorDataWithOss with productMode "TokenPlanPersonal" returns
+// model_usage series per usage_type (input_tokens incl. cached, cached_tokens,
+// output_tokens, total_tokens) as daily points, plus a cumsum range-total
+// companion series that we skip. Model slugs come from listRecentlyModels;
+// per-model numbers need one request per slug (the server aggregates across
+// the models filter). Needs the bl console session (expires ~5h) – on expiry
+// this degrades to skipped, and the stale % sampler keeps history flowing.
+
+const BL_TIMEOUT_MS = 12_000;
+const ALIBABA_TTL_MS = 6 * 3_600_000;
+const OPENAI_LOCAL_TTL_MS = 60_000;
+const OPENAI_WHAM_TTL_MS = 6 * 3_600_000;
+const CLAUDE_LOCAL_TTL_MS = 60_000;
+const WHAM_URL = "https://chatgpt.com/backend-api/wham/usage/daily-token-usage-breakdown";
+
+interface BlRun {
+  ok: boolean;
+  stdout: string;
+  toolMissing: boolean;
+  timedOut: boolean;
+}
+
+function runBl(literal: string, args: readonly string[], timeoutMs: number = BL_TIMEOUT_MS): Promise<BlRun> {
+  return new Promise((resolve) => {
+    const finish = (err: (Error & { code?: string | number; killed?: boolean }) | null, stdout: string | Buffer): void => {
+      if (err) {
+        const toolMissing = err.code === "ENOENT" || (process.platform === "win32" && err.code === 9009);
+        resolve({ ok: false, stdout: String(stdout ?? ""), toolMissing, timedOut: err.killed === true });
+      } else {
+        resolve({ ok: true, stdout: String(stdout ?? ""), toolMissing: false, timedOut: false });
+      }
+    };
+    if (process.platform === "win32") {
+      // .cmd shim requires the shell; only vendor-sourced validated values are
+      // interpolated (slugs are checked against a strict charset first).
+      exec(literal, { timeout: timeoutMs, windowsHide: true }, finish);
+    } else {
+      execFile(args[0], args.slice(1), { timeout: timeoutMs }, finish);
+    }
+  });
+}
+
+async function blCall(api: string, reqDTO: unknown, site: string, region: string, deadline: number): Promise<unknown | null> {
+  if (Date.now() + 2_000 > deadline) return null;
+  const data = JSON.stringify({ reqDTO });
+  const literal = `bl console call --api ${api} --data "${data.replace(/"/g, '\\"')}" --console-site ${site} --console-region ${region} --output json`;
+  if (process.env.SUBTRK_DEBUG_BL) console.error(`[bl] ${literal.slice(0, 240)}`);
+  const args = ["bl", "console", "call", "--api", api, "--data", data, "--console-site", site, "--console-region", region, "--output", "json"];
+  const run = await runBl(literal, args);
+  if (!run.ok) return null;
+  return extractJson(run.stdout);
+}
+
+function blSiteRegion(): { site: string; region: string } {
+  let site = "international";
+  let region = "ap-southeast-1";
+  try {
+    const cfg = JSON.parse(readFileSync(join(homedir(), ".bailian", "config.json"), "utf8")) as Record<string, unknown>;
+    if (typeof cfg.console_site === "string" && /^[a-z-]+$/.test(cfg.console_site)) site = cfg.console_site;
+    if (typeof cfg.console_region === "string" && /^[a-z0-9-]+$/.test(cfg.console_region)) region = cfg.console_region;
+  } catch {
+    /* defaults stand */
+  }
+  return { site, region };
+}
+
+export interface AlibabaSeries {
+  usageType: string;
+  unit: string;
+  aggMethod: string;
+  points: { t: number; value: number }[];
+}
+
+// Pure: unwrap the bl envelope to originData series. null = shape failure;
+// {login: true} marks an expired console session (both the top-level bl error
+// envelope and the nested zelda error shape).
+export function parseAlibabaMonitor(body: unknown): { series: AlibabaSeries[] } | { login: true } | null {
+  if (typeof body !== "object" || body === null) return null;
+  const topErr = (body as { error?: { message?: unknown; code?: unknown } }).error;
+  if (topErr && typeof topErr === "object") {
+    const msg = String(topErr.message ?? "");
+    if (/log ?in|session/i.test(msg)) return { login: true };
+    return null; // a different top-level bl error is still not a monitor body
+  }
+  let d: unknown = (body as { data?: unknown }).data;
+  const v2 = (d as { DataV2?: { data?: unknown } } | null | undefined)?.DataV2;
+  if (v2 && typeof v2.data === "object" && v2.data !== null) d = v2.data;
+  const inner = (d as { data?: unknown } | null | undefined)?.data;
+  if (typeof inner === "object" && inner !== null) {
+    const code = (inner as { code?: unknown }).code;
+    const message = String((inner as { message?: unknown }).message ?? "");
+    if (typeof code === "string" && code !== "200" && /log ?in|session/i.test(message)) return { login: true };
+  }
+  let dd: unknown = inner;
+  if (typeof dd === "object" && dd !== null) {
+    const nested = (dd as { data?: unknown }).data;
+    if (nested !== undefined) dd = nested;
+  }
+  const origin = (dd as { originData?: unknown } | null | undefined)?.originData;
+  if (!Array.isArray(origin)) return null;
+  const series: AlibabaSeries[] = [];
+  for (const raw of origin) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const s = raw as Record<string, unknown>;
+    const labels = (s.labels ?? {}) as Record<string, unknown>;
+    const usageType = typeof labels.usage_type === "string" ? labels.usage_type : "";
+    if (!usageType) continue;
+    const aggMethod = typeof s.aggMethod === "string" ? s.aggMethod : "sum";
+    const points: { t: number; value: number }[] = [];
+    if (Array.isArray(s.points)) {
+      for (const p of s.points) {
+        if (typeof p !== "object" || p === null) continue;
+        const t = (p as { timestamp?: unknown }).timestamp;
+        const value = num((p as { value?: unknown }).value);
+        if (typeof t === "number" && Number.isFinite(t) && value !== null) points.push({ t, value });
+      }
+    }
+    series.push({ usageType, unit: typeof labels.unit === "string" ? labels.unit : "", aggMethod, points });
+  }
+  return { series };
+}
+
+// Pure: sum-series per usage_type -> daily model rows. cached_tokens is a
+// subset of input_tokens, so uncached input = input − cached (clamped).
+export function alibabaRowsFromSeries(
+  series: AlibabaSeries[],
+): { days: Record<string, Record<string, UsageRow>> } | null {
+  const pick = (ut: string): Map<number, number> => {
+    const s = series.find((x) => x.usageType === ut && x.aggMethod === "sum"); // cumsum companions skipped
+    return new Map((s?.points ?? []).map((p) => [p.t, p.value]));
+  };
+  const input = pick("input_tokens");
+  const cached = pick("cached_tokens");
+  const output = pick("output_tokens");
+  const total = pick("total_tokens");
+  if (input.size === 0 && total.size === 0) return null;
+  const stamps = new Set<number>([...input.keys(), ...total.keys()]);
+  const days: Record<string, Record<string, UsageRow>> = {};
+  const MODEL = "(all models)";
+  for (const ts of stamps) {
+    const inTot = input.get(ts) ?? 0;
+    const cachedV = cached.get(ts) ?? 0;
+    const outV = output.get(ts) ?? 0;
+    const totV = total.get(ts);
+    const row: UsageRow = {};
+    if (input.size > 0) row.in = Math.max(0, inTot - cachedV);
+    if (cached.size > 0) row.cr = cachedV;
+    if (output.size > 0) row.out = outV;
+    if (totV !== undefined) row.tot = totV;
+    const dk = dayKey(ts);
+    const bucket = (days[dk] ??= {});
+    const target = (bucket[MODEL] ??= {});
+    for (const field of ["in", "cw", "cr", "out", "tot"] as const) {
+      const v = row[field];
+      if (v !== undefined) target[field] = (target[field] ?? 0) + v;
+    }
+  }
+  return { days };
+}
+
+// Per-model: the same monitor call restricted to one slug.
+export function alibabaPerModelRows(
+  series: AlibabaSeries[],
+  model: string,
+): Record<string, Record<string, UsageRow>> {
+  const base = alibabaRowsFromSeries(series);
+  const days: Record<string, Record<string, UsageRow>> = {};
+  if (!base) return days;
+  for (const [dk, rows] of Object.entries(base.days)) {
+    days[dk] = { [model]: rows["(all models)"] ?? {} };
+  }
+  return days;
+}
+
+async function harvestAlibaba(ctx: JobCtx): Promise<void> {
+  const state = ctx.store().state.alibaba as { at?: number } | undefined;
+  if (state?.at && ctx.now - state.at < ALIBABA_TTL_MS) {
+    ctx.summary.skipped.push("alibaba: fresh");
+    return;
+  }
+  const { site, region } = blSiteRegion();
+  const fromMs = ctx.now - 30 * 86_400_000;
+  const toMs = ctx.now;
+  const reqBase = { startTime: fromMs, endTime: toMs, productMode: "TokenPlanPersonal", step: 86_400 };
+  const metricFilters = [{ metricName: "model_usage", aggMethod: "sum" }];
+  const totalBody = await blCall(
+    "zeldaEasy.bailian-telemetry.platform-model.getModelMonitorDataWithOss",
+    { ...reqBase, metricFilters },
+    site,
+    region,
+    ctx.deadline,
+  );
+  if (totalBody === null) {
+    ctx.summary.skipped.push("alibaba: bl unavailable or budget spent");
+    return;
+  }
+  const parsedTotal = parseAlibabaMonitor(totalBody);
+  if (parsedTotal === null) {
+    ctx.summary.errors.push(`alibaba: monitor shape unrecognized – ${JSON.stringify(totalBody).slice(0, 400)}`);
+    return;
+  }
+  if ("login" in parsedTotal) {
+    ctx.summary.skipped.push("alibaba: console session expired – run subtrk auth refresh --provider alibaba");
+    return;
+  }
+  const totalDays = alibabaRowsFromSeries(parsedTotal.series);
+  if (!totalDays) {
+    ctx.summary.errors.push("alibaba: monitor series empty");
+    return;
+  }
+  // Per-model rows: one request per slug (the server aggregates across a
+  // multi-model filter). Failure here degrades to the aggregate row.
+  const perModelDays: Record<string, Record<string, UsageRow>> = {};
+  let modelsOk = 0;
+  const listBody = await blCall(
+    "zeldaEasy.bailian-telemetry.platform-model.listRecentlyModels",
+    { startTime: fromMs, endTime: toMs, productMode: "TokenPlanPersonal" },
+    site,
+    region,
+    ctx.deadline,
+  );
+  const slugs = (() => {
+    let d: unknown = (listBody as { data?: unknown } | null)?.data;
+    const v2 = (d as { DataV2?: { data?: unknown } } | null | undefined)?.DataV2;
+    if (v2 && typeof v2.data === "object" && v2.data !== null) d = v2.data;
+    const arr = (d as { data?: unknown } | null | undefined)?.data;
+    return Array.isArray(arr) ? arr.filter((s): s is string => typeof s === "string" && /^[a-zA-Z0-9._-]+$/.test(s)).slice(0, 8) : [];
+  })();
+  for (const slug of slugs) {
+    const body = await blCall(
+      "zeldaEasy.bailian-telemetry.platform-model.getModelMonitorDataWithOss",
+      { ...reqBase, metricFilters, models: [slug] },
+      site,
+      region,
+      ctx.deadline,
+    );
+    const parsed = body === null ? null : parseAlibabaMonitor(body);
+    if (!parsed || "login" in parsed) continue;
+    const rows = alibabaPerModelRows(parsed.series, slug);
+    for (const [dk, models] of Object.entries(rows)) {
+      const bucket = (perModelDays[dk] ??= {});
+      for (const [model, row] of Object.entries(models)) bucket[model] = { ...row };
+    }
+    modelsOk++;
+  }
+  const fromDayKey = dayKey(fromMs);
+  const applied = mutateUsageStore(
+    ctx.dir,
+    (store) => {
+      const cur = ensure(store.daily, "alibaba");
+      for (const key of Object.keys(cur)) {
+        if (key >= fromDayKey) delete cur[key];
+      }
+      // Per-model rows win where present; days without them fall back to the
+      // aggregate under a labeled pseudo-model.
+      const merged: Record<string, Record<string, UsageRow>> = {};
+      for (const [dk, rows] of Object.entries(totalDays.days)) {
+        merged[dk] = perModelDays[dk] ?? rows;
+      }
+      replaceDailyRows(store, "alibaba", merged);
+      const s = ensure(store.state, "alibaba") as { at?: number };
+      s.at = ctx.now;
+    },
+    ctx.now,
+  );
+  if (applied) {
+    ctx.summary.applied.push(modelsOk > 0 ? `alibaba (${modelsOk}/${slugs.length} models)` : "alibaba");
+  } else ctx.summary.skipped.push("alibaba: store busy");
+}
+
+// --- openai: local codex rollouts (tokens) + wham daily plan-% (server) ---
+
+interface OpenaiWhamDay {
+  date: string;
+  models: { model: string; credits: number }[];
+}
+
+// Pure: the wham daily breakdown -> {dayKey -> model -> pct} rows (credits is
+// a plan-usage percent, not dollars – informational, never summed or priced).
+export function extractOpenaiWham(body: unknown): Record<string, Record<string, UsageRow>> | null {
+  if (typeof body !== "object" || body === null) return null;
+  const data = (body as { data?: unknown }).data;
+  if (!Array.isArray(data)) return null;
+  const days: Record<string, Record<string, UsageRow>> = {};
+  for (const raw of data) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const d = raw as { date?: unknown; models?: unknown };
+    if (typeof d.date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(d.date) || !Array.isArray(d.models)) continue;
+    const bucket = (days[d.date] ??= {});
+    for (const m of d.models) {
+      if (typeof m !== "object" || m === null) continue;
+      const model = (m as { model?: unknown }).model;
+      const credits = num((m as { credits?: unknown }).credits);
+      if (typeof model !== "string" || model === "" || credits === null) continue;
+      const target = (bucket[model] ??= {});
+      target.pct = Math.max(target.pct ?? 0, credits);
+    }
+  }
+  return days;
+}
+
+// Pure: one codex rollout line -> a token delta row. Codex emits BOTH a
+// cumulative total_token_usage and a per-event last_token_usage; the delta
+// for our buckets is last_token_usage. Model attribution rides the nearest
+// preceding turn_context line.
+export function parseCodexRolloutLine(
+  line: string,
+  currentModel: string | null,
+): { ts: number; model: string; row: UsageRow; modelUpdate: string | null } | null {
+  let o: unknown;
+  try {
+    o = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (typeof o !== "object" || o === null) return null;
+  const rec = o as { type?: unknown; timestamp?: unknown; payload?: Record<string, unknown> | null };
+  if (rec.type === "turn_context" && rec.payload && typeof rec.payload.model === "string" && rec.payload.model) {
+    return { ts: 0, model: "", row: {}, modelUpdate: rec.payload.model };
+  }
+  if (rec.type !== "event_msg" || !rec.payload || rec.payload.type !== "token_count") return null;
+  const info = rec.payload.info as { last_token_usage?: Record<string, unknown> } | undefined;
+  const u = info?.last_token_usage;
+  if (!u || typeof u !== "object") return null;
+  const inTot = num(u.input_tokens);
+  const cached = num(u.cached_input_tokens) ?? 0;
+  const cw = num(u.cache_write_input_tokens) ?? 0;
+  const out = num(u.output_tokens);
+  if (inTot === null || out === null) return null;
+  const ts = typeof rec.timestamp === "string" ? Date.parse(rec.timestamp) : NaN;
+  if (!Number.isFinite(ts)) return null;
+  const row: UsageRow = { in: Math.max(0, inTot - cached), req: 1 };
+  if (cached > 0) row.cr = cached;
+  if (cw > 0) row.cw = cw;
+  if (out > 0) row.out = out;
+  return { ts, model: currentModel ?? "codex", row, modelUpdate: null };
+}
+
+// Pure: one claude transcript line -> a token row (ccusage rules: skip
+// synthetic/error lines; input/cache/cache-read/output from message.usage).
+export function parseClaudeTranscriptLine(
+  line: string,
+  _currentModel: string | null,
+): { ts: number; model: string; row: UsageRow; modelUpdate: string | null } | null {
+  if (!line.includes('"assistant"') || !line.includes('"usage"')) return null; // cheap prefilter
+  let o: unknown;
+  try {
+    o = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (typeof o !== "object" || o === null) return null;
+  const rec = o as Record<string, unknown>;
+  if (rec.type !== "assistant" || rec.isApiErrorMessage === true) return null;
+  const message = rec.message as Record<string, unknown> | undefined;
+  if (!message || typeof message !== "object") return null;
+  const model = message.model;
+  const usage = message.usage as Record<string, unknown> | undefined;
+  if (typeof model !== "string" || model === "" || model === "<synthetic>" || !usage || typeof usage !== "object") return null;
+  const inTot = num(usage.input_tokens) ?? 0;
+  const cr = num(usage.cache_read_input_tokens) ?? 0;
+  const cw = num(usage.cache_creation_input_tokens) ?? 0;
+  const out = num(usage.output_tokens) ?? 0;
+  if (inTot + cr + cw + out <= 0) return null;
+  const ts = typeof rec.timestamp === "string" ? Date.parse(rec.timestamp) : NaN;
+  if (!Number.isFinite(ts)) return null;
+  const row: UsageRow = { in: inTot, req: 1 };
+  if (cr > 0) row.cr = cr;
+  if (cw > 0) row.cw = cw;
+  if (out > 0) row.out = out;
+  return { ts, model, row, modelUpdate: null };
+}
+
+// Shared incremental JSONL walker: per-file byte offsets in
+// state[provider].files; truncated files restart from zero (rare, documented
+// double-count risk – subtrk usage --rebuild is the repair). Processes files
+// newest-first until the budget runs out; offsets advance only for files that
+// were fully processed through their last complete line.
+async function harvestLocalJsonl(
+  ctx: JobCtx,
+  provider: "claude" | "openai",
+  root: string,
+  parseLine: (line: string, currentModel: string | null) => { ts: number; model: string; row: UsageRow; modelUpdate: string | null } | null,
+  label: string,
+): Promise<void> {
+  const state = ctx.store().state[provider] as { at?: number; files?: Record<string, { off: number; size: number }> } | undefined;
+  if (state?.at && ctx.now - state.at < OPENAI_LOCAL_TTL_MS) {
+    ctx.summary.skipped.push(`${label}: fresh`);
+    return;
+  }
+  let files: { path: string; mtime: number; size: number }[] = [];
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 6) return;
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const f of entries) {
+      const fp = join(dir, f);
+      let st;
+      try {
+        st = statSync(fp);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) walk(fp, depth + 1);
+      else if (f.endsWith(".jsonl")) files.push({ path: fp, mtime: st.mtimeMs, size: st.size });
+    }
+  };
+  try {
+    walk(root, 0);
+  } catch {
+    ctx.summary.skipped.push(`${label}: unreadable dir`);
+    return;
+  }
+  if (files.length === 0) {
+    ctx.summary.skipped.push(`${label}: no transcripts`);
+    return;
+  }
+  files.sort((a, b) => b.mtime - a.mtime);
+  const watermarks = state?.files ?? {};
+  const rowsByHour = new Map<string, Map<string, UsageRow>>();
+  const offsets: Record<string, { off: number; size: number }> = {};
+  let processed = 0;
+  for (const file of files) {
+    if (Date.now() + 1_500 > ctx.deadline) {
+      ctx.summary.aborted = true;
+      break;
+    }
+    const wm = watermarks[file.path];
+    let start = 0;
+    if (wm && file.size >= wm.off) {
+      if (wm.off >= file.size) continue; // fully processed
+      start = wm.off;
+    } // truncated or new -> restart at 0 (rare double-count, --rebuild repairs)
+    let text = "";
+    try {
+      const fd = openSync(file.path, "r");
+      try {
+        const len = file.size - start;
+        if (len <= 0) continue;
+        const buf = Buffer.alloc(len);
+        const read = readSync(fd, buf, 0, len, start);
+        text = buf.toString("utf8", 0, read);
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      continue; // file vanished mid-harvest
+    }
+    let currentModel: string | null = null;
+    let consumed = 0;
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const isLast = i === lines.length - 1;
+      if (isLast && line !== "") break; // partial line – re-read next round
+      consumed += Buffer.byteLength(line, "utf8") + 1;
+      if (line === "") continue;
+      const parsed = parseLine(line, currentModel);
+      if (parsed?.modelUpdate) {
+        currentModel = parsed.modelUpdate;
+        continue;
+      }
+      if (!parsed) continue;
+      const hk = hourKey(parsed.ts);
+      const models = rowsByHour.get(hk) ?? new Map<string, UsageRow>();
+      const target = models.get(parsed.model) ?? {};
+      for (const field of ["in", "cw", "cr", "out", "req"] as const) {
+        const v = parsed.row[field];
+        if (v !== undefined) target[field] = (target[field] ?? 0) + v;
+      }
+      models.set(parsed.model, target);
+      rowsByHour.set(hk, models);
+    }
+    offsets[file.path] = { off: start + consumed, size: file.size };
+    processed++;
+  }
+  if (processed === 0 && rowsByHour.size === 0) {
+    ctx.summary.skipped.push(`${label}: nothing new`);
+    return;
+  }
+  const applied = mutateUsageStore(
+    ctx.dir,
+    (store) => {
+      for (const [hk, models] of rowsByHour) {
+        for (const [model, row] of models) addDeltaLocal(store, provider, hk, model, row);
+      }
+      const s = ensure(store.state, provider) as { at?: number; files?: Record<string, { off: number; size: number }> };
+      const f = (s.files ??= {});
+      for (const [path, wm] of Object.entries(offsets)) f[path] = wm;
+      s.at = ctx.now;
+    },
+    ctx.now,
+  );
+  if (applied) ctx.summary.applied.push(label);
+  else ctx.summary.skipped.push(`${label}: store busy`);
+}
+
+// addDelta into the LOCAL section – this-machine rows must never mix with the
+// vendor-served buckets (month-to-date totals exclude them by design).
+function addDeltaLocal(store: UsageStore, provider: string, hKey: string, model: string, delta: UsageRow): void {
+  const hours = ensure(store.localHourly, provider);
+  const bucket = ensure(hours, hKey);
+  const row = ensure(bucket, model);
+  for (const field of ["in", "cw", "cr", "out", "tot", "req", "usd"] as const) {
+    const v = delta[field];
+    if (v === undefined) continue;
+    row[field] = (row[field] ?? 0) + v;
+  }
+}
+
+async function harvestOpenai(ctx: JobCtx): Promise<void> {
+  // 1. local rollouts – real tokens, this machine
+  await harvestLocalJsonl(
+    ctx,
+    "openai",
+    join(homedir(), ".codex", "sessions"),
+    parseCodexRolloutLine,
+    "openai/local",
+  );
+  // 2. wham daily plan-% – server-side, cross-machine
+  const state = ctx.store().state.openai as { whamAt?: number } | undefined;
+  if (state?.whamAt && ctx.now - state.whamAt < OPENAI_WHAM_TTL_MS) {
+    ctx.summary.skipped.push("openai/wham: fresh");
+    return;
+  }
+  if (Date.now() + 2_000 > ctx.deadline) {
+    ctx.summary.aborted = true;
+    return;
+  }
+  let token: string | undefined;
+  let account: string | undefined;
+  try {
+    const auth = JSON.parse(readFileSync(join(homedir(), ".codex", "auth.json"), "utf8")) as {
+      tokens?: { access_token?: unknown; account_id?: unknown; id_token?: unknown };
+    };
+    if (typeof auth.tokens?.access_token === "string" && auth.tokens.access_token) token = auth.tokens.access_token;
+    if (typeof auth.tokens?.account_id === "string" && auth.tokens.account_id) account = auth.tokens.account_id;
+    else if (typeof auth.tokens?.id_token === "string") {
+      const parts = auth.tokens.id_token.split(".");
+      if (parts.length === 3) {
+        try {
+          const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as Record<string, unknown>;
+          if (typeof payload.chatgpt_account_id === "string") account = payload.chatgpt_account_id;
+        } catch {
+          /* account id stays absent */
+        }
+      }
+    }
+  } catch {
+    ctx.summary.skipped.push("openai/wham: no codex credentials");
+    return;
+  }
+  if (!token) {
+    ctx.summary.skipped.push("openai/wham: no codex credentials");
+    return;
+  }
+  const iso = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+  const url = `${WHAM_URL}?start_date=${iso(ctx.now - 30 * 86_400_000)}&end_date=${iso(ctx.now)}`;
+  try {
+    const res = await ctx.fetchImpl(url, {
+      headers: { Authorization: `Bearer ${token}`, "User-Agent": "codex-cli", ...(account ? { "chatgpt-account-id": account } : {}) },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = (await res.json()) as unknown;
+    const days = extractOpenaiWham(body);
+    if (days === null) {
+      ctx.summary.errors.push("openai/wham: shape unrecognized");
+      return;
+    }
+    const fromDayKey = dayKey(ctx.now - 30 * 86_400_000);
+    const applied = mutateUsageStore(
+      ctx.dir,
+      (store) => {
+        const cur = ensure(store.daily, "openai");
+        for (const key of Object.keys(cur)) {
+          if (key >= fromDayKey) delete cur[key];
+        }
+        replaceDailyRows(store, "openai", days);
+        const s = ensure(store.state, "openai") as { whamAt?: number };
+        s.whamAt = ctx.now;
+      },
+      ctx.now,
+    );
+    if (applied) ctx.summary.applied.push("openai/wham");
+    else ctx.summary.skipped.push("openai/wham: store busy");
+  } catch (err) {
+    ctx.summary.errors.push(`openai/wham: ${errorMessage(err)}`);
+  }
+}
+
+async function harvestClaudeLocal(ctx: JobCtx): Promise<void> {
+  await harvestLocalJsonl(
+    ctx,
+    "claude",
+    join(homedir(), ".claude", "projects"),
+    parseClaudeTranscriptLine,
+    "claude/local",
+  );
+}
+
 // --- entry point ---
 
 // Harvest every due source. Called after collectStatus from both the CLI and
@@ -1182,6 +1908,9 @@ export async function harvestUsage(results: ProviderResult[] = [], opts: Harvest
     harvestOpenrouter(ctx),
     harvestZcode(ctx),
     harvestPricing(ctx),
+    harvestAlibaba(ctx),
+    harvestOpenai(ctx),
+    harvestClaudeLocal(ctx),
   ];
   const settled = await Promise.allSettled(jobs);
   for (const s of settled) {

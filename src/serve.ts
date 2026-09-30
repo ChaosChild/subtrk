@@ -226,13 +226,17 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
           return;
         }
         // Reads the store only – no vendor calls. Defaults: local month-to-date
-        // across every provider with stored data, day granularity.
+        // across every provider with stored data, day granularity. `local`
+        // controls the this-machine sections: the MTD summary excludes them
+        // (vendor-served totals only), a provider drill-down includes them.
         const url = new URL(req.url ?? "/", "http://127.0.0.1");
         const provider = url.searchParams.get("provider");
         if (provider && !(ALL_PROVIDER_IDS as readonly string[]).includes(provider)) {
           respond(res, 400, JSON.stringify({ error: "unknown provider" }));
           return;
         }
+        const localParam = url.searchParams.get("local");
+        const local = localParam === "only" ? "only" : localParam === "include" || provider !== null ? "include" : "exclude";
         const granularity = url.searchParams.get("granularity") === "hour" ? "hour" : "day";
         const parseMs = (name: string): number | null => {
           const raw = url.searchParams.get(name);
@@ -252,7 +256,7 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
         }
         try {
           const store = readUsageStore(deps.subtrkDir ?? SUBTRK_DIR);
-          const agg = aggregateUsage(store, { provider: provider ?? undefined, granularity, fromMs: from, toMs: to });
+          const agg = aggregateUsage(store, { provider: provider ?? undefined, granularity, fromMs: from, toMs: to, local });
           respond(
             res,
             200,

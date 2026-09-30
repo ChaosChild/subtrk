@@ -36,6 +36,7 @@ export const PRICE_FALLBACK_PER_1M: Record<string, Price1M> = {
   // Alibaba Model Studio international, ≤32K input tier (tiered models price
   // at the cheapest tier here – the drill-down labels every estimate).
   "qwen3-max": { in: 1.2, out: 6.0, cr: 0.12, cw: 1.5 },
+  "qwen3.8-max": { in: 2.0, out: 6.0, cr: 0.2, cw: 2.5 },
   "qwen3-coder-plus": { in: 1.0, out: 5.0, cr: 0.1, cw: 1.25 },
   "qwen-plus": { in: 0.4, out: 1.2, cr: 0.04, cw: 0.5 },
   "qwen-flash": { in: 0.05, out: 0.4, cr: 0.005, cw: 0.0625 },

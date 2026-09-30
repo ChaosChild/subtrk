@@ -216,10 +216,21 @@ td.r, th.r { text-align: right; }
 .chips2 { display: inline-flex; gap: 6px; }
 .chips2 button { font: 600 11.5px var(--mono); border: 1px solid var(--border); background: var(--surface); border-radius: 999px; padding: 2px 10px; color: var(--text-2); cursor: pointer; }
 .chips2 button.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: var(--accent-soft); }
-.kindchip { font: 600 10px var(--mono); border-radius: 5px; padding: 1px 6px; margin-left: 6px; vertical-align: 1px; }
+.kindchip { font: 600 10px var(--mono); border-radius: 5px; padding: 1px 6px; margin-left: 4px; vertical-align: 1px; }
+#dvmodels td:first-child { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#dvmodels td { padding-left: 10px; padding-right: 10px; }
+#dvmodels th { padding-left: 10px; padding-right: 10px; }
 .kindchip.actual { color: var(--ok); background: var(--ok-soft); }
 .kindchip.estimate, .kindchip.blended { color: var(--warn); background: var(--warn-soft); }
 .empty { color: var(--text-3); font-size: 13px; padding: 22px 18px; text-align: center; }
+.pctstrip { display: grid; grid-template-columns: 130px 1fr; gap: 12px; align-items: start; margin-top: 10px; min-width: 0; }
+.pctk { font: 600 11px var(--mono); color: var(--text-2); background: var(--surface-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 7px; justify-self: start; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 130px; }
+.pctbars { min-width: 0; }
+.shimmer { position: relative; overflow: hidden; background: var(--surface-2); border-radius: 6px; }
+.shimmer::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%); background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--text-3) 18%, transparent), transparent); animation: sh 1.4s infinite; }
+@keyframes sh { 100% { transform: translateX(100%); } }
+.spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border-strong); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.9s linear infinite; vertical-align: -2px; margin-right: 6px; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 footer { color: var(--text-3); font-size: 12px; border-top: 1px solid var(--border); padding: 18px 0 32px; }
 footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; justify-content: space-between; }
@@ -675,6 +686,21 @@ function schedule(ms) {
   timer = setTimeout(refresh, ms);
 }
 
+// Drill-down data: a store-only read (~130 ms) – fetched independently of the
+// status round so the page and its range/granularity switches are instant.
+async function refetchUsage() {
+  try {
+    const ures = await fetch(usageUrl(), { cache: "no-store", headers: authHeaders() });
+    if (ures.status === 401) {
+      showBanner("crit", "token rejected – restart subtrk serve and open the fresh URL");
+      return;
+    }
+    if (!ures.ok) return;
+    USAGE_PROV = await ures.json();
+    renderProviderView();
+  } catch {}
+}
+
 async function refresh() {
   if (inFlight) {
     refreshQueued = true; // trailing replay – a dropped call would leave stale cards for up to a recheck period
@@ -683,6 +709,7 @@ async function refresh() {
   inFlight = true;
   clearTimeout(timer);
   try {
+    if (PROVIDER_VIEW) void refetchUsage(); // parallel – never waits for probes
     const res = await fetch("/api/status", {
       cache: "no-store",
       headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -709,15 +736,13 @@ async function refresh() {
         if (typeof cfg.version === "string" && cfg.version) $("servever").textContent = `subtrk serve v${cfg.version}`;
       }
     } catch {}
-    // M3: the drill-down needs per-provider aggregates, the dashboard the
-    // month-to-date totals – both are store-only reads via /api/usage.
-    try {
-      const ures = await fetch(PROVIDER_VIEW ? usageUrl() : "/api/usage", { cache: "no-store", headers: authHeaders() });
-      if (ures.ok) {
-        if (PROVIDER_VIEW) USAGE_PROV = await ures.json();
-        else USAGE_MTD = await ures.json();
-      }
-    } catch {}
+    if (!PROVIDER_VIEW) {
+      // Dashboard month-to-date cards: a store-only read too.
+      try {
+        const ures = await fetch("/api/usage", { cache: "no-store", headers: authHeaders() });
+        if (ures.ok) USAGE_MTD = await ures.json();
+      } catch {}
+    }
     render(data);
     const ms = STATUS.recheckAfter ? new Date(STATUS.recheckAfter) - now() : NaN;
     schedule(Number.isFinite(ms) && ms > 0 ? Math.max(1000, ms) : FALLBACK_MS);
@@ -738,42 +763,61 @@ async function refresh() {
 const shortBucket = t => (t.length === 10 ? t.slice(5) : `${t.slice(8, 10)} ${t.slice(11)}h`);
 
 function latestWindows(u) {
-  const byK = new Map();
+  // "Now" view: only live generations (resetsAt in the future), one row per
+  // window generation (kimi's hours-remaining kind fragments one window into
+  // several kinds that share a reset time – collapse by r), freshest sample.
+  const nowMs = now();
+  const byR = new Map();
   for (const s of (u && u.samples) || []) {
-    const cur = byK.get(s.k);
-    if (!cur) byK.set(s.k, { ...s, n: 1 });
-    else { cur.n++; if (s.t > cur.t) Object.assign(cur, { t: s.t, u: s.u, r: s.r, sf: s.sf }); }
+    if (new Date(s.r).getTime() <= nowMs) continue; // dead generation
+    const rKey = Math.round(new Date(s.r).getTime() / 300000); // collapse 5-min jitter (claude)
+    const cur = byR.get(rKey);
+    if (!cur) byR.set(rKey, { ...s, n: 1 });
+    else { cur.n++; if (s.t > cur.t) Object.assign(cur, { t: s.t, u: s.u, r: s.r, sf: s.sf, stale: s.stale }); }
   }
-  return [...byK.values()].sort((a, b) => (a.k < b.k ? -1 : 1));
+  return [...byR.values()].sort((a, b) => (a.k < b.k ? -1 : 1));
 }
 
-// Reset markers: a sample whose resetsAt differs from the previous sample's
-// marks a new window generation – place the boundary by timestamp.
+// Reset markers, per window kind: a kind's resetsAt JUMPING (>15 min, so
+// claude's ms-jitter and google's rolling windows stay quiet) marks a new
+// generation; the boundary sits at the first sample of the new generation.
 function resetMarks(u, series) {
-  const samples = (u.samples || []).slice().sort((a, b) => a.t - b.t);
-  const bounds = [];
-  let prevR = null;
-  for (const s of samples) {
-    if (prevR !== null && s.r !== prevR) bounds.push(s.t);
-    prevR = s.r;
+  if (!series.length) return "";
+  const byK = new Map();
+  for (const s of (u.samples || []).slice().sort((a, b) => a.t - b.t)) {
+    if (!byK.has(s.k)) byK.set(s.k, []);
+    byK.get(s.k).push(s);
   }
-  if (!bounds.length || !series.length) return "";
-  const t0 = series[0].t;
-  const t1 = series[series.length - 1].t + (DV.gran === "hour" ? 36e5 : 864e5);
+  const bounds = [];
+  for (const [, list] of byK) {
+    let prevR = null;
+    for (const s of list) {
+      if (prevR !== null && Math.abs(new Date(s.r) - new Date(prevR)) > 15 * 60000) bounds.push({ t: s.t, k: s.k });
+      prevR = s.r;
+    }
+  }
+  if (!bounds.length) return "";
+  // series[].t is a bucket KEY string ("2026-09-30" / "2026-09-30T13") –
+  // convert to epoch ms before arithmetic (string + number concatenates).
+  const keyMs = k => Date.parse(k.length === 10 ? k + "T00:00:00Z" : k + ":00:00Z");
+  const t0 = keyMs(series[0].t);
+  const t1 = keyMs(series[series.length - 1].t) + (DV.gran === "hour" ? 36e5 : 864e5);
   return bounds
-    .filter(b => b >= t0 && b <= t1)
+    .filter(b => b.t >= t0 && b.t <= t1)
     .map(b => {
-      const x = Math.min(99.5, Math.max(0, ((b - t0) / (t1 - t0)) * 100));
-      return `<div class="cmark" style="left:${x}%"><span>⟲ reset</span></div>`;
+      const x = Math.min(99.5, Math.max(0, ((b.t - t0) / (t1 - t0)) * 100));
+      return `<div class="cmark" style="left:${x}%"><span>⟲ ${esc(b.k.split("·")[0])}</span></div>`;
     })
     .join("");
 }
 
 function chartHTML(u) {
   const hasSeries = (u.series || []).some(b => b.in + b.cr + b.out + b.tot > 0);
-  if (!hasSeries && !(u.samples || []).length) {
+  const hasSamples = (u.samples || []).length > 0;
+  if (!hasSeries && !hasSamples) {
     return `<div class="empty">no usage recorded yet – it accumulates from status calls, dashboard refreshes and subtrk usage</div>`;
   }
+  let out = "";
   if (hasSeries) {
     const series = u.series.filter(b => b.in + b.cr + b.out + b.tot > 0);
     const max = Math.max(1, ...series.map(b => Math.max(b.in + b.cr + b.out, b.tot)));
@@ -786,34 +830,60 @@ function chartHTML(u) {
         return `<div class="bcol2">${inner}</div>`;
       })
       .join("");
-    const labs = series.map(b => `<span title="${esc(b.t)}">${esc(shortBucket(b.t))}</span>`).join("");
+    const labs = series.map(b => `<span title="${esc(b.t)} (UTC day)">${esc(shortBucket(b.t))}</span>`).join("");
     const legend = u.splitless
       ? `<span><i class="b-tot"></i>tokens (vendor reports totals only)</span>`
       : `<span><i class="b-in"></i>input (uncached)</span><span><i style="background:color-mix(in srgb, var(--ok) 65%, transparent)"></i>cached input</span><span><i style="background:color-mix(in srgb, var(--warn) 75%, transparent)"></i>output</span>`;
     const total = u.splitless ? u.tot : u.in + u.cr + u.out;
-    return `<div class="chartwrap"><div class="bars2">${marks}${bars}</div><div class="xlabs">${labs}</div></div>
-      <div style="padding:0 18px 16px"><div class="legend2">${legend}<span><i style="background:var(--crit);width:2px;height:12px;border-radius:1px"></i>window reset – usage between lines</span></div>
+    const localNote = u.hasLocal ? `<span><b>this machine only</b> – transcripts from other devices aren't visible locally</span>` : "";
+    out += `<div class="chartwrap"><div class="bars2">${marks}${bars}</div><div class="xlabs">${labs}</div></div>
+      <div style="padding:0 18px 16px"><div class="legend2">${legend}${localNote}<span><i style="background:var(--crit);width:2px;height:12px;border-radius:1px"></i>window reset – usage between lines</span></div>
       <div class="tots2"><span>buckets <b>${series.length}</b></span><span>range total <b>${fmtTok(total)} tok</b></span>${u.req ? `<span>requests <b>${fmtTok(u.req)}</b></span>` : ""}${u.usdActual + u.usdEst > 0 ? `<span>cost <b>$${(u.usdActual + u.usdEst).toFixed(2)}</b></span>` : ""}</div></div>`;
   }
-  // Tokenless provider: daily strip of the latest sampled window %.
-  const byDay = new Map();
+  if (hasSamples) out += pctStripsHTML(u);
+  return out;
+}
+
+// Window-% history: one mini-strip per window kind (5h / 7d / scopes), bar
+// height = that kind's latest sampled % per bucket. This is the whole chart
+// for tokenless providers and a secondary view for token-ful ones.
+function utcDayKey(ms) {
+  const d = new Date(ms);
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+}
+function utcHourKey(ms) {
+  const d = new Date(ms);
+  return `${utcDayKey(ms)}T${pad(d.getUTCHours())}`;
+}
+function pctStripsHTML(u) {
+  const bucketMs = DV.gran === "hour" ? 36e5 : 864e5;
+  const byK = new Map();
   for (const s of u.samples || []) {
-    const d = new Date(s.t);
-    const key = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-    const cur = byDay.get(key);
-    if (!cur || s.t > cur.t) byDay.set(key, s);
+    const b = Math.floor(s.t / bucketMs) * bucketMs;
+    const key = `${s.k}|${b}`;
+    const cur = byK.get(key);
+    if (!cur || s.t > cur.t) byK.set(key, s);
   }
-  const days = [...byDay.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).slice(-60);
-  if (!days.length) return `<div class="empty">no samples yet</div>`;
-  const bars = days
-    .map(([, s]) => {
-      const col = s.u >= 95 ? "var(--crit)" : s.u >= 80 ? "var(--warn)" : "color-mix(in srgb, var(--ok) 65%, transparent)";
-      return `<div class="bcol2"><div class="bseg2" style="height:${Math.max(2, s.u)}%;background:${col}" title="${esc(s.k)} ${s.u.toFixed(0)}% used"></div></div>`;
-    })
-    .join("");
-  const labs = days.map(([k]) => `<span>${esc(k.slice(5))}</span>`).join("");
-  return `<div class="chartwrap"><div class="bars2">${bars}</div><div class="xlabs">${labs}</div></div>
-    <div style="padding:0 18px 16px"><div class="legend2"><span>bar height = latest sampled window % that day · <b>${esc(META[PROVIDER_VIEW] ? META[PROVIDER_VIEW].name : PROVIDER_VIEW)}</b> exposes no token counts, so its history is percentages</span></div></div>`;
+  const kinds = [...new Set([...byK.values()].map(s => s.k))].sort();
+  if (!kinds.length) return "";
+  let html = "";
+  for (const kind of kinds) {
+    const pts = [...byK.entries()].filter(([key]) => key.startsWith(kind + "|")).map(([key, s]) => ({ b: Number(key.split("|")[1]), s })).sort((a, b) => a.b - b.b).slice(-60);
+    if (!pts.length) continue;
+    const max = Math.max(...pts.map(p => p.s.u), 1);
+    const bars = pts
+      .map(p => {
+        const col = p.s.u >= 95 ? "var(--crit)" : p.s.u >= 80 ? "var(--warn)" : "color-mix(in srgb, var(--ok) 65%, transparent)";
+        const style = p.s.stale ? `background:transparent;border:1.5px dashed ${col};height:${Math.max(2, p.s.u)}%` : `background:${col};height:${Math.max(2, p.s.u)}%`;
+        return `<div class="bcol2"><div class="bseg2" style="${style}" title="${esc(p.s.k)} ${p.s.u.toFixed(0)}% used${p.s.stale ? " (stale)" : ""} · ${esc(new Date(p.s.t).toISOString().slice(0, 10))}"></div></div>`;
+      })
+      .join("");
+    const labs = pts.map(p => `<span>${esc(DV.gran === "hour" ? shortBucket(utcHourKey(p.b)) : utcDayKey(p.b).slice(5))}</span>`).join("");
+    html += `<div class="pctstrip"><div class="pctk">${esc(kind)}</div>
+      <div class="pctbars"><div class="bars2" style="height:64px">${bars}</div><div class="xlabs" style="height:14px">${labs}</div></div></div>`;
+  }
+  const name = esc(META[PROVIDER_VIEW] ? META[PROVIDER_VIEW].name : PROVIDER_VIEW);
+  return `<div style="padding:4px 18px 16px"><div class="legend2"><span>window % history · bar height = used % per ${DV.gran === "hour" ? "hour" : "day"} · dashed = sampled via stale cache</span></div>${html}</div>`;
 }
 
 function renderModelTable(u) {
@@ -824,7 +894,12 @@ function renderModelTable(u) {
     $("dvmnote").textContent = "";
     return;
   }
-  $("dvmnote").textContent = u.splitless ? "vendor reports totals only – priced with your observed z.ai mix" : "";
+  const hasPct = models.some(m => m.pct != null);
+  $("dvmnote").textContent = u.splitless
+    ? "vendor reports totals only – priced with your observed z.ai mix"
+    : hasPct
+      ? "plan % = vendor-reported daily share of your plan's usage"
+      : "";
   tb.innerHTML = models
     .map(
       m => `<tr>
@@ -833,7 +908,10 @@ function renderModelTable(u) {
       ? `<td class="r num">–</td><td class="r num">–</td><td class="r num">–</td>`
       : `<td class="r num">${fmtTok(m.in)}</td><td class="r num">${fmtTok(m.cr)}</td><td class="r num">${fmtTok(m.out)}</td>`}
     <td class="r num">${m.req ? fmtTok(m.req) : "–"}</td>
-    <td class="r num">${m.usd != null ? `$${m.usd.toFixed(2)}<span class="kindchip ${m.usdKind}">${m.usdKind}</span>` : `<span class="kindchip">unpriced</span>`}</td>
+    <td class="r num">${[
+      m.usd != null ? `$${m.usd.toFixed(2)}<span class="kindchip ${m.usdKind}">${m.usdKind === "actual" ? "act" : m.usdKind === "blended" ? "blend" : "est"}</span>` : "",
+      m.pct != null ? `${Math.round(m.pct)}%<span class="kindchip estimate">plan</span>` : "",
+    ].filter(Boolean).join(" ") || `<span class="kindchip">unpriced</span>`}</td>
   </tr>`,
     )
     .join("");
@@ -843,13 +921,13 @@ function renderWindowTable(u) {
   const tb = document.querySelector("#dvwin tbody");
   const latest = latestWindows(u);
   if (!latest.length) {
-    tb.innerHTML = `<tr><td colspan="4" class="empty">no samples yet – every status call and dashboard refresh adds one</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="4" class="empty">no live windows sampled yet – every status call and dashboard refresh adds one</td></tr>`;
     return;
   }
   tb.innerHTML = latest
     .map(
       w => `<tr>
-    <td class="mono">${esc(w.k)}</td>
+    <td class="mono">${esc(w.k)}${w.stale ? ` <span style="color:var(--warn);font-size:11px">[stale]</span>` : ""}</td>
     <td class="r num" style="color:var(--${level(w.u) === "ok" ? "text" : level(w.u)})">${w.u.toFixed(0)}%</td>
     <td class="r num">${esc(when(w.r))}</td>
     <td class="r num">${w.n}</td>
@@ -862,15 +940,21 @@ function renderProviderView() {
   const p = (STATUS.providers || []).find(x => x.id === PROVIDER_VIEW);
   const m = META[PROVIDER_VIEW] || { name: PROVIDER_VIEW, color: "#6b7280", ttl: 0 };
   $("dvtitle").innerHTML = `<span style="display:inline-block;width:14px;height:14px;border-radius:4px;background:${m.color};vertical-align:-1px;margin-right:8px"></span>${esc(m.name)} · usage`;
-  $("dvsub").textContent = p
-    ? `${p.plan ? p.plan + " · " : ""}fetched ${ago(p.fetchedAt)} · local usage store, no vendor calls on this page`
-    : "provider not reporting right now – showing whatever the store holds";
+  $("dvsub").innerHTML = p
+    ? `${esc(p.plan ? p.plan + " · " : "")}fetched ${ago(p.fetchedAt)} · local usage store, no vendor calls on this page`
+    : `<span class="spin"></span>waiting for the first status round…`;
   const u = USAGE_PROV && USAGE_PROV.providers ? USAGE_PROV.providers[PROVIDER_VIEW] : null;
+  if (!u) {
+    // First paint: skeleton while /api/usage is in flight (~130 ms warm).
+    $("dvstats").innerHTML = ["", "", "", ""].map(() => `<div class="card stat"><div class="label">&nbsp;</div><div class="shimmer" style="height:22px;margin-top:6px"></div><div class="shimmer" style="height:12px;margin-top:6px"></div></div>`).join("");
+    $("dvchart").innerHTML = `<div class="empty"><span class="spin"></span>loading usage…</div>`;
+    return;
+  }
   const stats = [];
-  if (u && u.in + u.cr + u.out + u.tot > 0) {
+  if (u.in + u.cr + u.out + u.tot > 0) {
     const total = u.splitless ? u.tot : u.in + u.cr + u.out;
     stats.push({
-      label: "Tokens",
+      label: "Tokens" + (u.hasLocal ? " · this machine" : ""),
       value: fmtTok(total),
       sub: u.splitless ? "totals only – no vendor split" : `in ${fmtTok(u.in)} · cached ${fmtTok(u.cr)} · out ${fmtTok(u.out)}`,
     });
@@ -884,23 +968,23 @@ function renderProviderView() {
       value: u.usdActual + u.usdEst > 0 ? "$" + (u.usdActual + u.usdEst).toFixed(2) : "–",
       sub: costParts.join(" + ") || "unpriced models excluded from sums",
     });
+    stats.push({ label: "Requests", value: u.req ? fmtTok(u.req) : "–", sub: "reported by the vendor where available" });
   } else {
-    stats.push({ label: "Tokens", value: "–", sub: PROVIDER_VIEW === "claude" ? "Anthropic exposes no token counts" : "this provider exposes no token counts" });
+    stats.push({ label: "Tokens", value: "–", sub: `${esc(META[PROVIDER_VIEW] ? META[PROVIDER_VIEW].name : PROVIDER_VIEW)} exposes no token counts` });
     stats.push({ label: "API-equivalent", value: "–", sub: "nothing to price" });
+    const latest = latestWindows(u);
+    stats.push({
+      label: "Windows live",
+      value: latest.length ? `${esc(latest[0].k.split("·")[0])} ${Math.round(latest[0].u)}%` : "–",
+      sub: latest.length > 1 ? `+${latest.length - 1} more in the table below` : "waiting for samples",
+    });
   }
-  const latest = latestWindows(u);
-  stats.push({
-    label: "Windows now",
-    value: latest.length ? latest.slice(0, 3).map(w => `${esc(w.k.split("·")[0])} ${Math.round(w.u)}%`).join(" · ") : "–",
-    sub: "sampled at every probe",
-  });
-  stats.push({ label: "Requests", value: u && u.req ? fmtTok(u.req) : "–", sub: "reported by the vendor where available" });
   $("dvstats").innerHTML = stats
     .map(s => `<div class="card stat"><div class="label">${s.label}</div><div class="value num">${s.value}</div><div class="sub">${s.sub}</div></div>`)
     .join("");
-  $("dvchart").innerHTML = chartHTML(u || {});
-  renderModelTable(u || {});
-  renderWindowTable(u || {});
+  $("dvchart").innerHTML = chartHTML(u);
+  renderModelTable(u);
+  renderWindowTable(u);
   $("provview").hidden = false;
   const dash = document.querySelector("main.wrap");
   if (dash && dash.id !== "provview") dash.hidden = true;
@@ -912,17 +996,20 @@ if (PROVIDER_VIEW) {
     if (!b || b.classList.contains("on")) return;
     DV.gran = b.dataset.g;
     $("dvgran").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
-    $("dvhint").textContent = DV.gran === "hour" ? "stacked tokens per hour · last 48 hours" : "stacked tokens per day · dashed lines mark window resets";
-    refresh();
+    $("dvhint").textContent = DV.gran === "hour" ? "stacked tokens per hour · last 48 hours · day labels are UTC" : "stacked tokens per day (UTC) · dashed lines mark window resets";
+    void refetchUsage(); // store-only read – instant
   });
   $("dvr").addEventListener("click", e => {
     const b = e.target instanceof Element ? e.target.closest("button[data-r]") : null;
     if (!b || b.classList.contains("on")) return;
     DV.range = b.dataset.r;
     $("dvr").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
-    refresh();
+    void refetchUsage(); // store-only read – instant
   });
   document.querySelector("main.wrap").hidden = true; // dashboard sections stay out of the drill-down page
+  $("provview").hidden = false; // visible immediately – skeleton until data lands
+  $("dvchart").innerHTML = `<div class="empty"><span class="spin"></span>loading usage…</div>`;
+  $("dvstats").innerHTML = ["", "", "", ""].map(() => `<div class="card stat"><div class="label">&nbsp;</div><div class="shimmer" style="height:22px;margin-top:6px"></div><div class="shimmer" style="height:12px;margin-top:6px"></div></div>`).join("");
   // Same-origin navigation MUST carry the URL fragment: the per-run bearer
   // token lives there and nowhere else (dropped fragment = 401 blank page).
   $("dvback").href = "/" + location.hash;

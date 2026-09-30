@@ -205,12 +205,15 @@ subtrk usage --rebuild           # re-derive range-API history from the sources
 ```
 
 What you get per provider depends on what the vendor exposes: GLM, OpenRouter
-and Alibaba report token splits; OpenRouter and OpenAI costs are the vendor's
-own numbers (actual) while the rest are list-price estimates, always labeled;
-zcode bundles report totals only and are priced with your observed z.ai mix;
-Claude, Google and Kimi expose percentages only, so their usage pages show
-window-% history instead of tokens. The web console renders the same store as
-clickable per-provider usage pages plus month-to-date summary cards.
+and Alibaba report token splits; OpenRouter costs are the vendor's own numbers
+(actual) while the rest are list-price estimates, always labeled; zcode bundles
+report totals only and are priced with your observed z.ai mix. OpenAI and
+Claude combine **this-machine token harvests** (Codex rollout files / Claude
+Code transcripts — real tokens, labeled, never merged into month-to-date
+totals) with their server-side percentages; Google and Kimi expose percentages
+only, so their usage pages show window-% history instead of tokens. The web
+console renders the same store as clickable per-provider usage pages plus
+month-to-date summary cards.
 
 **Management key note.** OpenRouter's usage history needs a *management key*
 (openrouter.ai/settings/management-keys), which `subtrk init` offers as an

@@ -475,10 +475,23 @@ async function usageCommand(args: UsageArgs, deps: CliDeps): Promise<number> {
   const scope = args.provider.length > 0 ? args.provider : null;
   const merged: Record<string, ReturnType<typeof aggregateUsage>["providers"][string]> = {};
   const ids = scope ?? [
-    ...new Set([...Object.keys(store.daily), ...Object.keys(store.hourly), ...Object.keys(store.samples)]),
+    ...new Set([
+      ...Object.keys(store.daily),
+      ...Object.keys(store.hourly),
+      ...Object.keys(store.samples),
+    ]),
   ];
   for (const id of ids) {
-    const agg = aggregateUsage(store, { provider: id, granularity, fromMs, toMs: nowMs });
+    // A provider filter includes the this-machine local sections (labeled in
+    // the output); the all-providers totals stay vendor-served only, matching
+    // the console's month-to-date cards.
+    const agg = aggregateUsage(store, {
+      provider: id,
+      granularity,
+      fromMs,
+      toMs: nowMs,
+      local: scope ? "include" : "exclude",
+    });
     for (const [id2, usage] of Object.entries(agg.providers)) merged[id2] = usage;
   }
   const rangeLabel = daysN !== null ? `last ${daysN}d` : "month-to-date";
@@ -535,8 +548,9 @@ async function usageCommand(args: UsageArgs, deps: CliDeps): Promise<number> {
       continue;
     }
     const hit = u.cacheHit !== null ? `${Math.round(u.cacheHit * 100)}%` : "–";
+    const localNote = u.hasLocal ? " · incl. this-machine local" : "";
     lines.push(
-      `${id.padEnd(10)} ${fmtTok(u.in + u.cr + u.out)} tok · in ${fmtTok(u.in)} · cached ${fmtTok(u.cr)} · hit ${hit} · out ${fmtTok(u.out)}${usdLabel}`,
+      `${id.padEnd(10)} ${fmtTok(u.in + u.cr + u.out)} tok · in ${fmtTok(u.in)} · cached ${fmtTok(u.cr)} · hit ${hit} · out ${fmtTok(u.out)}${usdLabel}${localNote}`,
     );
     grand.in += u.in;
     grand.cr += u.cr;
