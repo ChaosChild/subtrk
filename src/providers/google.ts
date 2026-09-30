@@ -678,7 +678,7 @@ function lsQuotaPost(csrf: string, port: number): Promise<{ ok: true; text: stri
   });
 }
 
-type LocalProbe = { windows: Window[] } | { windows: null; reason?: string };
+export type LocalProbe = { windows: Window[] } | { windows: null; reason?: string };
 
 // Pure: the managed-spawn command line mirrors the desktop app's own flags,
 // with a freshly generated CSRF token and the random-port setting.
@@ -735,10 +735,13 @@ function killLsTree(child: ChildProcess): void {
 }
 
 // Try a set of discovered candidates; the first parseable non-empty summary wins.
-async function probeCandidates(candidates: LsCandidate[]): Promise<Window[] | null> {
+// Budget-aware: a hung listener must not eat the whole local budget one
+// 1.5s timeout at a time – attempts stop once one more could overshoot.
+async function probeCandidates(candidates: LsCandidate[], deadlineMs: number): Promise<Window[] | null> {
   for (const cand of candidates.slice(0, LS_MAX_CANDIDATES)) {
     await registerSecret(cand.csrf);
     for (const port of cand.ports.slice(0, LS_MAX_PORTS)) {
+      if (Date.now() + LS_PORT_TIMEOUT_MS > deadlineMs) return null;
       const out = await lsQuotaPost(cand.csrf, port);
       if (!out.ok) continue;
       let body: unknown;
@@ -786,7 +789,7 @@ export async function spawnLsAndProbe(deadlineMs: number): Promise<LocalProbe> {
       const text = await runLsDiscovery();
       const mine = (text === null ? [] : parseLsCandidates(text)).filter((c) => c.pid === child.pid);
       if (mine.length === 0) continue;
-      const windows = await probeCandidates(mine);
+      const windows = await probeCandidates(mine, deadlineMs);
       if (windows) return { windows };
     }
   } finally {
@@ -803,16 +806,39 @@ function sleep(ms: number): Promise<void> {
 // Model Quota panel renders – the authoritative Antigravity view, reachable
 // with no OAuth material. Every failure degrades to a reason string; the
 // remote fallback decides what the operator sees.
-async function probeLocalLanguageServer(): Promise<LocalProbe> {
-  if (process.platform !== "win32") return { windows: null };
-  const deadline = Date.now() + LS_LOCAL_BUDGET_MS;
-  const text = await runLsDiscovery();
+// Injected-deps form (exported for tests): the flow that matters is the
+// FALL-THROUGH. A discovered-but-unreachable server (the app idling its
+// server down, or a dying process whose listeners stopped answering) must not
+// block the managed spawn – the probe retries with its own standalone server
+// before giving up on the local source.
+export interface LocalProbeDeps {
+  discover: () => Promise<string | null>;
+  probeCandidates: (candidates: LsCandidate[], deadlineMs: number) => Promise<Window[] | null>;
+  spawnAndProbe: (deadlineMs: number) => Promise<LocalProbe>;
+}
+
+export async function localProbeFlow(deps: LocalProbeDeps, deadlineMs: number): Promise<LocalProbe> {
+  const text = await deps.discover();
   const candidates = text === null ? [] : parseLsCandidates(text);
   if (candidates.length > 0) {
-    const windows = await probeCandidates(candidates);
-    return windows ? { windows } : { windows: null, reason: "quota RPC unreachable on all language server ports" };
+    const windows = await deps.probeCandidates(candidates, deadlineMs);
+    if (windows) return { windows };
+    const spawned = await deps.spawnAndProbe(deadlineMs);
+    if (spawned.windows) return spawned;
+    return {
+      windows: null,
+      reason: `quota RPC unreachable on all language server ports; the managed spawn failed too (${spawned.reason ?? "unknown"})`,
+    };
   }
-  return spawnLsAndProbe(deadline);
+  return deps.spawnAndProbe(deadlineMs);
+}
+
+async function probeLocalLanguageServer(): Promise<LocalProbe> {
+  if (process.platform !== "win32") return { windows: null };
+  return localProbeFlow(
+    { discover: runLsDiscovery, probeCandidates, spawnAndProbe: spawnLsAndProbe },
+    Date.now() + LS_LOCAL_BUDGET_MS,
+  );
 }
 
 function fail(error: ProviderError, fetchedAt: string): ProviderResult {
@@ -941,9 +967,16 @@ async function probeInner(): Promise<ProviderResult> {
   //    numbers, no OAuth material involved.
   const local = await probeLocalLanguageServer();
   if (local.windows) return { id: "google", ok: true, stale: false, fetchedAt, windows: local.windows };
-  // 2) Remote REST fallback (any platform, any running state).
+  // 2) Remote REST fallback (any platform, any running state). The local
+  //    failure reason rides along on success too – "why did I fall back" must
+  //    be answerable from the card, not just from a total failure.
   const remote = await probeRemote(fetchedAt);
-  if (remote.ok) return { ...remote, note: REMOTE_VIEW_NOTE };
+  if (remote.ok) {
+    return {
+      ...remote,
+      note: local.reason ? `${REMOTE_VIEW_NOTE} (local language server: ${local.reason})` : REMOTE_VIEW_NOTE,
+    };
+  }
   const err: ProviderError = remote.error ?? { kind: "not-readable-remotely", message: "quota read failed" };
   if (local.reason) {
     return {

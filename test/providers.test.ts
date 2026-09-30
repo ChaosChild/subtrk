@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import type { Window } from "../src/core.ts";
 import {
   deriveCredits,
   extractJson,
@@ -20,6 +21,7 @@ import {
   buildAntigravityRefreshForm,
   buildLsSpawnArgs,
   googleExpired,
+  localProbeFlow,
   mapGrantFailure,
   needsRefresh,
   parseAgyKeyringBlob,
@@ -399,6 +401,78 @@ test("google parseLsCandidates validates pid/csrf/ports, dedupes, tolerates PS q
     ),
     [{ pid: 1, csrf: "x", ports: [443] }],
   );
+});
+
+test("google localProbeFlow: a discovered-but-unreachable language server falls through to the managed spawn", async () => {
+  const win: Window[] = [
+    { kind: "5h", resetsAt: "2026-09-30T18:00:00Z", remainingFraction: 0.5, scope: "gemini-models" },
+  ];
+  const discovered = JSON.stringify([{ pid: 123, csrf: "deadbeef-cafe", ports: [49152] }]);
+  let spawnCalls = 0;
+
+  // Healthy desktop server: spawn never runs.
+  const healthy = await localProbeFlow(
+    {
+      discover: async () => discovered,
+      probeCandidates: async () => win,
+      spawnAndProbe: async () => {
+        spawnCalls++;
+        return { windows: null, reason: "should not be called" };
+      },
+    },
+    Date.now() + 8_000,
+  );
+  assert.equal(spawnCalls, 0);
+  assert.deepEqual(healthy, { windows: win });
+
+  // THE DYING-SERVER CASE: discovery still sees the process, its RPC answers
+  // nothing – the old code returned failure here and never spawned.
+  const dying = await localProbeFlow(
+    {
+      discover: async () => discovered,
+      probeCandidates: async () => null,
+      spawnAndProbe: async () => {
+        spawnCalls++;
+        return { windows: win };
+      },
+    },
+    Date.now() + 8_000,
+  );
+  assert.equal(spawnCalls, 1);
+  assert.deepEqual(dying, { windows: win });
+
+  // Both tiers fail: a combined reason names each failure.
+  const both = await localProbeFlow(
+    {
+      discover: async () => discovered,
+      probeCandidates: async () => null,
+      spawnAndProbe: async () => ({ windows: null, reason: "the spawned language server did not become ready" }),
+    },
+    Date.now() + 8_000,
+  );
+  assert.equal(both.windows, null);
+  assert.match(
+    (both as { reason?: string }).reason ?? "",
+    /quota RPC unreachable on all language server ports.*managed spawn failed too.*did not become ready/,
+  );
+
+  // No desktop server at all: straight to spawn.
+  spawnCalls = 0;
+  const closed = await localProbeFlow(
+    {
+      discover: async () => "[]",
+      probeCandidates: async () => {
+        throw new Error("must not probe");
+      },
+      spawnAndProbe: async () => {
+        spawnCalls++;
+        return { windows: win };
+      },
+    },
+    Date.now() + 8_000,
+  );
+  assert.equal(spawnCalls, 1);
+  assert.deepEqual(closed, { windows: win });
 });
 
 test("google parseGoogleSummary: bucketId-only bucket derives its kind, kindless bucket is skipped", () => {
