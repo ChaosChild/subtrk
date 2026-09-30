@@ -22,6 +22,7 @@ import {
   loadConfig,
   type ProviderId,
   type ProviderModule,
+  pkgVersion,
   type RefreshResult,
   removeCachedProvider,
   SUBTRK_DIR,
@@ -29,12 +30,14 @@ import {
   scrubValue,
 } from "./core.ts";
 import { allProviders, refreshableProviders } from "./providers/index.ts";
+import { aggregateUsage, harvestUsage, readUsageStore } from "./usage.ts";
 
 export interface ServeDeps {
   providers?: ProviderModule[]; // stub registry (tests)
   subtrkDir?: string; // override ~/.subtrk (tests)
   consoleHtmlPath?: string; // shell served at / (default: src/console.html next to this module)
   port?: number; // default 0 – random ephemeral port
+  version?: string; // package version surfaced via /api/config (default: pkgVersion())
   refresh?: (id: string) => Promise<RefreshResult>; // stub seam (tests); default: module registry
 }
 
@@ -143,6 +146,8 @@ function parseConfigPatch(raw: unknown): { patch: ConfigPatch } | { error: strin
 
 export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
   const token = randomBytes(32).toString("hex"); // per run, memory only
+  const version = deps.version ?? pkgVersion();
+  const startedAt = new Date().toISOString(); // the footer proves WHICH process serves the page
   let shell: Buffer | null = null;
   try {
     shell = readFileSync(deps.consoleHtmlPath ?? fileURLToPath(new URL("./console.html", import.meta.url)));
@@ -167,7 +172,7 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
         return;
       }
       const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
-      if (path === "/") {
+      if (path === "/" || path.startsWith("/provider/")) {
         if (req.method !== "GET") {
           respond(res, 405, JSON.stringify({ error: "method not allowed" }));
           return;
@@ -175,6 +180,16 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
         if (shell === null) {
           respond(res, 404, "console shell missing", "text/plain");
           return;
+        }
+        // /provider/<id> serves the SAME static shell – the page reads the path
+        // and renders the drill-down view. Only known provider ids route here;
+        // anything else is a plain 404 (no file serving, ever).
+        if (path !== "/") {
+          const id = path.slice("/provider/".length);
+          if (!(ALL_PROVIDER_IDS as readonly string[]).includes(id)) {
+            respond(res, 404, "unknown provider", "text/plain");
+            return;
+          }
         }
         respond(res, 200, shell, "text/html", { "content-security-policy": CSP });
         return;
@@ -189,12 +204,83 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
           return;
         }
         void collectStatus({ subtrkDir: deps.subtrkDir, providers: deps.providers }).then(
-          (c) => respond(res, 200, JSON.stringify(scrubValue(c.out))),
+          (c) => {
+            respond(res, 200, JSON.stringify(scrubValue(c.out)));
+            // Usage harvest rides every dashboard refresh (M3): fire-and-forget
+            // with its own budget – never blocks the response, never throws.
+            void harvestUsage(c.out.providers, { subtrkDir: deps.subtrkDir, budgetMs: 30_000 }).catch(() => {});
+          },
           (err: unknown) => {
             console.error(`subtrk: ${errorMessage(err)}`);
             respond(res, 500, JSON.stringify({ error: "status unavailable" }));
           },
         );
+        return;
+      }
+      if (path === "/api/usage") {
+        if (req.method !== "GET") {
+          respond(res, 405, JSON.stringify({ error: "method not allowed" }), "application/json", { allow: "GET" });
+          return;
+        }
+        if (!tokenOk(req.headers.authorization, token)) {
+          respond(res, 401, JSON.stringify({ error: "unauthorized" }));
+          return;
+        }
+        // Reads the store only – no vendor calls. Defaults: local month-to-date
+        // across every provider with stored data, day granularity. `local`
+        // controls the this-machine sections: the MTD summary excludes them
+        // (vendor-served totals only), a provider drill-down includes them.
+        const url = new URL(req.url ?? "/", "http://127.0.0.1");
+        const provider = url.searchParams.get("provider");
+        if (provider && !(ALL_PROVIDER_IDS as readonly string[]).includes(provider)) {
+          respond(res, 400, JSON.stringify({ error: "unknown provider" }));
+          return;
+        }
+        const localParam = url.searchParams.get("local");
+        const local =
+          localParam === "only" ? "only" : localParam === "include" || provider !== null ? "include" : "exclude";
+        const granularity = url.searchParams.get("granularity") === "hour" ? "hour" : "day";
+        const parseMs = (name: string): number | null => {
+          const raw = url.searchParams.get(name);
+          if (raw === null) return null;
+          if (/^\d+$/.test(raw)) return Number(raw);
+          const t = Date.parse(raw);
+          return Number.isFinite(t) ? t : null;
+        };
+        const fromParam = parseMs("from");
+        const toParam = parseMs("to");
+        const nowMs = Date.now();
+        const from = fromParam ?? new Date(new Date(nowMs).getFullYear(), new Date(nowMs).getMonth(), 1).getTime();
+        const to = toParam ?? nowMs;
+        if (from > to) {
+          respond(res, 400, JSON.stringify({ error: "from is after to" }));
+          return;
+        }
+        try {
+          const store = readUsageStore(deps.subtrkDir ?? SUBTRK_DIR);
+          const agg = aggregateUsage(store, {
+            provider: provider ?? undefined,
+            granularity,
+            fromMs: from,
+            toMs: to,
+            local,
+          });
+          respond(
+            res,
+            200,
+            JSON.stringify({
+              schemaVersion: 1,
+              generatedAt: new Date(nowMs).toISOString(),
+              from: new Date(from).toISOString(),
+              to: new Date(to).toISOString(),
+              granularity,
+              providers: agg.providers,
+            }),
+          );
+        } catch (err) {
+          console.error(`subtrk: ${errorMessage(err)}`);
+          respond(res, 500, JSON.stringify({ error: "usage unavailable" }));
+        }
         return;
       }
       if (path === "/api/refresh") {
@@ -250,6 +336,8 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
                 order: cfg.order ?? [],
                 hidden: cfg.hidden ?? [],
                 theme: cfg.theme ?? null,
+                version,
+                startedAt,
               }),
             );
           } catch (err) {
@@ -323,11 +411,21 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
 
 // CLI entry: listen, print the one URL – the token rides the fragment and is
 // never written anywhere else – then sit quiet until SIGINT/SIGTERM (exit 0).
+// While running, an hourly sampler probes + harvests even when nobody is
+// watching, so the window-% history fills hourly instead of only when a
+// status call happens.
 export async function runServe(deps: ServeDeps = {}): Promise<void> {
   const h = await startConsole(deps);
   console.log(`http://127.0.0.1:${h.port}/#${h.token}`);
   console.log("token auth required – API calls need Authorization: Bearer <token>");
+  const sampler = setInterval(() => {
+    void collectStatus({ subtrkDir: deps.subtrkDir, providers: deps.providers })
+      .then((c) => harvestUsage(c.out.providers, { subtrkDir: deps.subtrkDir, budgetMs: 30_000 }))
+      .catch(() => {});
+  }, 3_600_000);
+  sampler.unref();
   const stop = (): void => {
+    clearInterval(sampler);
     const force = setTimeout(() => process.exit(0), 1000);
     void h.close().finally(() => {
       clearTimeout(force);

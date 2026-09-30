@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ---------- shared contract (docs/spec.md §ProviderResult) ----------
 
@@ -75,6 +76,9 @@ export interface ProviderResult {
   windows?: Window[];
   credits?: Credits;
   note?: string;
+  // Additive (schemaVersion stays 1): per-surface usage mix where a provider
+  // exposes one (claude's seven_day_breakdown: Claude Code / Chats / Cowork).
+  surfaces?: { key: string; name: string; percent: number }[];
   refreshable?: true; // module supports interactive refresh (subtrk auth refresh / POST /api/refresh)
   error?: ProviderError;
 }
@@ -488,7 +492,10 @@ function readLock(lockPath: string): LockInfo | null {
   return null;
 }
 
-function acquireLock(lockPath: string): boolean {
+// Existence-only lockfile (spec §Cache): created with exclusive create, GC'd
+// when the holder is provably dead or too old, never stolen otherwise. Shared
+// by the quota cache (cache.json.lock) and the usage store (usage.json.lock).
+export function acquireLock(lockPath: string): boolean {
   if (tryCreateLock(lockPath)) return true;
   const info = readLock(lockPath);
   if (!info) return false; // no stealing: cannot prove the holder is dead
@@ -503,7 +510,7 @@ function acquireLock(lockPath: string): boolean {
   return tryCreateLock(lockPath);
 }
 
-function releaseLock(lockPath: string): void {
+export function releaseLock(lockPath: string): void {
   try {
     unlinkSync(lockPath);
   } catch {
@@ -706,6 +713,22 @@ export function computeRecheckAfter(okTtlsMs: number[], nowMs: number = Date.now
   const min = okTtlsMs.length > 0 ? Math.min(...okTtlsMs) : 300_000;
   const clamped = Math.min(300_000, Math.max(60_000, min));
   return new Date(nowMs + clamped).toISOString();
+}
+
+// ---------- package version ----------
+
+// package.json rides next to src/ in the repo and in the npm tarball alike;
+// unreadable → "unknown". Shared by the CLI banner and the console (which
+// surfaces it through GET /api/config).
+export function pkgVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
+    ) as { version?: unknown };
+    return typeof pkg.version === "string" && pkg.version ? pkg.version : "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 // ---------- status collection (shared by `subtrk status` and `subtrk serve`) ----------

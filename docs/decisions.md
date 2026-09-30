@@ -295,3 +295,46 @@ the existing machinery: init's check-only step, the header toggle, and the
 per-card hide. A lapsed bundle is an honest error state (no active Start Plan
 bundle), not a hidden provider. No refresh verb – the desktop owns the login,
 mirroring D12.
+
+## D17 · Usage history – a local ledger with idempotent writes, honest cost labels
+
+M3 adds usage reporting: per-provider, per-model token history, window-%
+history, and an API-equivalent dollar figure, stored in
+`~/.subtrk/usage.json` (§Usage store in spec.md). The shape of the whole
+feature follows what each vendor actually exposes, verified live 2026-09-29:
+
+- **Token splits:** glm credit-usage detail (uncached/cached/output, hourly
+  near now, daily beyond ~7d), openrouter activity + analytics (with actual
+  USD), openai wham daily breakdown (with vendor `cost_usd`), alibaba
+  telemetry (pending one live intl check). zcode bundles expose cumulative
+  `used_units` per model – deltas between observations only.
+- **No token surface:** claude (server API carries percentages and a
+  per-surface weekly breakdown, nothing more – anthropics/claude-code#21943),
+  google, kimi. Their usage pages show window-% history from probe samples
+  instead of inventing tokens.
+
+Three decisions anchor the design:
+
+1. **The ledger, not local transcripts, is primary.** Local Claude transcripts
+   describe one machine; the server's percentages are account-global. A
+   machine-local token overlay is planned as an explicit, off-by-default view
+   that is never merged into totals or month-to-date cards (operator decision,
+   2026-09-29).
+2. **History is only written idempotently.** Range APIs replace their buckets;
+   cumulative counters add deltas against watermarks evaluated inside the
+   locked apply; probe samples dedupe by window generation. Concurrent agents
+   therefore cannot double count by construction, and `--rebuild` can re-derive
+   everything a range API can reproduce.
+3. **Costs are labeled, never silently blended.** Vendor-actual dollars
+   (openrouter, openai) say "actual"; everything priced from list rates says
+   "est."; split-less zcode totals are priced with the operator's observed z.ai
+   in/cache/out mix and labeled "blended"; unpriced models are listed and
+   excluded from sums. Month-to-date aggregates use the operator's local
+   calendar month.
+
+The OpenRouter management key stays optional: init discloses that it is
+account-admin scoped (reads usage across keys, can create keys) and plaintext
+in `~/.subtrk/env` before asking, the README repeats the trade-off, and a
+missing key degrades to "history unavailable" with everything else working.
+The usage harvest rides existing status/serve paths under a time budget – no
+daemon, no new processes – and `usage.json` holds no secrets.

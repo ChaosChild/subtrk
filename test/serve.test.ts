@@ -387,11 +387,13 @@ describe("POST /api/config", () => {
         order: string[];
         hidden: string[];
         theme: string | null;
+        version?: string;
       };
       assert.ok(Array.isArray(body.enabled) && body.enabled.length > 0);
       assert.deepEqual(body.order, []);
       assert.deepEqual(body.hidden, []);
       assert.equal(body.theme, null, "theme is null when unset");
+      assert.match(body.version ?? "", /^\d+\.\d+\.\d+/, "package version rides /api/config for the console footer");
       noCors(ok.headers);
     });
   });

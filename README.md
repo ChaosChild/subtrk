@@ -4,6 +4,7 @@
 [![npm](https://img.shields.io/npm/v/subtrk)](https://www.npmjs.com/package/subtrk)
 [![node](https://img.shields.io/node/v/subtrk)](https://github.com/ChaosChild/subtrk/blob/main/package.json)
 [![license](https://img.shields.io/github/license/ChaosChild/subtrk)](LICENSE)
+[![Socket Badge](https://badge.socket.dev/npm/package/subtrk)](https://socket.dev/npm/package/subtrk)
 
 **AI subscription quotas in one command.** `subtrk` reports remaining usage for
 the plans its contributors use – today Claude Pro, Z.ai GLM Coding Plan, Alibaba
@@ -44,7 +45,8 @@ subtrk serve
 Starts the dashboard on a random `127.0.0.1` port and prints the URL to open –
 one page for every tracked provider: usage bars per window (with ≥80%/≥95% warning
 levels), credit pools, a 7-day reset timeline, upcoming resets, and the same
-agent view the CLI prints, auto-refreshing on the cache heartbeat. A provider
+agent view the CLI prints, auto-refreshing on the cache heartbeat. The top row
+carries month-to-date token and value cards (local calendar month). A provider
 that reports several model classes (Google's Gemini and Claude/GPT, for example)
 renders one card per class. When a provider's error says it is refreshable, its
 card shows a **Refresh now** button that re-runs that provider's own refresh
@@ -54,6 +56,15 @@ itself, and cards drag individually into any order – all persist across
 restarts (saved to `~/.subtrk/config.json`, like `subtrk init`).
 
 ![Web console](docs/img/console.png)
+
+Every card is clickable into that provider's **usage page** – the headline
+addition of M3: a day/hour token chart with the provider's window-% history on
+the same time grid, a per-model table with API-equivalent costs labeled
+actual / est / blended, and the live windows, all served from the local usage
+store with no vendor calls while you browse (details in
+[Usage history](#usage-history)).
+
+![Usage page](docs/img/console-usage.png)
 
 The server is loopback-only, requires a per-run token (delivered in the printed
 URL), never emits CORS headers, and status stays read-only – toggles and card
@@ -176,7 +187,7 @@ is the machine-readable contract:
 | Alibaba Cloud | Model Studio Token Plan (intl) | official `bl` CLI raw gateway passthrough (`bl console call`) | 30-day credits pool (monthly-only since 2026-09-22) | official (via bl) |
 | Google | AI Pro (personal) | Antigravity desktop app's local language server (the dashboard's own view); remote Code Assist summary fallback with read-only self-refresh | per-family 5h/7d (gemini + claude-and-gpt families) | best-effort – without the app it briefly runs the app's own language server standalone; labeled remote fallback as last resort |
 | OpenCode | Zen pay-as-you-go | no usage/balance API exists for PAYG | – | signals only (honest note) |
-| OpenRouter | pay-as-you-go | `/api/v1/key` (+ `/api/v1/credits` with a management key) | – | official |
+| OpenRouter | pay-as-you-go | `/api/v1/key` (+ `/api/v1/credits` and usage history via a management key) | – | official |
 | OpenAI | ChatGPT plan via Codex | the Codex CLI's own ChatGPT usage endpoint, read from its stored login | free: one 30-day window; paid: 5h + weekly | official client endpoint, not a documented public API |
 | Kimi | Kimi Desktop / Kimi Code CLI coding plans | the Kimi Desktop app's key or the Kimi Code CLI's OAuth login against the coding usage endpoints | free: one quota window; CLI login: 5h + 7d + monthly | official client endpoints, not a documented public API |
 | ZCode | z.ai Start Plan bundles | the z.ai balance API via the local credential store (the ZCode desktop app's stored login) | one window per per-model token bucket, bucket expiry as reset | official client endpoint, undocumented |
@@ -187,6 +198,62 @@ and OpenRouter; the others are the same calls their own CLIs make, and can chang
 These are the providers the contributors use today – the set grows as needs or
 requests come in, and additions are welcome as PRs (the
 [implementation guide](docs/implementation-plan.md) walks through it).
+
+## Usage history
+
+Beyond the quota snapshot, `subtrk` keeps a local usage ledger in
+`~/.subtrk/usage.json` (hourly and daily token buckets per provider and model,
+window-% samples, a weekly pricing cache). It fills from the calls you already
+make – every `subtrk status`, dashboard refresh and `subtrk usage` harvests
+the due sources, best-effort, and history is only ever written idempotently so
+concurrent agents cannot double count.
+
+```bash
+subtrk usage                     # month-to-date tokens + API-equivalent cost
+subtrk usage --json              # machine-readable (per-provider, per-model)
+subtrk usage --provider glm      # one provider (includes its local harvest)
+subtrk usage --days 7 --hour     # last 7 days, hourly buckets
+subtrk usage --rebuild           # re-derive range-API history from the sources
+```
+
+On the dashboard (screenshot above), the month-to-date cards sum the local
+calendar month, this-machine harvests included and labeled, and every provider
+card opens its usage page.
+
+What you get per provider depends on what the vendor exposes: GLM, OpenRouter
+and Alibaba report token splits; OpenRouter costs are the vendor's own numbers
+(actual) while the rest are list-price estimates, always labeled; zcode bundles
+report totals only and are priced with your observed z.ai mix. OpenAI and
+Claude combine **this-machine token harvests** (Codex rollout files / Claude
+Code transcripts — real tokens, labeled "this machine", included in the
+month-to-date cards) with OpenAI's server-side daily plan share; Google and
+Kimi expose percentages only, so their usage pages show window-% history
+instead of tokens.
+
+### Where the usage comes from – and what it can't do
+
+`subtrk` is **not a proxy** – it never sits in the request path, so it cannot
+meter your traffic request by request. Token numbers come from two honest
+sources: the vendors' own usage surfaces where they exist (Z.ai's per-model
+credit-usage detail, OpenRouter's activity/analytics, Alibaba's token-plan
+telemetry, OpenAI's daily breakdown), and local artifacts your tools already
+write (Claude Code transcripts, Codex rollout files) for providers with no
+server-side history. Everything else – Claude, Google, Kimi – exposes only
+window percentages, and subtrk shows exactly that: sampled % history, never
+invented tokens. Local harvests describe this machine only; usage from your
+other devices appears solely through the vendor's server-side numbers or the
+window percentages. API-equivalent costs are computed from list prices
+(OpenRouter's public catalog, refreshed weekly, plus a bundled vendor table)
+and are estimates of what the same tokens would have cost pay-as-you-go – not
+what your subscription actually charges you.
+
+**Management key note.** OpenRouter's usage history needs a *management key*
+(openrouter.ai/settings/management-keys), which `subtrk init` offers as an
+explicit option. It is account-admin scoped – it can read usage across all
+your OpenRouter keys and create keys – and it is stored plaintext in
+`~/.subtrk/env` like every other subtrk secret, inside your user profile's
+trust envelope. Skipping it costs nothing else: everything keeps working and
+OpenRouter history just says "unavailable". Decide for yourself.
 
 ## For agents
 
@@ -228,6 +295,11 @@ meantime – no intervention needed.
   provider's own interactive login when asked.
 - Secrets are mechanically redacted from all output; the cache stores normalized
   quota data only. See `docs/spec.md` §Redaction.
+- The usage ledger (`~/.subtrk/usage.json`) holds token counts, window
+  percentages and list prices – never credentials. The optional OpenRouter
+  management key is more powerful than an inference key (account-admin
+  scoped); storing it is an explicit opt-in with the trade-off spelled out in
+  `subtrk init` and §Usage history.
 - `~/.subtrk/env` holds plaintext keys inside your user profile – the same trust
   envelope as the vendor credential files it reads. Design decisions and known
   trade-offs are tracked in `docs/decisions.md`.
@@ -239,8 +311,8 @@ meantime – no intervention needed.
 - [`docs/decisions.md`](docs/decisions.md) – design decisions D1–D11 with rationale.
 - [`docs/implementation-plan.md`](docs/implementation-plan.md) – implementation
   guide: layout, coding rules, how to add a provider.
-- [`docs/phases.md`](docs/phases.md) – roadmap (web console done; M3 analytics
-  next; parked).
+- [`docs/phases.md`](docs/phases.md) – roadmap (CLI, web console and usage
+  analytics done; parked).
 
 ## License
 

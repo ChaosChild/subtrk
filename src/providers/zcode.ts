@@ -107,18 +107,26 @@ interface ZcodeBalance {
   expires_at?: unknown;
 }
 
-// Pure: the billing body { code, msg, data } -> windows per active-plan balance
-// bucket. null is reserved for shape failures (non-object body, data absent or
-// not an object) – the probe maps that to parse-failure. A plan is ACTIVE only
-// when status is "active" and ends_at is past the reference seconds (server_time
-// when usable, else now) – the desktop normalizes already-past end dates to
-// expired itself, so no active plans -> { expired: true }. Balances join their
-// plan by user_plan_id, falling back to plan_id; orphans are skipped. Unusable
-// buckets (no slug, non-positive total, non-finite used/expiry) are skipped too.
-export function parseZcodeBalance(
+// One joined, usable balance bucket: scope-resolved (show_name or the model:
+// capability) with raw unit counts – the shape both the probe's windows and the
+// usage harvester's deltas are built from.
+export interface ZcodeRawBucket {
+  scope: string;
+  entitlementId: string;
+  used: number;
+  total: number;
+  expiresSec: number;
+  period: string;
+}
+
+// Shared filter/join: active plans (status "active", ends_at past the reference
+// seconds – server_time when usable, else now) joined to balances by
+// user_plan_id/plan_id; orphans and unusable buckets skipped. null is reserved
+// for shape failures (non-object body, data absent or not an object).
+function joinedBuckets(
   body: unknown,
   nowMs: number,
-): { windows: Window[]; plan?: string; expired?: true; empty?: true } | null {
+): { buckets: ZcodeRawBucket[]; plan?: string; expired?: true } | null {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
   const data = (body as { data?: unknown }).data;
   if (typeof data !== "object" || data === null || Array.isArray(data)) return null;
@@ -138,11 +146,11 @@ export function parseZcodeBalance(
       plan.ends_at > refSec
     );
   });
-  if (plans.length === 0) return { windows: [], expired: true };
+  if (plans.length === 0) return { buckets: [], expired: true };
   const first = plans[0];
   const plan = typeof first.name === "string" && first.name !== "" ? first.name : undefined;
   const balances = Array.isArray(d.balances) ? d.balances : [];
-  const windows: Window[] = [];
+  const buckets: ZcodeRawBucket[] = [];
   for (const raw of balances) {
     if (typeof raw !== "object" || raw === null) continue;
     const b = raw as ZcodeBalance;
@@ -174,15 +182,46 @@ export function parseZcodeBalance(
     if (typeof b.total_units !== "number" || !Number.isFinite(b.total_units) || b.total_units <= 0) continue;
     if (typeof b.used_units !== "number" || !Number.isFinite(b.used_units)) continue;
     if (typeof b.expires_at !== "number" || !Number.isFinite(b.expires_at) || b.expires_at <= 0) continue;
-    windows.push({
-      kind: periodKind(period),
+    buckets.push({
       scope,
-      usedPercent: Math.round((b.used_units / b.total_units) * 1000) / 10,
-      resetsAt: new Date(b.expires_at * 1000).toISOString(),
+      entitlementId: typeof b.entitlement_id === "string" ? b.entitlement_id : scope,
+      used: b.used_units,
+      total: b.total_units,
+      expiresSec: b.expires_at,
+      period,
     });
   }
-  if (windows.length === 0) return { windows: [], plan, empty: true };
-  return { windows, plan };
+  return { buckets, plan };
+}
+
+// Pure: the billing body { code, msg, data } -> windows per active-plan balance
+// bucket. null is reserved for shape failures (non-object body, data absent or
+// not an object) – the probe maps that to parse-failure. No active plans ->
+// { expired: true }; a plan with no usable buckets -> { empty: true }.
+export function parseZcodeBalance(
+  body: unknown,
+  nowMs: number,
+): { windows: Window[]; plan?: string; expired?: true; empty?: true } | null {
+  const joined = joinedBuckets(body, nowMs);
+  if (joined === null) return null;
+  if (joined.expired) return { windows: [], expired: true };
+  const windows: Window[] = joined.buckets.map((b) => ({
+    kind: periodKind(b.period),
+    scope: b.scope,
+    usedPercent: Math.round((b.used / b.total) * 1000) / 10,
+    resetsAt: new Date(b.expiresSec * 1000).toISOString(),
+  }));
+  if (windows.length === 0) return { windows: [], plan: joined.plan, empty: true };
+  return { windows, plan: joined.plan };
+}
+
+// Pure: the same body as raw per-model buckets for the usage harvester's
+// watermark deltas (used_units is cumulative per bucket identity).
+export function zcodeBuckets(
+  body: unknown,
+  nowMs: number,
+): { buckets: ZcodeRawBucket[]; plan?: string; expired?: true } | null {
+  return joinedBuckets(body, nowMs);
 }
 
 type FetchOutcome =
@@ -272,8 +311,18 @@ function fail(error: ProviderError, fetchedAt: string): ProviderResult {
   return { id: "zcode", ok: false, stale: false, fetchedAt, error };
 }
 
-async function probeInner(): Promise<ProviderResult> {
-  const fetchedAt = new Date().toISOString();
+// Credential load + balance fetch shared by the probe and the usage harvester:
+// decrypt the desktop store read-only, register the JWT for redaction, and GET
+// the billing endpoint. The error kinds/messages are exactly the probe's.
+export interface ZcodeBalanceResult {
+  ok: true;
+  body: unknown;
+}
+export interface ZcodeBalanceFailure {
+  ok: false;
+  error: ProviderError;
+}
+export async function fetchZcodeBalance(): Promise<ZcodeBalanceResult | ZcodeBalanceFailure> {
   let storeObj: unknown = null;
   let storeUnreadable = false;
   try {
@@ -282,14 +331,14 @@ async function probeInner(): Promise<ProviderResult> {
     storeUnreadable = true;
   }
   if (storeUnreadable) {
-    return fail(
-      {
+    return {
+      ok: false,
+      error: {
         kind: "no-credentials",
         message: "no ZCode credential store at ~/.zcode/v2/credentials.json",
         hint: "log in once in the ZCode desktop app",
       },
-      fetchedAt,
-    );
+    };
   }
   let user = "unknown";
   try {
@@ -301,14 +350,14 @@ async function probeInner(): Promise<ProviderResult> {
   const key = createHash("sha256").update(secret).digest();
   const creds = parseZcodeCredentials(storeObj, key);
   if (!creds) {
-    return fail(
-      {
+    return {
+      ok: false,
+      error: {
         kind: "no-credentials",
         message: "the ZCode credential store could not be decrypted",
         hint: "set ZCODE_CREDENTIAL_SECRET if the store was created with a custom secret",
       },
-      fetchedAt,
-    );
+    };
   }
   void registerSecret(creds.jwt);
 
@@ -326,30 +375,37 @@ async function probeInner(): Promise<ProviderResult> {
   });
   if (!out.ok) {
     if (out.status === 401) {
-      return fail(
-        {
+      return {
+        ok: false,
+        error: {
           kind: "expired-token",
           message: "ZCode rejected the stored login (401)",
           hint: "log in again in the ZCode desktop app",
         },
-        fetchedAt,
-      );
+      };
     }
-    return fail(out.error, fetchedAt);
+    return { ok: false, error: out.error };
   }
   let body: unknown;
   try {
     body = JSON.parse(out.text);
   } catch {
-    return fail({ kind: "parse-failure", message: "balance response was not JSON" }, fetchedAt);
+    return { ok: false, error: { kind: "parse-failure", message: "balance response was not JSON" } };
   }
   const env = body as { code?: unknown; msg?: unknown };
   // desktop parity – an absent code field is success, only a non-zero code fails
   if (env.code !== undefined && env.code !== 0) {
     const msg = typeof env.msg === "string" && env.msg !== "" ? `: ${env.msg}` : "";
-    return fail({ kind: "not-readable-remotely", message: `balance request failed${msg}` }, fetchedAt);
+    return { ok: false, error: { kind: "not-readable-remotely", message: `balance request failed${msg}` } };
   }
-  const parsed = parseZcodeBalance(body, Date.now());
+  return { ok: true, body };
+}
+
+async function probeInner(): Promise<ProviderResult> {
+  const fetchedAt = new Date().toISOString();
+  const bal = await fetchZcodeBalance();
+  if (!bal.ok) return fail(bal.error, fetchedAt);
+  const parsed = parseZcodeBalance(bal.body, Date.now());
   if (!parsed) return fail({ kind: "parse-failure", message: "balance response shape unrecognized" }, fetchedAt);
   if (parsed.expired) {
     return fail(

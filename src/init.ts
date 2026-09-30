@@ -628,6 +628,12 @@ export async function runInit(opts: InitOpts = {}): Promise<number | undefined> 
       }
     }
     if (!getSecret("OPENROUTER_MANAGEMENT_KEY", envPath)) {
+      console.log("          optional: a management key (openrouter.ai/settings/management-keys) unlocks");
+      console.log("          per-model usage history and costs on the console and `subtrk usage`.");
+      console.log("          It is ACCOUNT-ADMIN scoped – it can read usage across all your keys");
+      console.log("          and create keys – and is stored plaintext in ~/.subtrk/env like the");
+      console.log("          rest. Skip it and everything else still works; history just says");
+      console.log('          "unavailable". Your call.');
       const mgmt = await askHidden("OPENROUTER_MANAGEMENT_KEY (hidden, optional, empty to skip): ");
       if (mgmt) {
         registerSecret(mgmt);
