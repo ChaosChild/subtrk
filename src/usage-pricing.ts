@@ -53,16 +53,16 @@ export function normalizeModelKey(model: string): string {
     .replace(/-+/g, "-");
 }
 
-// Pure: the fallback price for a vendor model key, or null. Dotted spellings
-// ("GLM-5.3") and slugged ones ("glm-5-3") resolve to the same entry.
+// Pure: the fallback price for a vendor model key, or null. Table keys are
+// matched through the same normalization as the query, so dotted ("GLM-5.3",
+// "qwen3.8-max") and slugged ("glm-5-3", "qwen3-8-max") spellings resolve to
+// the same entry regardless of how many dots/dashes the name mixes.
+const FALLBACK_NORMALIZED: Record<string, Price1M> = Object.fromEntries(
+  Object.entries(PRICE_FALLBACK_PER_1M).map(([k, v]) => [normalizeModelKey(k), v]),
+);
+
 export function fallbackPriceFor(model: string): Price1M | null {
-  const key = normalizeModelKey(model);
-  const candidates = new Set([key, key.replace(/-+/g, ".")]);
-  for (const cand of candidates) {
-    const hit = PRICE_FALLBACK_PER_1M[cand];
-    if (hit) return hit;
-  }
-  return null;
+  return FALLBACK_NORMALIZED[normalizeModelKey(model)] ?? null;
 }
 
 // USD per 1M -> USD per token.

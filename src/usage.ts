@@ -1282,6 +1282,9 @@ export function extractOrPricing(body: unknown): Record<string, ModelPrice> | nu
 const BL_TIMEOUT_MS = 12_000;
 const ALIBABA_TTL_MS = 6 * 3_600_000;
 const OPENAI_LOCAL_TTL_MS = 60_000;
+// Bump when local-parser semantics change: stores harvested by an older
+// parser are wiped and re-read once (self-healing, no operator rebuild).
+const LOCAL_PARSER_VERSION = 2;
 const OPENAI_WHAM_TTL_MS = 6 * 3_600_000;
 const CLAUDE_LOCAL_TTL_MS = 60_000;
 const WHAM_URL = "https://chatgpt.com/backend-api/wham/usage/daily-token-usage-breakdown";
@@ -1677,6 +1680,8 @@ interface LocalFileWatermark {
   off: number;
   size: number;
   last?: unknown; // parser state carried across harvests (codex cumulative totals)
+  model?: string | null; // last turn_context model, so resumed files attribute correctly
+  pv?: number; // parser version that produced this watermark
 }
 
 async function harvestLocalJsonl(
@@ -1689,11 +1694,16 @@ async function harvestLocalJsonl(
     parserState: unknown,
   ) => { ts?: number; model?: string; row?: UsageRow; modelUpdate?: string | null; nextState?: unknown } | null,
   label: string,
-): Promise<void> {
-  const state = ctx.store().state[provider] as { at?: number; files?: Record<string, LocalFileWatermark> } | undefined;
-  if (state?.at && ctx.now - state.at < OPENAI_LOCAL_TTL_MS) {
+): Promise<boolean> {
+  const state = ctx.store().state[provider] as
+    | { at?: number; pv?: number; files?: Record<string, LocalFileWatermark> }
+    | undefined;
+  // Absent pv = pre-versioning store: treat as stale so rows written by an
+  // older parser are REPLACED, not added to.
+  const staleParser = state?.pv !== LOCAL_PARSER_VERSION;
+  if (state?.at && !staleParser && ctx.now - state.at < OPENAI_LOCAL_TTL_MS) {
     ctx.summary.skipped.push(`${label}: fresh`);
-    return;
+    return true;
   }
   let files: { path: string; mtime: number; size: number }[] = [];
   const walk = (dir: string, depth: number): void => {
@@ -1720,14 +1730,14 @@ async function harvestLocalJsonl(
     walk(root, 0);
   } catch {
     ctx.summary.skipped.push(`${label}: unreadable dir`);
-    return;
+    return false;
   }
   if (files.length === 0) {
     ctx.summary.skipped.push(`${label}: no transcripts`);
-    return;
+    return false;
   }
   files.sort((a, b) => b.mtime - a.mtime);
-  const watermarks = state?.files ?? {};
+  const watermarks = staleParser ? {} : state?.files ?? {};
   const rowsByHour = new Map<string, Map<string, UsageRow>>();
   const offsets: Record<string, LocalFileWatermark> = {};
   let processed = 0;
@@ -1757,7 +1767,7 @@ async function harvestLocalJsonl(
     } catch {
       continue; // file vanished mid-harvest
     }
-    let currentModel: string | null = null;
+    let currentModel: string | null = wm?.model ?? null; // resumes mid-file attribution
     let parserState: unknown = wm?.last ?? null; // codex: cumulative totals across runs
     let consumed = 0;
     const lines = text.split("\n");
@@ -1786,12 +1796,12 @@ async function harvestLocalJsonl(
       models.set(parsed.model, target);
       rowsByHour.set(hk, models);
     }
-    offsets[file.path] = { off: start + consumed, size: file.size, last: parserState };
+    offsets[file.path] = { off: start + consumed, size: file.size, last: parserState, model: currentModel, pv: LOCAL_PARSER_VERSION };
     processed++;
   }
   if (processed === 0 && rowsByHour.size === 0) {
     ctx.summary.skipped.push(`${label}: nothing new`);
-    return;
+    return true; // nothing to do counts as success – watermarks stay valid
   }
   const applied = mutateUsageStore(
     ctx.dir,
@@ -1799,15 +1809,34 @@ async function harvestLocalJsonl(
       for (const [hk, models] of rowsByHour) {
         for (const [model, row] of models) addDeltaLocal(store, provider, hk, model, row);
       }
-      const s = ensure(store.state, provider) as { at?: number; files?: Record<string, { off: number; size: number }> };
+      if (staleParser) {
+        delete store.localHourly[provider];
+        delete store.localDaily[provider];
+      }
+      for (const [hk, models] of rowsByHour) {
+        for (const [model, row] of models) addDeltaLocal(store, provider, hk, model, row);
+      }
+      const s = ensure(store.state, provider) as { at?: number; pv?: number; files?: Record<string, LocalFileWatermark> };
       const f = (s.files ??= {});
+      if (staleParser) {
+        // Files not reprocessed this round (aborted budget) keep no old-parser
+        // watermark - the next harvest re-reads them fully.
+        for (const path of Object.keys(f)) {
+          if (!offsets[path]) delete f[path];
+        }
+      }
       for (const [path, wm] of Object.entries(offsets)) f[path] = wm;
+      s.pv = LOCAL_PARSER_VERSION;
       s.at = ctx.now;
     },
     ctx.now,
   );
   if (applied) ctx.summary.applied.push(label);
-  else ctx.summary.skipped.push(`${label}: store busy`);
+  else {
+    ctx.summary.skipped.push(`${label}: store busy`);
+    return false;
+  }
+  return true;
 }
 
 // addDelta into the LOCAL section – this-machine rows must never mix with the
@@ -1910,7 +1939,7 @@ async function harvestClaudeLocal(ctx: JobCtx): Promise<void> {
   const state = ctx.store().state.claude as { ids?: string[] } | undefined;
   const seen = new Set((state?.ids ?? []).slice(-4000));
   const newIds: string[] = [];
-  await harvestLocalJsonl(
+  const applied = await harvestLocalJsonl(
     ctx,
     "claude",
     join(homedir(), ".claude", "projects"),
@@ -1926,11 +1955,21 @@ async function harvestClaudeLocal(ctx: JobCtx): Promise<void> {
     },
     "claude/local",
   );
-  if (newIds.length > 0) {
+  if (applied) {
     mutateUsageStore(ctx.dir, (store) => {
-      const s = ensure(store.state, "claude") as { ids?: string[] };
-      s.ids = [...newIds, ...(s.ids ?? [])].slice(0, 4000);
+      const s = ensure(store.state, "claude") as { ids?: string[]; pv?: number };
+      if (newIds.length > 0) s.ids = [...newIds, ...(s.ids ?? [])].slice(0, 4000);
+      s.pv = LOCAL_PARSER_VERSION;
     }, ctx.now);
+  } else {
+    // The walker's apply was lock-skipped: leave pv/at untouched so the NEXT
+    // harvest still treats the section as stale and re-reads it fully.
+    const ids = (ctx.store().state.claude as { ids?: string[] } | undefined)?.ids;
+    if (ids) {
+      mutateUsageStore(ctx.dir, (store) => {
+        (ensure(store.state, "claude") as { ids?: string[] }).ids = ids;
+      }, ctx.now);
+    }
   }
 }
 

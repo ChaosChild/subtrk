@@ -596,18 +596,20 @@ function mtdCardsHTML() {
     return `<div class="card stat"><div class="label">Month-to-date tokens</div><div class="value" style="font-size:20px;color:var(--text-3)">–</div><div class="sub">accumulates from status calls and dashboard refreshes</div></div>
   <div class="card stat"><div class="label">Month-to-date value</div><div class="value" style="font-size:20px;color:var(--text-3)">–</div><div class="sub">API-equivalent, once usage is recorded</div></div>`;
   }
-  let tin = 0, tcr = 0, tout = 0, ua = 0, ue = 0, actualN = 0, hitDen = 0;
+  let tin = 0, tcr = 0, tout = 0, ua = 0, ue = 0, actualN = 0, hitDen = 0, localN = 0;
   for (const u of aggs) {
     tin += u.in; tcr += u.cr; tout += u.out; ua += u.usdActual; ue += u.usdEst;
     hitDen += u.in + u.cr;
+    if (u.hasLocal) localN++;
     if ((u.models || []).some(m => m.usdKind === "actual")) actualN++;
   }
   const hit = hitDen > 0 ? Math.round((tcr / hitDen) * 100) + "%" : "–";
   const usdLabel = [];
   if (ua > 0) usdLabel.push(`$${ua.toFixed(2)} actual`);
   if (ue > 0) usdLabel.push(`$${ue.toFixed(2)} est`);
-  return `<div class="card stat"><div class="label">Month-to-date tokens</div><div class="value num">${fmtTok(tin + tcr + tout)}</div><div class="sub">in ${fmtTok(tin)} · out ${fmtTok(tout)} · cache hit ${hit}</div></div>
-  <div class="card stat"><div class="label">Month-to-date value</div><div class="value num">${ua + ue > 0 ? "$" + (ua + ue).toFixed(2) : "–"}</div><div class="sub">${esc(usdLabel.join(" + ")) || "unpriced models only"}${actualN ? ` · ${actualN} provider${actualN > 1 ? "s" : ""} actual` : ""}</div></div>`;
+  const localNote = localN ? ` · incl. this-machine (${localN})` : "";
+  return `<div class="card stat"><div class="label">Month-to-date tokens</div><div class="value num">${fmtTok(tin + tcr + tout)}</div><div class="sub">in ${fmtTok(tin)} · out ${fmtTok(tout)} · cache hit ${hit}${localNote}</div></div>
+  <div class="card stat"><div class="label">Month-to-date value</div><div class="value num">${ua + ue > 0 ? "$" + (ua + ue).toFixed(2) : "–"}</div><div class="sub">${esc(usdLabel.join(" + ")) || "unpriced models only"}${actualN ? ` · ${actualN} provider${actualN > 1 ? "s" : ""} actual` : ""}${localNote}</div></div>`;
 }
 
 function timelineHTML() {
@@ -861,16 +863,27 @@ function chartHTML(u) {
 // height = that kind's latest sampled % in the bucket; resets read as the
 // bar dropping to a new level between one bucket and the next.
 function pctStripsHTML(u, keys, stepMs, labelStep) {
-  const byK = new Map();
+  // Group samples by WINDOW (reset instant, 30-min jitter bucket), not by the
+  // raw kind string - kimi's hourly countdown kinds ("336h".."1h") are all
+  // ONE two-week window, and google's rolling 5h slides the same way. The
+  // strip is labeled with the newest kind observed in that window.
+  const byR = new Map();
   for (const s of u.samples || []) {
-    if (!byK.has(s.k)) byK.set(s.k, []);
-    byK.get(s.k).push(s);
+    const rKey = Math.round(new Date(s.r).getTime() / 1800000);
+    if (!byR.has(rKey)) byR.set(rKey, []);
+    byR.get(rKey).push(s);
   }
-  const kinds = [...byK.keys()].sort();
+  const kinds = [...byR.keys()].sort((a, b) => a - b);
+  const kindLabel = new Map();
+  for (const rKey of kinds) {
+    const list = byR.get(rKey).slice().sort((a, b) => a.t - b.t);
+    kindLabel.set(rKey, list[list.length - 1].k);
+  }
   if (!kinds.length) return "";
   let html = "";
-  for (const kind of kinds) {
-    const list = byK.get(kind);
+  for (const rKey of kinds) {
+    const list = byR.get(rKey);
+    const kind = kindLabel.get(rKey) || "?";
     const bars = keys
       .map(k => {
         const bStart = Date.parse(k.length === 10 ? k + "T00:00:00Z" : k + ":00:00Z");

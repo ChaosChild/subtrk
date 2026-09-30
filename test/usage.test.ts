@@ -421,6 +421,9 @@ describe("usage pricing", () => {
     assert.equal(priceForModel(store, "glm-5-3")?.source, "openrouter"); // dashed variant
     assert.equal(priceForModel(store, "claude-opus-5-5")?.price.in, 5e-6); // suffix match
     assert.equal(priceForModel(store, "qwen3-max")?.source, "fallback");
+    // mixed dot+dash names normalize to one key (regression: qwen3.8-max
+    // resolved null because the dotted variant was rebuilt dash->dot)
+    assert.equal(priceForModel(store, "qwen3.8-max")?.source, "fallback");
     assert.equal(priceForModel(store, "totally-unknown-model"), null);
   });
 
