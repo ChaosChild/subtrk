@@ -523,10 +523,14 @@ describe("usage aggregation", () => {
 // ---------- harvest ----------
 
 describe("usage harvest", () => {
-  const OR_ACTIVITY = {
+  // Fixture dates are RELATIVE to now: the daily activity row must land on
+  // dayKey(now-1d) and the analytics hour inside the harvester's 48h window,
+  // or the day-view aggregation drops them when UTC midnight rolls over
+  // (this exact time-bomb broke the suite once the clock hit Sep 30 UTC).
+  const OR_ACTIVITY = () => ({
     data: [
       {
-        date: "2026-09-28 00:00:00",
+        date: `${dayKey(Date.now() - DAY)} 00:00:00`,
         model: "openai/gpt-5.2",
         requests: 2,
         usage: 0.1,
@@ -534,12 +538,12 @@ describe("usage harvest", () => {
         completion_tokens: 20,
       },
     ],
-  };
-  const OR_ANALYTICS = {
+  });
+  const OR_ANALYTICS = () => ({
     data: {
       data: [
         {
-          date__hour: "2026-09-29 11:00:00",
+          date__hour: `${hourKey(Date.now() - 2 * HOUR)}:00:00`,
           model: "openai/gpt-5.2",
           tokens_prompt: "500",
           tokens_completion: "40",
@@ -547,7 +551,7 @@ describe("usage harvest", () => {
         },
       ],
     },
-  };
+  });
   const OR_MODELS = {
     data: [
       { id: "openai/gpt-5.2", pricing: { prompt: "0.000002", completion: "0.000008", input_cache_read: "0.0000002" } },
@@ -571,8 +575,8 @@ describe("usage harvest", () => {
         subtrkDir: dir,
         budgetMs: 5_000,
         fetchImpl: jsonFetch((url) => {
-          if (url.includes("/activity")) return OR_ACTIVITY;
-          if (url.includes("/analytics/query")) return OR_ANALYTICS;
+          if (url.includes("/activity")) return OR_ACTIVITY();
+          if (url.includes("/analytics/query")) return OR_ANALYTICS();
           if (url.includes("/models")) return OR_MODELS;
           return {};
         }),
@@ -584,8 +588,9 @@ describe("usage harvest", () => {
       const raw = JSON.stringify(readUsageStore(dir));
       assert.ok(!raw.includes("sk-or-mgmt-FIXTURE-SECRET"), "the store must never hold secrets");
       const store = readUsageStore(dir);
-      assert.equal(store.daily.openrouter[dayKey(Date.UTC(2026, 8, 28))]["openai/gpt-5.2"].usd, 0.1);
-      const hk = hourKey(Date.UTC(2026, 8, 29, 11));
+      const dailyDay = dayKey(Date.now() - DAY);
+      const hk = hourKey(Date.now() - 2 * HOUR);
+      assert.equal(store.daily.openrouter[dailyDay]["openai/gpt-5.2"].usd, 0.1);
       assert.equal(store.hourly.openrouter[hk]["openai/gpt-5.2"].in, 400); // 500 prompt − 100 cached
       assert.equal(store.hourly.openrouter[hk]["openai/gpt-5.2"].cr, 100);
       assert.ok(store.pricing.usdPerTok?.["openai/gpt-5.2"]);
@@ -731,7 +736,13 @@ describe("GET /api/usage", () => {
         assert.equal(shellRes.status, 200);
         assert.match(shellRes.headers.get("content-type") ?? "", /text\/html/);
         assert.ok((shellRes.headers.get("content-security-policy") ?? "").length > 0);
-        assert.ok((await shellRes.text()).includes("subtrk console"));
+        const shellText = await shellRes.text();
+        assert.ok(shellText.includes("subtrk console"));
+        // The token lives ONLY in the URL fragment, so every same-origin
+        // navigation must carry location.hash – dropping it 401s the whole
+        // page (regression guard for the blank-drill-down bug).
+        assert.ok(shellText.includes("${location.hash}"), "card navigation must carry the fragment");
+        assert.ok(shellText.includes('"/" + location.hash'), "back link must carry the fragment");
         assert.equal((await fetch(`http://127.0.0.1:${handle.port}/provider/nope`)).status, 404);
 
         for (const r of [res, scoped, noAuth, badProvider, badMethod]) {

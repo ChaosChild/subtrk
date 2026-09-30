@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { readFileSync, realpathSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 // cli.ts – subtrk entry point. `subtrk` / `subtrk status` / `subtrk init` /
 // `subtrk auth refresh` / `subtrk serve`. The providers registry lives in
 // ./providers/index.ts (allProviders) and is imported lazily (from collectStatus)
@@ -13,6 +13,7 @@ import {
   type Credits,
   collectStatus,
   errorMessage,
+  pkgVersion,
   type ProviderModule,
   type ProviderResult,
   readCacheEntry,
@@ -93,16 +94,9 @@ flags:
 
 // ---------- text rendering (spec §Text format) ----------
 
-// package.json rides next to src/ in the repo and in the npm tarball alike.
+// package.json read lives in core (shared with the console's version display).
 function cliVersion(): string {
-  try {
-    const pkg = JSON.parse(
-      readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
-    ) as { version?: unknown };
-    return typeof pkg.version === "string" && pkg.version ? pkg.version : "unknown";
-  } catch {
-    return "unknown";
-  }
+  return pkgVersion();
 }
 
 function clock(iso: string): string {

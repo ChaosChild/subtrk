@@ -778,9 +778,10 @@ One page for every enabled provider, served from the same cache the CLI reads.
   `allow: GET, POST`.
 - `GET /api/config` → the current display config for the console's menus, same
   Bearer token, GET-only: `{"enabled": […], "order": […], "hidden": […],
-  "theme": "light" | "dark" | null}`.
+  "theme": "light" | "dark" | null, "version": "<package version>"}`.
   These are the fields `subtrk init` writes plus the console's theme – the file
-  holds no secrets.
+  holds no secrets; `version` is the running subtrk's package version (the
+  console shows it in the footer).
 - Hardening: the Host header must be `127.0.0.1[:port]` or
   `localhost[:port]` (403 otherwise – DNS-rebinding defense); no CORS headers
   are ever emitted, so cross-site pages can neither read responses nor pass
@@ -820,7 +821,10 @@ One page for every enabled provider, served from the same cache the CLI reads.
   surface), a per-model table (costs carry their kind chip; split-less
   providers render totals and a table-only layout note) and a window-%
   history table sampled from every probe. The drill-down reads the store and
-  the status cache only – it never calls vendors.
+  the status cache only – it never calls vendors. Every same-origin
+  navigation (card → drill-down, drill-down → dashboard) carries the URL
+  fragment: the per-run bearer token lives there and nowhere else, so a
+  dropped fragment would 401 the page.
 
 ## Not in v0 (parked)
 

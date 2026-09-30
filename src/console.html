@@ -309,7 +309,7 @@ footer code { font-family: var(--mono); color: var(--text-2); }
         <button type="button" data-r="30" class="on">30d</button>
         <button type="button" data-r="mtd">MTD</button>
       </span>
-      <a href="/" style="font-size:12.5px;color:var(--accent);text-decoration:none">← dashboard</a>
+      <a href="/" id="dvback" style="font-size:12.5px;color:var(--accent);text-decoration:none">← dashboard</a>
     </span>
   </div>
   <section class="summary" id="dvstats" aria-label="Usage summary"></section>
@@ -337,7 +337,7 @@ footer code { font-family: var(--mono); color: var(--text-2); }
       <span><i style="background:var(--crit)"></i>≥95%</span>
       <span>[stale] = cached past TTL or served after an error</span>
     </div>
-    <div>Served by <code>subtrk serve</code> from <code>~/.subtrk/cache.json</code> · JSON at <code>/api/status</code> · secrets redacted</div>
+    <div>Served by <code id="servever">subtrk serve</code> from <code>~/.subtrk/cache.json</code> · JSON at <code>/api/status</code> · secrets redacted</div>
   </div>
 </footer>
 
@@ -706,6 +706,7 @@ async function refresh() {
           root.dataset.theme = cfg.theme; // server truth wins on boot – see the theme note below
           try { localStorage.setItem("subtrk-theme", cfg.theme); } catch {}
         }
+        if (typeof cfg.version === "string" && cfg.version) $("servever").textContent = `subtrk serve v${cfg.version}`;
       }
     } catch {}
     // M3: the drill-down needs per-provider aggregates, the dashboard the
@@ -922,13 +923,16 @@ if (PROVIDER_VIEW) {
     refresh();
   });
   document.querySelector("main.wrap").hidden = true; // dashboard sections stay out of the drill-down page
+  // Same-origin navigation MUST carry the URL fragment: the per-run bearer
+  // token lives there and nowhere else (dropped fragment = 401 blank page).
+  $("dvback").href = "/" + location.hash;
 } else {
   // Whole provider cards are clickable (M3): navigate to the drill-down.
   // Drag handle, buttons and the card's × stay click-exempt.
   $("providers").addEventListener("click", e => {
     if (e.target instanceof Element && e.target.closest("button, a, .drag")) return;
     const card = e.target instanceof Element ? e.target.closest("article[data-provider]") : null;
-    if (card && card.dataset.provider) location.href = `/provider/${card.dataset.provider}`;
+    if (card && card.dataset.provider) location.href = `/provider/${card.dataset.provider}${location.hash}`;
   });
 }
 

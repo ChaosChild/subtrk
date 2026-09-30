@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ---------- shared contract (docs/spec.md §ProviderResult) ----------
 
@@ -712,6 +713,22 @@ export function computeRecheckAfter(okTtlsMs: number[], nowMs: number = Date.now
   const min = okTtlsMs.length > 0 ? Math.min(...okTtlsMs) : 300_000;
   const clamped = Math.min(300_000, Math.max(60_000, min));
   return new Date(nowMs + clamped).toISOString();
+}
+
+// ---------- package version ----------
+
+// package.json rides next to src/ in the repo and in the npm tarball alike;
+// unreadable → "unknown". Shared by the CLI banner and the console (which
+// surfaces it through GET /api/config).
+export function pkgVersion(): string {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
+    ) as { version?: unknown };
+    return typeof pkg.version === "string" && pkg.version ? pkg.version : "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 // ---------- status collection (shared by `subtrk status` and `subtrk serve`) ----------

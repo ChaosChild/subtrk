@@ -20,6 +20,7 @@ import {
   errorMessage,
   isValidCardKey,
   loadConfig,
+  pkgVersion,
   type ProviderId,
   type ProviderModule,
   type RefreshResult,
@@ -36,6 +37,7 @@ export interface ServeDeps {
   subtrkDir?: string; // override ~/.subtrk (tests)
   consoleHtmlPath?: string; // shell served at / (default: src/console.html next to this module)
   port?: number; // default 0 – random ephemeral port
+  version?: string; // package version surfaced via /api/config (default: pkgVersion())
   refresh?: (id: string) => Promise<RefreshResult>; // stub seam (tests); default: module registry
 }
 
@@ -144,6 +146,7 @@ function parseConfigPatch(raw: unknown): { patch: ConfigPatch } | { error: strin
 
 export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
   const token = randomBytes(32).toString("hex"); // per run, memory only
+  const version = deps.version ?? pkgVersion();
   let shell: Buffer | null = null;
   try {
     shell = readFileSync(deps.consoleHtmlPath ?? fileURLToPath(new URL("./console.html", import.meta.url)));
@@ -321,6 +324,7 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
                 order: cfg.order ?? [],
                 hidden: cfg.hidden ?? [],
                 theme: cfg.theme ?? null,
+                version,
               }),
             );
           } catch (err) {
