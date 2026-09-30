@@ -44,7 +44,9 @@ subtrk serve
 Starts the dashboard on a random `127.0.0.1` port and prints the URL to open –
 one page for every tracked provider: usage bars per window (with ≥80%/≥95% warning
 levels), credit pools, a 7-day reset timeline, upcoming resets, and the same
-agent view the CLI prints, auto-refreshing on the cache heartbeat. A provider
+agent view the CLI prints, auto-refreshing on the cache heartbeat. Every card
+is clickable into that provider's usage page (see [Usage history](#usage-history)
+below), and the top row carries month-to-date token and value cards. A provider
 that reports several model classes (Google's Gemini and Claude/GPT, for example)
 renders one card per class. When a provider's error says it is refreshable, its
 card shows a **Refresh now** button that re-runs that provider's own refresh
@@ -200,20 +202,46 @@ concurrent agents cannot double count.
 ```bash
 subtrk usage                     # month-to-date tokens + API-equivalent cost
 subtrk usage --json              # machine-readable (per-provider, per-model)
+subtrk usage --provider glm      # one provider (includes its local harvest)
 subtrk usage --days 7 --hour     # last 7 days, hourly buckets
 subtrk usage --rebuild           # re-derive range-API history from the sources
 ```
+
+On the dashboard, the top row carries month-to-date token and value cards
+(local calendar month, this-machine harvests included and labeled), and every
+provider card is clickable into a usage page: a day/hour token chart with
+window-% history on the same time grid, a per-model table with costs labeled
+actual / est / blended, and the live windows – all served from the local
+store, no vendor calls while you browse.
+
+![Usage drill-down](docs/img/console-usage.png)
 
 What you get per provider depends on what the vendor exposes: GLM, OpenRouter
 and Alibaba report token splits; OpenRouter costs are the vendor's own numbers
 (actual) while the rest are list-price estimates, always labeled; zcode bundles
 report totals only and are priced with your observed z.ai mix. OpenAI and
 Claude combine **this-machine token harvests** (Codex rollout files / Claude
-Code transcripts — real tokens, labeled, never merged into month-to-date
-totals) with their server-side percentages; Google and Kimi expose percentages
-only, so their usage pages show window-% history instead of tokens. The web
-console renders the same store as clickable per-provider usage pages plus
-month-to-date summary cards.
+Code transcripts — real tokens, labeled "this machine", included in the
+month-to-date cards) with OpenAI's server-side daily plan share; Google and
+Kimi expose percentages only, so their usage pages show window-% history
+instead of tokens.
+
+### Where the usage comes from – and what it can't do
+
+`subtrk` is **not a proxy** – it never sits in the request path, so it cannot
+meter your traffic request by request. Token numbers come from two honest
+sources: the vendors' own usage surfaces where they exist (Z.ai's per-model
+credit-usage detail, OpenRouter's activity/analytics, Alibaba's token-plan
+telemetry, OpenAI's daily breakdown), and local artifacts your tools already
+write (Claude Code transcripts, Codex rollout files) for providers with no
+server-side history. Everything else – Claude, Google, Kimi – exposes only
+window percentages, and subtrk shows exactly that: sampled % history, never
+invented tokens. Local harvests describe this machine only; usage from your
+other devices appears solely through the vendor's server-side numbers or the
+window percentages. API-equivalent costs are computed from list prices
+(OpenRouter's public catalog, refreshed weekly, plus a bundled vendor table)
+and are estimates of what the same tokens would have cost pay-as-you-go – not
+what your subscription actually charges you.
 
 **Management key note.** OpenRouter's usage history needs a *management key*
 (openrouter.ai/settings/management-keys), which `subtrk init` offers as an
@@ -279,8 +307,8 @@ meantime – no intervention needed.
 - [`docs/decisions.md`](docs/decisions.md) – design decisions D1–D11 with rationale.
 - [`docs/implementation-plan.md`](docs/implementation-plan.md) – implementation
   guide: layout, coding rules, how to add a provider.
-- [`docs/phases.md`](docs/phases.md) – roadmap (web console done; M3 analytics
-  next; parked).
+- [`docs/phases.md`](docs/phases.md) – roadmap (CLI, web console and usage
+  analytics done; parked).
 
 ## License
 

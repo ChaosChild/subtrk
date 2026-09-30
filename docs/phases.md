@@ -11,12 +11,16 @@
 cache. One page per provider: windows, credits,
 staleness, reset timeline and countdowns.
 
-## M3 – Combined usage views
+## M3 – Combined usage views (done)
 
 Per-model workload analytics on top of provider history endpoints: OpenRouter
-`/api/v1/activity` + `/api/v1/analytics/query`, GLM `/api/monitor/usage/model-usage`,
-Alibaba billing trend, Claude local JSONL estimates. Combined token usage,
-spend efficiency, model mix across every tracked provider.
+`/api/v1/activity` + `/api/v1/analytics/query`, GLM usage-detail,
+Alibaba token-plan telemetry, OpenAI daily breakdown + Codex rollouts, Claude
+local JSONL transcripts, zcode bundle ledger. Local usage store
+(`~/.subtrk/usage.json`) with idempotent harvests, `subtrk usage` CLI, and
+console usage pages (clickable cards, month-to-date token/value cards,
+day/hour charts, per-model cost tables, window-% history). Design and
+sourcing decisions in `docs/decisions.md` (D12–D17).
 
 ## Parked (deliberately out of scope)
 
