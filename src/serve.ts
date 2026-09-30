@@ -147,6 +147,7 @@ function parseConfigPatch(raw: unknown): { patch: ConfigPatch } | { error: strin
 export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
   const token = randomBytes(32).toString("hex"); // per run, memory only
   const version = deps.version ?? pkgVersion();
+  const startedAt = new Date().toISOString(); // the footer proves WHICH process serves the page
   let shell: Buffer | null = null;
   try {
     shell = readFileSync(deps.consoleHtmlPath ?? fileURLToPath(new URL("./console.html", import.meta.url)));
@@ -329,6 +330,7 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
                 hidden: cfg.hidden ?? [],
                 theme: cfg.theme ?? null,
                 version,
+                startedAt,
               }),
             );
           } catch (err) {

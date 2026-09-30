@@ -734,6 +734,12 @@ describe("alibaba/openai/local parsers", () => {
     assert.equal(grown?.row.out, 10);
     const turn = parseCodexRolloutLine(JSON.stringify({ timestamp: "t", type: "turn_context", payload: { model: "gpt-6-luna" } }), null, { input: 1, cached: 0, cw: 0, out: 0 });
     assert.equal(turn?.modelUpdate, "gpt-6-luna");
+    // regression: a turn_context on a FRESH file (prev = null) used to return
+    // null, so the whole file attributed to the "codex" fallback model.
+    const freshTurn = parseCodexRolloutLine(JSON.stringify({ timestamp: "t", type: "turn_context", payload: { model: "gpt-6-luna" } }), null, null);
+    assert.equal(freshTurn?.modelUpdate, "gpt-6-luna");
+    const freshWithModel = parseCodexRolloutLine(line, "gpt-6-luna", null);
+    assert.equal(freshWithModel?.model, "gpt-6-luna");
     const withModel = parseCodexRolloutLine(line, "gpt-6-luna", null);
     assert.equal(withModel?.model, "gpt-6-luna");
   });

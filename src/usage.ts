@@ -1284,7 +1284,7 @@ const ALIBABA_TTL_MS = 6 * 3_600_000;
 const OPENAI_LOCAL_TTL_MS = 60_000;
 // Bump when local-parser semantics change: stores harvested by an older
 // parser are wiped and re-read once (self-healing, no operator rebuild).
-const LOCAL_PARSER_VERSION = 2;
+const LOCAL_PARSER_VERSION = 3;
 const OPENAI_WHAM_TTL_MS = 6 * 3_600_000;
 const CLAUDE_LOCAL_TTL_MS = 60_000;
 const WHAM_URL = "https://chatgpt.com/backend-api/wham/usage/daily-token-usage-breakdown";
@@ -1592,7 +1592,7 @@ export function parseCodexRolloutLine(
   line: string,
   currentModel: string | null,
   prev: CodexParserState | null,
-): { ts: number; model: string; row: UsageRow; modelUpdate: string | null; nextState: CodexParserState } | null {
+): { ts: number; model: string; row: UsageRow; modelUpdate: string | null; nextState: CodexParserState | null } | null {
   let o: unknown;
   try {
     o = JSON.parse(line);
@@ -1602,9 +1602,7 @@ export function parseCodexRolloutLine(
   if (typeof o !== "object" || o === null) return null;
   const rec = o as { type?: unknown; timestamp?: unknown; payload?: Record<string, unknown> | null };
   if (rec.type === "turn_context" && rec.payload && typeof rec.payload.model === "string" && rec.payload.model) {
-    return prev
-      ? { ts: 0, model: "", row: {}, modelUpdate: rec.payload.model, nextState: prev }
-      : null;
+    return { ts: 0, model: "", row: {}, modelUpdate: rec.payload.model, nextState: prev };
   }
   if (rec.type !== "event_msg" || !rec.payload || rec.payload.type !== "token_count") return null;
   const info = rec.payload.info as { total_token_usage?: Record<string, unknown> } | undefined;
@@ -1699,8 +1697,13 @@ async function harvestLocalJsonl(
     | { at?: number; pv?: number; files?: Record<string, LocalFileWatermark> }
     | undefined;
   // Absent pv = pre-versioning store: treat as stale so rows written by an
-  // older parser are REPLACED, not added to.
-  const staleParser = state?.pv !== LOCAL_PARSER_VERSION;
+  // older parser are REPLACED, not added to. Also self-heal data loss: if
+  // files are watermarked as processed but the local section is EMPTY, a
+  // past wipe outran its rebuild - force a full re-read.
+  const sectionEmpty =
+    Object.keys(ctx.store().localHourly[provider] ?? {}).length === 0 &&
+    Object.keys(ctx.store().localDaily[provider] ?? {}).length === 0;
+  const staleParser = state?.pv !== LOCAL_PARSER_VERSION || (state?.files !== undefined && Object.keys(state.files).length > 0 && sectionEmpty);
   if (state?.at && !staleParser && ctx.now - state.at < OPENAI_LOCAL_TTL_MS) {
     ctx.summary.skipped.push(`${label}: fresh`);
     return true;
@@ -1802,6 +1805,13 @@ async function harvestLocalJsonl(
   if (processed === 0 && rowsByHour.size === 0) {
     ctx.summary.skipped.push(`${label}: nothing new`);
     return true; // nothing to do counts as success – watermarks stay valid
+  }
+  if (staleParser && rowsByHour.size === 0) {
+    // A stale rebuild that read NO usage rows must not wipe the section and
+    // walk away (budget aborted mid-file) - keep the old rows and watermarks
+    // so the next harvest retries the full read.
+    ctx.summary.skipped.push(`${label}: rebuild read nothing - kept previous rows`);
+    return false;
   }
   const applied = mutateUsageStore(
     ctx.dir,
@@ -1936,8 +1946,17 @@ async function harvestClaudeLocal(ctx: JobCtx): Promise<void> {
   // Streaming partial writes duplicate message.id+requestId across lines and
   // resumed sessions replay them across files – dedupe on a bounded recent-id
   // set (first occurrence wins, the ccusage convention) persisted in state.
-  const state = ctx.store().state.claude as { ids?: string[] } | undefined;
-  const seen = new Set((state?.ids ?? []).slice(-4000));
+  const state = ctx.store().state.claude as { ids?: string[]; pv?: number; files?: Record<string, unknown> } | undefined;
+  // Mirror the walker's staleness (parser bump OR watermarked-but-empty
+  // section): a full re-read must start with an EMPTY dedupe set, or the
+  // persisted "already seen" ids swallow every historical line.
+  const sectionEmpty =
+    Object.keys(ctx.store().localHourly.claude ?? {}).length === 0 &&
+    Object.keys(ctx.store().localDaily.claude ?? {}).length === 0;
+  const fullReread =
+    state?.pv !== LOCAL_PARSER_VERSION ||
+    (state?.files !== undefined && Object.keys(state.files).length > 0 && sectionEmpty);
+  const seen = new Set(fullReread ? [] : (state?.ids ?? []).slice(-4000));
   const newIds: string[] = [];
   const applied = await harvestLocalJsonl(
     ctx,
