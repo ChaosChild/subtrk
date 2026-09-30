@@ -20,9 +20,9 @@ import {
   errorMessage,
   isValidCardKey,
   loadConfig,
-  pkgVersion,
   type ProviderId,
   type ProviderModule,
+  pkgVersion,
   type RefreshResult,
   removeCachedProvider,
   SUBTRK_DIR,
@@ -237,7 +237,8 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
           return;
         }
         const localParam = url.searchParams.get("local");
-        const local = localParam === "only" ? "only" : localParam === "include" || provider !== null ? "include" : "exclude";
+        const local =
+          localParam === "only" ? "only" : localParam === "include" || provider !== null ? "include" : "exclude";
         const granularity = url.searchParams.get("granularity") === "hour" ? "hour" : "day";
         const parseMs = (name: string): number | null => {
           const raw = url.searchParams.get(name);
@@ -257,7 +258,13 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
         }
         try {
           const store = readUsageStore(deps.subtrkDir ?? SUBTRK_DIR);
-          const agg = aggregateUsage(store, { provider: provider ?? undefined, granularity, fromMs: from, toMs: to, local });
+          const agg = aggregateUsage(store, {
+            provider: provider ?? undefined,
+            granularity,
+            fromMs: from,
+            toMs: to,
+            local,
+          });
           respond(
             res,
             200,

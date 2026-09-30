@@ -13,9 +13,9 @@ import {
   type Credits,
   collectStatus,
   errorMessage,
-  pkgVersion,
   type ProviderModule,
   type ProviderResult,
+  pkgVersion,
   readCacheEntry,
   removeCachedProvider,
   type StatusOutput,
@@ -486,11 +486,7 @@ async function usageCommand(args: UsageArgs, deps: CliDeps): Promise<number> {
   const scope = args.provider.length > 0 ? args.provider : null;
   const merged: Record<string, ReturnType<typeof aggregateUsage>["providers"][string]> = {};
   const ids = scope ?? [
-    ...new Set([
-      ...Object.keys(store.daily),
-      ...Object.keys(store.hourly),
-      ...Object.keys(store.samples),
-    ]),
+    ...new Set([...Object.keys(store.daily), ...Object.keys(store.hourly), ...Object.keys(store.samples)]),
   ];
   for (const id of ids) {
     // A provider filter includes the this-machine local sections (labeled in

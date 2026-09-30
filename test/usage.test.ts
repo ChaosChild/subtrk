@@ -20,9 +20,9 @@ import {
   alibabaRowsFromSeries,
   dayKey,
   dayKeyToMs,
+  extractOpenaiWham,
   extractOrActivity,
   extractOrAnalytics,
-  extractOpenaiWham,
   extractOrPricing,
   harvestUsage,
   hourKey,
@@ -652,24 +652,28 @@ describe("usage harvest", () => {
       const now = Date.now();
       const live = new Date(now + 3_600_000).toISOString();
       const dead = new Date(now - 3_600_000).toISOString();
-      mutateUsageStore(dir, (s) => {
-        recordSamples(
-          s,
-          [
-            {
-              id: "alibaba",
-              ok: false,
-              stale: true,
-              fetchedAt: new Date().toISOString(),
-              windows: [
-                { kind: "30d", usedPercent: 99, resetsAt: live }, // stale result, live window -> recorded, flagged
-                { kind: "5h", usedPercent: 12, resetsAt: dead }, // already reset -> never recorded
-              ],
-            },
-          ],
-          now,
-        );
-      }, now);
+      mutateUsageStore(
+        dir,
+        (s) => {
+          recordSamples(
+            s,
+            [
+              {
+                id: "alibaba",
+                ok: false,
+                stale: true,
+                fetchedAt: new Date().toISOString(),
+                windows: [
+                  { kind: "30d", usedPercent: 99, resetsAt: live }, // stale result, live window -> recorded, flagged
+                  { kind: "5h", usedPercent: 12, resetsAt: dead }, // already reset -> never recorded
+                ],
+              },
+            ],
+            now,
+          );
+        },
+        now,
+      );
       const store = readUsageStore(dir);
       assert.equal(store.samples.alibaba.length, 1);
       assert.equal(store.samples.alibaba[0].stale, true);
@@ -686,13 +690,41 @@ describe("alibaba/openai/local parsers", () => {
   it("parses alibaba monitor series and derives uncached input", () => {
     const body = {
       code: "200",
-      data: { DataV2: { data: { data: { originData: [
-        { aggMethod: "sum", labels: { unit: "tokens", usage_type: "input_tokens" }, points: [{ timestamp: 1790238712000, value: 46989629 }] },
-        { aggMethod: "sum", labels: { unit: "tokens", usage_type: "cached_tokens" }, points: [{ timestamp: 1790238712000, value: 42944901 }] },
-        { aggMethod: "sum", labels: { unit: "tokens", usage_type: "output_tokens" }, points: [{ timestamp: 1790238712000, value: 550402 }] },
-        { aggMethod: "cumsum", labels: { unit: "tokens", usage_type: "total_tokens" }, points: [{ timestamp: 1790238712000, value: 481846979 }] },
-        { aggMethod: "sum", labels: { unit: "tokens", usage_type: "total_tokens" }, points: [{ timestamp: 1790238712000, value: 47540031 }] },
-      ] } } } },
+      data: {
+        DataV2: {
+          data: {
+            data: {
+              originData: [
+                {
+                  aggMethod: "sum",
+                  labels: { unit: "tokens", usage_type: "input_tokens" },
+                  points: [{ timestamp: 1790238712000, value: 46989629 }],
+                },
+                {
+                  aggMethod: "sum",
+                  labels: { unit: "tokens", usage_type: "cached_tokens" },
+                  points: [{ timestamp: 1790238712000, value: 42944901 }],
+                },
+                {
+                  aggMethod: "sum",
+                  labels: { unit: "tokens", usage_type: "output_tokens" },
+                  points: [{ timestamp: 1790238712000, value: 550402 }],
+                },
+                {
+                  aggMethod: "cumsum",
+                  labels: { unit: "tokens", usage_type: "total_tokens" },
+                  points: [{ timestamp: 1790238712000, value: 481846979 }],
+                },
+                {
+                  aggMethod: "sum",
+                  labels: { unit: "tokens", usage_type: "total_tokens" },
+                  points: [{ timestamp: 1790238712000, value: 47540031 }],
+                },
+              ],
+            },
+          },
+        },
+      },
     };
     const parsed = parseAlibabaMonitor(body);
     assert.ok(parsed && "series" in parsed);
@@ -704,20 +736,49 @@ describe("alibaba/openai/local parsers", () => {
     assert.equal(day["(all models)"].cr, 42944901);
     assert.equal(day["(all models)"].out, 550402);
     // session-expired envelope -> login marker, not a shape failure
-    assert.deepEqual(parseAlibabaMonitor({ error: { code: 3, message: "Console session is not logged in or has expired." } }), { login: true });
+    assert.deepEqual(
+      parseAlibabaMonitor({ error: { code: 3, message: "Console session is not logged in or has expired." } }),
+      { login: true },
+    );
     assert.equal(parseAlibabaMonitor({ data: {} }), null);
   });
 
   it("parses openai wham daily rows as informational pct", () => {
-    const days = extractOpenaiWham({ data: [{ date: "2026-09-29", models: [{ model: "gpt-6-luna", speed: "standard", credits: 100 }, { model: "x", credits: "nope" }] }, { garbage: 1 }] });
+    const days = extractOpenaiWham({
+      data: [
+        {
+          date: "2026-09-29",
+          models: [
+            { model: "gpt-6-luna", speed: "standard", credits: 100 },
+            { model: "x", credits: "nope" },
+          ],
+        },
+        { garbage: 1 },
+      ],
+    });
     assert.ok(days);
     assert.equal(days["2026-09-29"]["gpt-6-luna"].pct, 100);
-    assert.equal(days["2026-09-29"]["x"], undefined);
+    assert.equal(days["2026-09-29"].x, undefined);
     assert.equal(extractOpenaiWham({ data: 5 }), null);
   });
 
   it("parses codex rollout token events with turn_context model attribution", () => {
-    const line = JSON.stringify({ timestamp: "2026-09-29T15:53:08Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 30189, cached_input_tokens: 20224, output_tokens: 13 }, last_token_usage: { input_tokens: 30189, cached_input_tokens: 20224, cache_write_input_tokens: 0, output_tokens: 13 } } } });
+    const line = JSON.stringify({
+      timestamp: "2026-09-29T15:53:08Z",
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: { input_tokens: 30189, cached_input_tokens: 20224, output_tokens: 13 },
+          last_token_usage: {
+            input_tokens: 30189,
+            cached_input_tokens: 20224,
+            cache_write_input_tokens: 0,
+            output_tokens: 13,
+          },
+        },
+      },
+    });
     const parsed = parseCodexRolloutLine(line, null, null);
     assert.ok(parsed);
     assert.equal(parsed.model, "codex"); // no turn_context yet
@@ -728,15 +789,34 @@ describe("alibaba/openai/local parsers", () => {
     const repeat = parseCodexRolloutLine(line, null, parsed.nextState);
     assert.equal(repeat?.row.in, undefined);
     // a larger cumulative snapshot deltas only the growth
-    const grown = parseCodexRolloutLine(JSON.stringify({ timestamp: "2026-09-29T16:00:00Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 31189, cached_input_tokens: 21224, output_tokens: 23 } } } }), null, parsed.nextState);
+    const grown = parseCodexRolloutLine(
+      JSON.stringify({
+        timestamp: "2026-09-29T16:00:00Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: { total_token_usage: { input_tokens: 31189, cached_input_tokens: 21224, output_tokens: 23 } },
+        },
+      }),
+      null,
+      parsed.nextState,
+    );
     assert.equal(grown?.row.in, 1000 - 1000 + 0 + 0); // input grew 1000, cached grew 1000 -> uncached delta 0
     assert.equal(grown?.row.cr, 1000);
     assert.equal(grown?.row.out, 10);
-    const turn = parseCodexRolloutLine(JSON.stringify({ timestamp: "t", type: "turn_context", payload: { model: "gpt-6-luna" } }), null, { input: 1, cached: 0, cw: 0, out: 0 });
+    const turn = parseCodexRolloutLine(
+      JSON.stringify({ timestamp: "t", type: "turn_context", payload: { model: "gpt-6-luna" } }),
+      null,
+      { input: 1, cached: 0, cw: 0, out: 0 },
+    );
     assert.equal(turn?.modelUpdate, "gpt-6-luna");
     // regression: a turn_context on a FRESH file (prev = null) used to return
     // null, so the whole file attributed to the "codex" fallback model.
-    const freshTurn = parseCodexRolloutLine(JSON.stringify({ timestamp: "t", type: "turn_context", payload: { model: "gpt-6-luna" } }), null, null);
+    const freshTurn = parseCodexRolloutLine(
+      JSON.stringify({ timestamp: "t", type: "turn_context", payload: { model: "gpt-6-luna" } }),
+      null,
+      null,
+    );
     assert.equal(freshTurn?.modelUpdate, "gpt-6-luna");
     const freshWithModel = parseCodexRolloutLine(line, "gpt-6-luna", null);
     assert.equal(freshWithModel?.model, "gpt-6-luna");
@@ -745,13 +825,33 @@ describe("alibaba/openai/local parsers", () => {
   });
 
   it("parses claude transcript lines with ccusage rules", () => {
-    const line = JSON.stringify({ type: "assistant", timestamp: "2026-09-29T12:00:00Z", isApiErrorMessage: false, requestId: "req_1", message: { model: "claude-opus-5-5", id: "msg_1", usage: { input_tokens: 100, cache_read_input_tokens: 900, cache_creation_input_tokens: 50, output_tokens: 10 } } });
+    const line = JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-09-29T12:00:00Z",
+      isApiErrorMessage: false,
+      requestId: "req_1",
+      message: {
+        model: "claude-opus-5-5",
+        id: "msg_1",
+        usage: { input_tokens: 100, cache_read_input_tokens: 900, cache_creation_input_tokens: 50, output_tokens: 10 },
+      },
+    });
     const parsed = parseClaudeTranscriptLine(line, null);
     assert.ok(parsed);
     assert.ok(parsed.dedupeKey);
     assert.equal(parsed.model, "claude-opus-5-5");
     assert.equal(parsed.row.cr, 900);
-    assert.equal(parseClaudeTranscriptLine(JSON.stringify({ type: "assistant", timestamp: "t", message: { model: "<synthetic>", usage: { input_tokens: 5 } } }), null), null);
+    assert.equal(
+      parseClaudeTranscriptLine(
+        JSON.stringify({
+          type: "assistant",
+          timestamp: "t",
+          message: { model: "<synthetic>", usage: { input_tokens: 5 } },
+        }),
+        null,
+      ),
+      null,
+    );
     assert.equal(parseClaudeTranscriptLine("not json", null), null);
   });
 
@@ -759,23 +859,39 @@ describe("alibaba/openai/local parsers", () => {
     const dir = tempDir();
     try {
       const now = Date.UTC(2026, 8, 30, 12);
-      mutateUsageStore(dir, (s) => {
-        // server-side plan-% row + a this-machine local token bucket
-        replaceDailyRows(s, "openai", { [dayKey(now)]: { "gpt-6-luna": { pct: 100 } } });
-        if (!s.localHourly.openai) s.localHourly.openai = {};
-        s.localHourly.openai[hourKey(now - HOUR)] = { "gpt-6-luna": { in: 9965, cr: 20224, out: 13, req: 1 } };
-      }, now);
+      mutateUsageStore(
+        dir,
+        (s) => {
+          // server-side plan-% row + a this-machine local token bucket
+          replaceDailyRows(s, "openai", { [dayKey(now)]: { "gpt-6-luna": { pct: 100 } } });
+          if (!s.localHourly.openai) s.localHourly.openai = {};
+          s.localHourly.openai[hourKey(now - HOUR)] = { "gpt-6-luna": { in: 9965, cr: 20224, out: 13, req: 1 } };
+        },
+        now,
+      );
       const store = readUsageStore(dir);
       const excl = aggregateUsage(store, { provider: "openai", granularity: "day", fromMs: now - DAY, toMs: now });
       assert.equal(excl.providers.openai.hasLocal, false);
       assert.equal(excl.providers.openai.in + excl.providers.openai.cr, 0);
-      const incl = aggregateUsage(store, { provider: "openai", granularity: "day", fromMs: now - DAY, toMs: now, local: "include" });
+      const incl = aggregateUsage(store, {
+        provider: "openai",
+        granularity: "day",
+        fromMs: now - DAY,
+        toMs: now,
+        local: "include",
+      });
       assert.equal(incl.providers.openai.hasLocal, true);
       assert.equal(incl.providers.openai.in, 9965);
-      const m = incl.providers.openai.models.find(x => x.model === "gpt-6-luna");
+      const m = incl.providers.openai.models.find((x) => x.model === "gpt-6-luna");
       assert.ok(m);
       assert.equal(m.pct, 100); // server pct merged into the local token row
-      const only = aggregateUsage(store, { provider: "openai", granularity: "hour", fromMs: now - HOUR, toMs: now, local: "only" });
+      const only = aggregateUsage(store, {
+        provider: "openai",
+        granularity: "hour",
+        fromMs: now - HOUR,
+        toMs: now,
+        local: "only",
+      });
       assert.equal(only.providers.openai.models[0].in, 9965);
       const all = aggregateUsage(store, { granularity: "day", fromMs: now - DAY, toMs: now });
       assert.equal(all.providers.openai.hasLocal, false); // local rows never enter vendor-served totals
@@ -891,7 +1007,7 @@ describe("GET /api/usage", () => {
         // The token lives ONLY in the URL fragment, so every same-origin
         // navigation must carry location.hash – dropping it 401s the whole
         // page (regression guard for the blank-drill-down bug).
-        assert.ok(shellText.includes("${location.hash}"), "card navigation must carry the fragment");
+        assert.ok(shellText.includes(`\${location.hash}`), "card navigation must carry the fragment");
         assert.ok(shellText.includes('"/" + location.hash'), "back link must carry the fragment");
         assert.equal((await fetch(`http://127.0.0.1:${handle.port}/provider/nope`)).status, 404);
 

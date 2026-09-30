@@ -16,15 +16,15 @@
 // failures land in the summary, watermarks only advance together with the
 // buckets they produced. The store never holds secrets.
 
-import { createHash } from "node:crypto";
 import { exec, execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   closeSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   readSync,
-  readdirSync,
   renameSync,
   rmSync,
   statSync,
@@ -588,11 +588,18 @@ export function aggregateUsage(
     seen.add(id);
     const hasLocal = mode !== "exclude" && !!(store.localDaily[id] || store.localHourly[id]);
     const daily =
-      mode === "only" ? (store.localDaily[id] ?? {}) : mergedSection(store.daily[id], mode === "include" ? store.localDaily[id] : undefined);
+      mode === "only"
+        ? (store.localDaily[id] ?? {})
+        : mergedSection(store.daily[id], mode === "include" ? store.localDaily[id] : undefined);
     // Day view aggregates VENDOR hourly only – the local hourly rows are
     // combined once, further down (merging them here AND there double counts).
     const hourlyVendor = store.hourly[id] ?? {};
-    const hourly = mode === "only" ? (store.localHourly[id] ?? {}) : mode === "include" ? mergedSection(store.hourly[id], store.localHourly[id]) : hourlyVendor;
+    const hourly =
+      mode === "only"
+        ? (store.localHourly[id] ?? {})
+        : mode === "include"
+          ? mergedSection(store.hourly[id], store.localHourly[id])
+          : hourlyVendor;
     const series: ProviderUsage["series"] = [];
     const byModel = new Map<
       string,
@@ -1286,7 +1293,6 @@ const OPENAI_LOCAL_TTL_MS = 60_000;
 // parser are wiped and re-read once (self-healing, no operator rebuild).
 const LOCAL_PARSER_VERSION = 3;
 const OPENAI_WHAM_TTL_MS = 6 * 3_600_000;
-const CLAUDE_LOCAL_TTL_MS = 60_000;
 const WHAM_URL = "https://chatgpt.com/backend-api/wham/usage/daily-token-usage-breakdown";
 
 interface BlRun {
@@ -1298,7 +1304,10 @@ interface BlRun {
 
 function runBl(literal: string, args: readonly string[], timeoutMs: number = BL_TIMEOUT_MS): Promise<BlRun> {
   return new Promise((resolve) => {
-    const finish = (err: (Error & { code?: string | number; killed?: boolean }) | null, stdout: string | Buffer): void => {
+    const finish = (
+      err: (Error & { code?: string | number; killed?: boolean }) | null,
+      stdout: string | Buffer,
+    ): void => {
       if (err) {
         const toolMissing = err.code === "ENOENT" || (process.platform === "win32" && err.code === 9009);
         resolve({ ok: false, stdout: String(stdout ?? ""), toolMissing, timedOut: err.killed === true });
@@ -1316,12 +1325,32 @@ function runBl(literal: string, args: readonly string[], timeoutMs: number = BL_
   });
 }
 
-async function blCall(api: string, reqDTO: unknown, site: string, region: string, deadline: number): Promise<unknown | null> {
+async function blCall(
+  api: string,
+  reqDTO: unknown,
+  site: string,
+  region: string,
+  deadline: number,
+): Promise<unknown | null> {
   if (Date.now() + 2_000 > deadline) return null;
   const data = JSON.stringify({ reqDTO });
   const literal = `bl console call --api ${api} --data "${data.replace(/"/g, '\\"')}" --console-site ${site} --console-region ${region} --output json`;
   if (process.env.SUBTRK_DEBUG_BL) console.error(`[bl] ${literal.slice(0, 240)}`);
-  const args = ["bl", "console", "call", "--api", api, "--data", data, "--console-site", site, "--console-region", region, "--output", "json"];
+  const args = [
+    "bl",
+    "console",
+    "call",
+    "--api",
+    api,
+    "--data",
+    data,
+    "--console-site",
+    site,
+    "--console-region",
+    region,
+    "--output",
+    "json",
+  ];
   const run = await runBl(literal, args);
   if (!run.ok) return null;
   return extractJson(run.stdout);
@@ -1424,8 +1453,10 @@ export function alibabaRowsFromSeries(
     if (output.size > 0) row.out = outV;
     if (totV !== undefined) row.tot = totV;
     const dk = dayKey(ts);
-    const bucket = (days[dk] ??= {});
-    const target = (bucket[MODEL] ??= {});
+    days[dk] ??= {};
+    const bucket = days[dk];
+    bucket[MODEL] ??= {};
+    const target = bucket[MODEL];
     for (const field of ["in", "cw", "cr", "out", "tot"] as const) {
       const v = row[field];
       if (v !== undefined) target[field] = (target[field] ?? 0) + v;
@@ -1435,10 +1466,7 @@ export function alibabaRowsFromSeries(
 }
 
 // Per-model: the same monitor call restricted to one slug.
-export function alibabaPerModelRows(
-  series: AlibabaSeries[],
-  model: string,
-): Record<string, Record<string, UsageRow>> {
+export function alibabaPerModelRows(series: AlibabaSeries[], model: string): Record<string, Record<string, UsageRow>> {
   const base = alibabaRowsFromSeries(series);
   const days: Record<string, Record<string, UsageRow>> = {};
   if (!base) return days;
@@ -1500,7 +1528,9 @@ async function harvestAlibaba(ctx: JobCtx): Promise<void> {
     const v2 = (d as { DataV2?: { data?: unknown } } | null | undefined)?.DataV2;
     if (v2 && typeof v2.data === "object" && v2.data !== null) d = v2.data;
     const arr = (d as { data?: unknown } | null | undefined)?.data;
-    return Array.isArray(arr) ? arr.filter((s): s is string => typeof s === "string" && /^[a-zA-Z0-9._-]+$/.test(s)).slice(0, 8) : [];
+    return Array.isArray(arr)
+      ? arr.filter((s): s is string => typeof s === "string" && /^[a-zA-Z0-9._-]+$/.test(s)).slice(0, 8)
+      : [];
   })();
   for (const slug of slugs) {
     const body = await blCall(
@@ -1514,7 +1544,8 @@ async function harvestAlibaba(ctx: JobCtx): Promise<void> {
     if (!parsed || "login" in parsed) continue;
     const rows = alibabaPerModelRows(parsed.series, slug);
     for (const [dk, models] of Object.entries(rows)) {
-      const bucket = (perModelDays[dk] ??= {});
+      perModelDays[dk] ??= {};
+      const bucket = perModelDays[dk];
       for (const [model, row] of Object.entries(models)) bucket[model] = { ...row };
     }
     modelsOk++;
@@ -1546,11 +1577,6 @@ async function harvestAlibaba(ctx: JobCtx): Promise<void> {
 
 // --- openai: local codex rollouts (tokens) + wham daily plan-% (server) ---
 
-interface OpenaiWhamDay {
-  date: string;
-  models: { model: string; credits: number }[];
-}
-
 // Pure: the wham daily breakdown -> {dayKey -> model -> pct} rows (credits is
 // a plan-usage percent, not dollars – informational, never summed or priced).
 export function extractOpenaiWham(body: unknown): Record<string, Record<string, UsageRow>> | null {
@@ -1562,13 +1588,15 @@ export function extractOpenaiWham(body: unknown): Record<string, Record<string, 
     if (typeof raw !== "object" || raw === null) continue;
     const d = raw as { date?: unknown; models?: unknown };
     if (typeof d.date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(d.date) || !Array.isArray(d.models)) continue;
-    const bucket = (days[d.date] ??= {});
+    days[d.date] ??= {};
+    const bucket = days[d.date];
     for (const m of d.models) {
       if (typeof m !== "object" || m === null) continue;
       const model = (m as { model?: unknown }).model;
       const credits = num((m as { credits?: unknown }).credits);
       if (typeof model !== "string" || model === "" || credits === null) continue;
-      const target = (bucket[model] ??= {});
+      bucket[model] ??= {};
+      const target = bucket[model];
       target.pct = Math.max(target.pct ?? 0, credits);
     }
   }
@@ -1620,7 +1648,8 @@ export function parseCodexRolloutLine(
   const dCached = Math.max(0, cached - (prev?.cached ?? 0));
   const dCw = Math.max(0, cw - (prev?.cw ?? 0));
   const dOut = Math.max(0, out - (prev?.out ?? 0));
-  if (dIn + dCached + dCw + dOut <= 0) return { ts, model: currentModel ?? "codex", row: {}, modelUpdate: null, nextState: next };
+  if (dIn + dCached + dCw + dOut <= 0)
+    return { ts, model: currentModel ?? "codex", row: {}, modelUpdate: null, nextState: next };
   const row: UsageRow = { in: Math.max(0, dIn - dCached), req: 1 };
   if (dCached > 0) row.cr = dCached;
   if (dCw > 0) row.cw = dCw;
@@ -1651,7 +1680,8 @@ export function parseClaudeTranscriptLine(
   if (!message || typeof message !== "object") return null;
   const model = message.model;
   const usage = message.usage as Record<string, unknown> | undefined;
-  if (typeof model !== "string" || model === "" || model === "<synthetic>" || !usage || typeof usage !== "object") return null;
+  if (typeof model !== "string" || model === "" || model === "<synthetic>" || !usage || typeof usage !== "object")
+    return null;
   const inTot = num(usage.input_tokens) ?? 0;
   const cr = num(usage.cache_read_input_tokens) ?? 0;
   const cw = num(usage.cache_creation_input_tokens) ?? 0;
@@ -1703,12 +1733,14 @@ async function harvestLocalJsonl(
   const sectionEmpty =
     Object.keys(ctx.store().localHourly[provider] ?? {}).length === 0 &&
     Object.keys(ctx.store().localDaily[provider] ?? {}).length === 0;
-  const staleParser = state?.pv !== LOCAL_PARSER_VERSION || (state?.files !== undefined && Object.keys(state.files).length > 0 && sectionEmpty);
+  const staleParser =
+    state?.pv !== LOCAL_PARSER_VERSION ||
+    (state?.files !== undefined && Object.keys(state.files).length > 0 && sectionEmpty);
   if (state?.at && !staleParser && ctx.now - state.at < OPENAI_LOCAL_TTL_MS) {
     ctx.summary.skipped.push(`${label}: fresh`);
     return true;
   }
-  let files: { path: string; mtime: number; size: number }[] = [];
+  const files: { path: string; mtime: number; size: number }[] = [];
   const walk = (dir: string, depth: number): void => {
     if (depth > 6) return;
     let entries: string[];
@@ -1719,7 +1751,7 @@ async function harvestLocalJsonl(
     }
     for (const f of entries) {
       const fp = join(dir, f);
-      let st;
+      let st: ReturnType<typeof statSync>;
       try {
         st = statSync(fp);
       } catch {
@@ -1740,7 +1772,7 @@ async function harvestLocalJsonl(
     return false;
   }
   files.sort((a, b) => b.mtime - a.mtime);
-  const watermarks = staleParser ? {} : state?.files ?? {};
+  const watermarks = staleParser ? {} : (state?.files ?? {});
   const rowsByHour = new Map<string, Map<string, UsageRow>>();
   const offsets: Record<string, LocalFileWatermark> = {};
   let processed = 0;
@@ -1799,7 +1831,13 @@ async function harvestLocalJsonl(
       models.set(parsed.model, target);
       rowsByHour.set(hk, models);
     }
-    offsets[file.path] = { off: start + consumed, size: file.size, last: parserState, model: currentModel, pv: LOCAL_PARSER_VERSION };
+    offsets[file.path] = {
+      off: start + consumed,
+      size: file.size,
+      last: parserState,
+      model: currentModel,
+      pv: LOCAL_PARSER_VERSION,
+    };
     processed++;
   }
   if (processed === 0 && rowsByHour.size === 0) {
@@ -1826,8 +1864,13 @@ async function harvestLocalJsonl(
       for (const [hk, models] of rowsByHour) {
         for (const [model, row] of models) addDeltaLocal(store, provider, hk, model, row);
       }
-      const s = ensure(store.state, provider) as { at?: number; pv?: number; files?: Record<string, LocalFileWatermark> };
-      const f = (s.files ??= {});
+      const s = ensure(store.state, provider) as {
+        at?: number;
+        pv?: number;
+        files?: Record<string, LocalFileWatermark>;
+      };
+      s.files ??= {};
+      const f = s.files;
       if (staleParser) {
         // Files not reprocessed this round (aborted budget) keep no old-parser
         // watermark - the next harvest re-reads them fully.
@@ -1868,7 +1911,8 @@ async function harvestOpenai(ctx: JobCtx): Promise<void> {
     ctx,
     "openai",
     join(homedir(), ".codex", "sessions"),
-    (line, currentModel, parserState) => parseCodexRolloutLine(line, currentModel, parserState as CodexParserState | null),
+    (line, currentModel, parserState) =>
+      parseCodexRolloutLine(line, currentModel, parserState as CodexParserState | null),
     "openai/local",
   );
   // 2. wham daily plan-% – server-side, cross-machine
@@ -1912,7 +1956,11 @@ async function harvestOpenai(ctx: JobCtx): Promise<void> {
   const url = `${WHAM_URL}?start_date=${iso(ctx.now - 30 * 86_400_000)}&end_date=${iso(ctx.now)}`;
   try {
     const res = await ctx.fetchImpl(url, {
-      headers: { Authorization: `Bearer ${token}`, "User-Agent": "codex-cli", ...(account ? { "chatgpt-account-id": account } : {}) },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "User-Agent": "codex-cli",
+        ...(account ? { "chatgpt-account-id": account } : {}),
+      },
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const body = (await res.json()) as unknown;
@@ -1946,7 +1994,9 @@ async function harvestClaudeLocal(ctx: JobCtx): Promise<void> {
   // Streaming partial writes duplicate message.id+requestId across lines and
   // resumed sessions replay them across files – dedupe on a bounded recent-id
   // set (first occurrence wins, the ccusage convention) persisted in state.
-  const state = ctx.store().state.claude as { ids?: string[]; pv?: number; files?: Record<string, unknown> } | undefined;
+  const state = ctx.store().state.claude as
+    | { ids?: string[]; pv?: number; files?: Record<string, unknown> }
+    | undefined;
   // Mirror the walker's staleness (parser bump OR watermarked-but-empty
   // section): a full re-read must start with an EMPTY dedupe set, or the
   // persisted "already seen" ids swallow every historical line.
@@ -1975,19 +2025,27 @@ async function harvestClaudeLocal(ctx: JobCtx): Promise<void> {
     "claude/local",
   );
   if (applied) {
-    mutateUsageStore(ctx.dir, (store) => {
-      const s = ensure(store.state, "claude") as { ids?: string[]; pv?: number };
-      if (newIds.length > 0) s.ids = [...newIds, ...(s.ids ?? [])].slice(0, 4000);
-      s.pv = LOCAL_PARSER_VERSION;
-    }, ctx.now);
+    mutateUsageStore(
+      ctx.dir,
+      (store) => {
+        const s = ensure(store.state, "claude") as { ids?: string[]; pv?: number };
+        if (newIds.length > 0) s.ids = [...newIds, ...(s.ids ?? [])].slice(0, 4000);
+        s.pv = LOCAL_PARSER_VERSION;
+      },
+      ctx.now,
+    );
   } else {
     // The walker's apply was lock-skipped: leave pv/at untouched so the NEXT
     // harvest still treats the section as stale and re-reads it fully.
     const ids = (ctx.store().state.claude as { ids?: string[] } | undefined)?.ids;
     if (ids) {
-      mutateUsageStore(ctx.dir, (store) => {
-        (ensure(store.state, "claude") as { ids?: string[] }).ids = ids;
-      }, ctx.now);
+      mutateUsageStore(
+        ctx.dir,
+        (store) => {
+          (ensure(store.state, "claude") as { ids?: string[] }).ids = ids;
+        },
+        ctx.now,
+      );
     }
   }
 }
