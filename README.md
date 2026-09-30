@@ -4,6 +4,7 @@
 [![npm](https://img.shields.io/npm/v/subtrk)](https://www.npmjs.com/package/subtrk)
 [![node](https://img.shields.io/node/v/subtrk)](https://github.com/ChaosChild/subtrk/blob/main/package.json)
 [![license](https://img.shields.io/github/license/ChaosChild/subtrk)](LICENSE)
+[![Socket Badge](https://badge.socket.dev/npm/package/subtrk)](https://socket.dev/npm/package/subtrk)
 
 **AI subscription quotas in one command.** `subtrk` reports remaining usage for
 the plans its contributors use – today Claude Pro, Z.ai GLM Coding Plan, Alibaba
@@ -44,9 +45,8 @@ subtrk serve
 Starts the dashboard on a random `127.0.0.1` port and prints the URL to open –
 one page for every tracked provider: usage bars per window (with ≥80%/≥95% warning
 levels), credit pools, a 7-day reset timeline, upcoming resets, and the same
-agent view the CLI prints, auto-refreshing on the cache heartbeat. Every card
-is clickable into that provider's usage page (see [Usage history](#usage-history)
-below), and the top row carries month-to-date token and value cards. A provider
+agent view the CLI prints, auto-refreshing on the cache heartbeat. The top row
+carries month-to-date token and value cards (local calendar month). A provider
 that reports several model classes (Google's Gemini and Claude/GPT, for example)
 renders one card per class. When a provider's error says it is refreshable, its
 card shows a **Refresh now** button that re-runs that provider's own refresh
@@ -56,6 +56,15 @@ itself, and cards drag individually into any order – all persist across
 restarts (saved to `~/.subtrk/config.json`, like `subtrk init`).
 
 ![Web console](docs/img/console.png)
+
+Every card is clickable into that provider's **usage page** – the headline
+addition of M3: a day/hour token chart with the provider's window-% history on
+the same time grid, a per-model table with API-equivalent costs labeled
+actual / est / blended, and the live windows, all served from the local usage
+store with no vendor calls while you browse (details in
+[Usage history](#usage-history)).
+
+![Usage page](docs/img/console-usage.png)
 
 The server is loopback-only, requires a per-run token (delivered in the printed
 URL), never emits CORS headers, and status stays read-only – toggles and card
@@ -207,14 +216,9 @@ subtrk usage --days 7 --hour     # last 7 days, hourly buckets
 subtrk usage --rebuild           # re-derive range-API history from the sources
 ```
 
-On the dashboard, the top row carries month-to-date token and value cards
-(local calendar month, this-machine harvests included and labeled), and every
-provider card is clickable into a usage page: a day/hour token chart with
-window-% history on the same time grid, a per-model table with costs labeled
-actual / est / blended, and the live windows – all served from the local
-store, no vendor calls while you browse.
-
-![Usage drill-down](docs/img/console-usage.png)
+On the dashboard (screenshot above), the month-to-date cards sum the local
+calendar month, this-machine harvests included and labeled, and every provider
+card opens its usage page.
 
 What you get per provider depends on what the vendor exposes: GLM, OpenRouter
 and Alibaba report token splits; OpenRouter costs are the vendor's own numbers
