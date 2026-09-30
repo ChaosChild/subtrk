@@ -457,6 +457,17 @@ async function usageCommand(args: UsageArgs, deps: CliDeps): Promise<number> {
       delete store.daily.openrouter;
       delete store.hourly.openrouter;
       delete store.state.openrouter;
+      // Local sections are re-derivable from the transcripts too – a rebuild
+      // recomputes them with the current parsers (repairs past double counts).
+      delete store.localHourly.claude;
+      delete store.localDaily.claude;
+      delete store.localHourly.openai;
+      delete store.localDaily.openai;
+      if (store.state.claude) {
+        delete (store.state.claude as { files?: unknown }).files;
+        delete (store.state.claude as { ids?: unknown }).ids;
+      }
+      if (store.state.openai) delete (store.state.openai as { files?: unknown }).files;
     });
     console.error("usage: rebuild queued – refetching glm + openrouter history");
   }

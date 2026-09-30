@@ -196,14 +196,17 @@ td.r, th.r { text-align: right; }
 .prov:hover { border-color: var(--border-strong); }
 .chartwrap { position: relative; padding: 30px 18px 8px; }
 .bars2 { position: relative; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; align-items: end; height: 170px; }
+.bars2.withaxis { border-left: 1px solid var(--border-strong); border-bottom: 1px solid var(--border-strong); }
+.gtick { position: absolute; left: 0; right: 0; border-top: 1px solid var(--border); z-index: 0; }
+.gtick span { position: absolute; left: 3px; top: -14px; font: 600 10px var(--mono); color: var(--text-3); }
+.bcol2 { position: relative; z-index: 1; }
+.vnow { position: absolute; right: 0; top: 0; bottom: 0; width: 1px; background: var(--accent); opacity: .55; }
 .bcol2 { position: relative; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; min-width: 0; }
 .bseg2 { width: 100%; max-width: 44px; margin: 0 auto; min-width: 0; border-radius: 2px 2px 0 0; }
 .b-in { background: color-mix(in srgb, var(--accent) 75%, transparent); }
 .b-cr { background: color-mix(in srgb, var(--ok) 65%, transparent); }
 .b-out { background: color-mix(in srgb, var(--warn) 75%, transparent); }
 .b-tot { background: color-mix(in srgb, var(--text-2) 45%, transparent); }
-.cmark { position: absolute; top: -8px; bottom: -2px; border-left: 2px dashed var(--crit); z-index: 1; }
-.cmark span { position: absolute; top: -14px; left: 4px; font: 600 10px var(--mono); color: var(--crit); white-space: nowrap; }
 .xlabs { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; margin-top: 6px; color: var(--text-3); font: 10.5px var(--mono); }
 .xlabs span { text-align: center; overflow: hidden; white-space: nowrap; }
 .legend2 { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-2); margin-top: 10px; }
@@ -223,9 +226,10 @@ td.r, th.r { text-align: right; }
 .kindchip.actual { color: var(--ok); background: var(--ok-soft); }
 .kindchip.estimate, .kindchip.blended { color: var(--warn); background: var(--warn-soft); }
 .empty { color: var(--text-3); font-size: 13px; padding: 22px 18px; text-align: center; }
-.pctstrip { display: grid; grid-template-columns: 130px 1fr; gap: 12px; align-items: start; margin-top: 10px; min-width: 0; }
-.pctk { font: 600 11px var(--mono); color: var(--text-2); background: var(--surface-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 7px; justify-self: start; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 130px; }
+.pctstrip { margin-top: 12px; min-width: 0; }
+.pctk { display: inline-block; font: 600 11px var(--mono); color: var(--text-2); background: var(--surface-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 7px; margin-bottom: 5px; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pctbars { min-width: 0; }
+#dvstats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .shimmer { position: relative; overflow: hidden; background: var(--surface-2); border-radius: 6px; }
 .shimmer::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%); background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--text-3) 18%, transparent), transparent); animation: sh 1.4s infinite; }
 @keyframes sh { 100% { transform: translateX(100%); } }
@@ -417,6 +421,9 @@ function readToken() {
 }
 
 const bannerEl = $("banner");
+// Surface script errors – a silent exception in a render path leaves the
+// page looking "stuck" with no clue why.
+window.addEventListener("error", e => showBanner("warn", `console error: ${e.message}`));
 function showBanner(kind, msg) { bannerEl.className = "banner " + kind; bannerEl.textContent = msg; bannerEl.hidden = false; }
 function clearBanner() { bannerEl.hidden = true; bannerEl.textContent = ""; }
 
@@ -698,7 +705,10 @@ async function refetchUsage() {
     if (!ures.ok) return;
     USAGE_PROV = await ures.json();
     renderProviderView();
-  } catch {}
+  } catch (e) {
+    // A swallowed render/fetch failure looks like a stuck skeleton – say so.
+    showBanner("warn", `usage panel error: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 async function refresh() {
@@ -763,90 +773,30 @@ async function refresh() {
 const shortBucket = t => (t.length === 10 ? t.slice(5) : `${t.slice(8, 10)} ${t.slice(11)}h`);
 
 function latestWindows(u) {
-  // "Now" view: only live generations (resetsAt in the future), one row per
-  // window generation (kimi's hours-remaining kind fragments one window into
-  // several kinds that share a reset time – collapse by r), freshest sample.
+  // "Now" view: one row per window kind-scope (freshest live sample), then
+  // collapse rows that share a reset instant (kimi's countdown kinds
+  // "336h".."1h" are ONE window) and google's rolling 5h resetsAt. n = the
+  // number of live samples behind the row.
   const nowMs = now();
-  const byR = new Map();
+  const byK = new Map();
   for (const s of (u && u.samples) || []) {
     if (new Date(s.r).getTime() <= nowMs) continue; // dead generation
-    const rKey = Math.round(new Date(s.r).getTime() / 300000); // collapse 5-min jitter (claude)
-    const cur = byR.get(rKey);
-    if (!cur) byR.set(rKey, { ...s, n: 1 });
+    const cur = byK.get(s.k);
+    if (!cur) byK.set(s.k, { ...s, n: 1 });
     else { cur.n++; if (s.t > cur.t) Object.assign(cur, { t: s.t, u: s.u, r: s.r, sf: s.sf, stale: s.stale }); }
+  }
+  const byR = new Map();
+  for (const s of byK.values()) {
+    const rKey = Math.round(new Date(s.r).getTime() / 1800000); // 30-min jitter collapse
+    const cur = byR.get(rKey);
+    if (!cur || s.t > cur.t) byR.set(rKey, s);
+    else cur.n += s.n;
   }
   return [...byR.values()].sort((a, b) => (a.k < b.k ? -1 : 1));
 }
 
-// Reset markers, per window kind: a kind's resetsAt JUMPING (>15 min, so
-// claude's ms-jitter and google's rolling windows stay quiet) marks a new
-// generation; the boundary sits at the first sample of the new generation.
-function resetMarks(u, series) {
-  if (!series.length) return "";
-  const byK = new Map();
-  for (const s of (u.samples || []).slice().sort((a, b) => a.t - b.t)) {
-    if (!byK.has(s.k)) byK.set(s.k, []);
-    byK.get(s.k).push(s);
-  }
-  const bounds = [];
-  for (const [, list] of byK) {
-    let prevR = null;
-    for (const s of list) {
-      if (prevR !== null && Math.abs(new Date(s.r) - new Date(prevR)) > 15 * 60000) bounds.push({ t: s.t, k: s.k });
-      prevR = s.r;
-    }
-  }
-  if (!bounds.length) return "";
-  // series[].t is a bucket KEY string ("2026-09-30" / "2026-09-30T13") –
-  // convert to epoch ms before arithmetic (string + number concatenates).
-  const keyMs = k => Date.parse(k.length === 10 ? k + "T00:00:00Z" : k + ":00:00Z");
-  const t0 = keyMs(series[0].t);
-  const t1 = keyMs(series[series.length - 1].t) + (DV.gran === "hour" ? 36e5 : 864e5);
-  return bounds
-    .filter(b => b.t >= t0 && b.t <= t1)
-    .map(b => {
-      const x = Math.min(99.5, Math.max(0, ((b.t - t0) / (t1 - t0)) * 100));
-      return `<div class="cmark" style="left:${x}%"><span>⟲ ${esc(b.k.split("·")[0])}</span></div>`;
-    })
-    .join("");
-}
-
-function chartHTML(u) {
-  const hasSeries = (u.series || []).some(b => b.in + b.cr + b.out + b.tot > 0);
-  const hasSamples = (u.samples || []).length > 0;
-  if (!hasSeries && !hasSamples) {
-    return `<div class="empty">no usage recorded yet – it accumulates from status calls, dashboard refreshes and subtrk usage</div>`;
-  }
-  let out = "";
-  if (hasSeries) {
-    const series = u.series.filter(b => b.in + b.cr + b.out + b.tot > 0);
-    const max = Math.max(1, ...series.map(b => Math.max(b.in + b.cr + b.out, b.tot)));
-    const marks = resetMarks(u, series);
-    const bars = series
-      .map(b => {
-        const seg = (v, cls) =>
-          v > 0 ? `<div class="bseg2 ${cls}" style="height:${Math.max(1.5, (v / max) * 100)}%" title="${esc(shortBucket(b.t))}: ${fmtTok(v)}"></div>` : "";
-        const inner = u.splitless ? seg(b.tot, "b-tot") : seg(b.in, "b-in") + seg(b.cr, "b-cr") + seg(b.out, "b-out");
-        return `<div class="bcol2">${inner}</div>`;
-      })
-      .join("");
-    const labs = series.map(b => `<span title="${esc(b.t)} (UTC day)">${esc(shortBucket(b.t))}</span>`).join("");
-    const legend = u.splitless
-      ? `<span><i class="b-tot"></i>tokens (vendor reports totals only)</span>`
-      : `<span><i class="b-in"></i>input (uncached)</span><span><i style="background:color-mix(in srgb, var(--ok) 65%, transparent)"></i>cached input</span><span><i style="background:color-mix(in srgb, var(--warn) 75%, transparent)"></i>output</span>`;
-    const total = u.splitless ? u.tot : u.in + u.cr + u.out;
-    const localNote = u.hasLocal ? `<span><b>this machine only</b> – transcripts from other devices aren't visible locally</span>` : "";
-    out += `<div class="chartwrap"><div class="bars2">${marks}${bars}</div><div class="xlabs">${labs}</div></div>
-      <div style="padding:0 18px 16px"><div class="legend2">${legend}${localNote}<span><i style="background:var(--crit);width:2px;height:12px;border-radius:1px"></i>window reset – usage between lines</span></div>
-      <div class="tots2"><span>buckets <b>${series.length}</b></span><span>range total <b>${fmtTok(total)} tok</b></span>${u.req ? `<span>requests <b>${fmtTok(u.req)}</b></span>` : ""}${u.usdActual + u.usdEst > 0 ? `<span>cost <b>$${(u.usdActual + u.usdEst).toFixed(2)}</b></span>` : ""}</div></div>`;
-  }
-  if (hasSamples) out += pctStripsHTML(u);
-  return out;
-}
-
-// Window-% history: one mini-strip per window kind (5h / 7d / scopes), bar
-// height = that kind's latest sampled % per bucket. This is the whole chart
-// for tokenless providers and a secondary view for token-ful ones.
+// UTC bucket keys (day "2026-09-30", hour "2026-09-30T13") - the store's
+// bucket grid is UTC; labels render from these.
 function utcDayKey(ms) {
   const d = new Date(ms);
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
@@ -855,35 +805,94 @@ function utcHourKey(ms) {
   const d = new Date(ms);
   return `${utcDayKey(ms)}T${pad(d.getUTCHours())}`;
 }
-function pctStripsHTML(u) {
-  const bucketMs = DV.gran === "hour" ? 36e5 : 864e5;
+
+// The shared x grid for every chart on the page: from/to come from the
+// server payload (echoed request range). Zero-usage buckets stay on the axis
+// - a quiet day is a day with no bars, not a missing day.
+function bucketKeysFor(u) {
+  const stepMs = DV.gran === "hour" ? 36e5 : 864e5;
+  const fromMs = Date.parse(u.from || "") || Date.now() - 30 * 864e5;
+  const toMs = Date.parse(u.to || "") || now();
+  const start = Math.floor(fromMs / stepMs) * stepMs;
+  const keys = [];
+  for (let t = start; t <= toMs && keys.length < 400; t += stepMs) keys.push(DV.gran === "hour" ? utcHourKey(t) : utcDayKey(t));
+  return { keys, stepMs };
+}
+
+function chartHTML(u) {
+  const hasSeries = (u.series || []).some(b => b.in + b.cr + b.out + b.tot > 0);
+  const hasSamples = (u.samples || []).length > 0;
+  if (!hasSeries && !hasSamples) {
+    return `<div class="empty">no usage recorded yet - it accumulates from status calls, dashboard refreshes and subtrk usage</div>`;
+  }
+  const { keys, stepMs } = bucketKeysFor(u);
+  const seriesMap = new Map((u.series || []).map(b => [b.t, b]));
+  const labelStep = Math.max(1, Math.ceil(keys.length / 12));
+  let out = "";
+  if (hasSeries) {
+    const max = Math.max(1, ...(u.series || []).map(b => Math.max(b.in + b.cr + b.out, b.tot)));
+    const bars = keys
+      .map(k => {
+        const b = seriesMap.get(k);
+        const seg = (v, cls) =>
+          v > 0 ? `<div class="bseg2 ${cls}" style="height:${Math.max(1.5, (v / max) * 100)}%" title="${esc(shortBucket(k))}: ${fmtTok(v)}"></div>` : "";
+        const inner = u.splitless ? seg(b ? b.tot : 0, "b-tot") : seg(b ? b.in : 0, "b-in") + seg(b ? b.cr : 0, "b-cr") + seg(b ? b.out : 0, "b-out");
+        return `<div class="bcol2">${inner}</div>`;
+      })
+      .join("");
+    const labs = keys.map((k, i) => `<span>${i % labelStep === 0 || i === keys.length - 1 ? esc(shortBucket(k)) : ""}</span>`).join("");
+    let ticks = [1, 0.5].map(f => `<div class="gtick" style="bottom:${f * 100}%"><span>${esc(fmtTok(max * f))}</span></div>`).join("");
+    ticks += `<div class="vnow"></div>`;
+    const legend = u.splitless
+      ? `<span><i class="b-tot"></i>tokens (vendor reports totals only)</span>`
+      : `<span><i class="b-in"></i>input (uncached)</span><span><i style="background:color-mix(in srgb, var(--ok) 65%, transparent)"></i>cached input</span><span><i style="background:color-mix(in srgb, var(--warn) 75%, transparent)"></i>output</span>`;
+    const localNote = u.hasLocal ? `<span><b>this machine only</b> - transcripts from other devices aren't visible locally</span>` : "";
+    const total = u.splitless ? u.tot : u.in + u.cr + u.out;
+    out += `<div class="chartwrap"><div class="bars2 withaxis">${ticks}${bars}</div><div class="xlabs">${labs}</div></div>
+      <div style="padding:0 18px 16px"><div class="legend2">${legend}${localNote}</div>
+      <div class="tots2"><span>buckets <b>${keys.length}</b></span><span>range total <b>${fmtTok(total)} tok</b></span>${u.req ? `<span>requests <b>${fmtTok(u.req)}</b></span>` : ""}${u.usdActual + u.usdEst > 0 ? `<span>cost <b>$${(u.usdActual + u.usdEst).toFixed(2)}</b></span>` : ""}</div></div>`;
+  }
+  if (hasSamples) out += pctStripsHTML(u, keys, stepMs, labelStep);
+  return out;
+}
+
+// Window-% history: one mini-strip per window kind on the SAME bucket grid as
+// the token chart, so the 29th here sits exactly under the 29th there. Bar
+// height = that kind's latest sampled % in the bucket; resets read as the
+// bar dropping to a new level between one bucket and the next.
+function pctStripsHTML(u, keys, stepMs, labelStep) {
   const byK = new Map();
   for (const s of u.samples || []) {
-    const b = Math.floor(s.t / bucketMs) * bucketMs;
-    const key = `${s.k}|${b}`;
-    const cur = byK.get(key);
-    if (!cur || s.t > cur.t) byK.set(key, s);
+    if (!byK.has(s.k)) byK.set(s.k, []);
+    byK.get(s.k).push(s);
   }
-  const kinds = [...new Set([...byK.values()].map(s => s.k))].sort();
+  const kinds = [...byK.keys()].sort();
   if (!kinds.length) return "";
   let html = "";
   for (const kind of kinds) {
-    const pts = [...byK.entries()].filter(([key]) => key.startsWith(kind + "|")).map(([key, s]) => ({ b: Number(key.split("|")[1]), s })).sort((a, b) => a.b - b.b).slice(-60);
-    if (!pts.length) continue;
-    const max = Math.max(...pts.map(p => p.s.u), 1);
-    const bars = pts
-      .map(p => {
-        const col = p.s.u >= 95 ? "var(--crit)" : p.s.u >= 80 ? "var(--warn)" : "color-mix(in srgb, var(--ok) 65%, transparent)";
-        const style = p.s.stale ? `background:transparent;border:1.5px dashed ${col};height:${Math.max(2, p.s.u)}%` : `background:${col};height:${Math.max(2, p.s.u)}%`;
-        return `<div class="bcol2"><div class="bseg2" style="${style}" title="${esc(p.s.k)} ${p.s.u.toFixed(0)}% used${p.s.stale ? " (stale)" : ""} · ${esc(new Date(p.s.t).toISOString().slice(0, 10))}"></div></div>`;
+    const list = byK.get(kind);
+    const bars = keys
+      .map(k => {
+        const bStart = Date.parse(k.length === 10 ? k + "T00:00:00Z" : k + ":00:00Z");
+        let best = null;
+        for (const s of list) {
+          const dt = s.t - bStart;
+          if (dt >= 0 && dt < stepMs && (!best || s.t > best.t)) best = s;
+        }
+        if (!best) return `<div class="bcol2"></div>`;
+        const col = best.u >= 95 ? "var(--crit)" : best.u >= 80 ? "var(--warn)" : "color-mix(in srgb, var(--ok) 65%, transparent)";
+        const style = best.stale
+          ? `border:1.5px dashed ${col};height:${Math.max(2, best.u)}%`
+          : `background:${col};height:${Math.max(2, best.u)}%`;
+        return `<div class="bcol2"><div class="bseg2" style="${style}" title="${esc(best.k)} ${best.u.toFixed(0)}% used${best.stale ? " (stale)" : ""}"></div></div>`;
       })
       .join("");
-    const labs = pts.map(p => `<span>${esc(DV.gran === "hour" ? shortBucket(utcHourKey(p.b)) : utcDayKey(p.b).slice(5))}</span>`).join("");
-    html += `<div class="pctstrip"><div class="pctk">${esc(kind)}</div>
-      <div class="pctbars"><div class="bars2" style="height:64px">${bars}</div><div class="xlabs" style="height:14px">${labs}</div></div></div>`;
+    const labs = keys.map((k, i) => `<span>${i % labelStep === 0 || i === keys.length - 1 ? esc(shortBucket(k)) : ""}</span>`).join("");
+    let ticks = [1, 0.5, 0].map(f => `<div class="gtick" style="bottom:${f * 100}%"><span>${Math.round(f * 100)}%</span></div>`).join("");
+    ticks += `<div class="vnow"></div>`;
+    html += `<div class="pctstrip"><div class="pctk">${esc(kind)}</div><div class="pctbars"><div class="bars2 withaxis" style="height:64px">${ticks}${bars}</div><div class="xlabs" style="height:14px">${labs}</div></div></div>`;
   }
-  const name = esc(META[PROVIDER_VIEW] ? META[PROVIDER_VIEW].name : PROVIDER_VIEW);
-  return `<div style="padding:4px 18px 16px"><div class="legend2"><span>window % history · bar height = used % per ${DV.gran === "hour" ? "hour" : "day"} · dashed = sampled via stale cache</span></div>${html}</div>`;
+  return `<div style="padding:4px 18px 16px"><div class="legend2"><span>window % history - bar height = used % per ${DV.gran === "hour" ? "hour" : "day"} (UTC) - dashed = sampled via stale cache</span></div>${html}</div>`;
 }
 
 function renderModelTable(u) {
@@ -982,6 +991,12 @@ function renderProviderView() {
   $("dvstats").innerHTML = stats
     .map(s => `<div class="card stat"><div class="label">${s.label}</div><div class="value num">${s.value}</div><div class="sub">${s.sub}</div></div>`)
     .join("");
+  $("dvhint").textContent =
+    u.in + u.cr + u.out + u.tot > 0
+      ? DV.gran === "hour"
+        ? "stacked tokens per hour (UTC) · window % history on the same grid below"
+        : "stacked tokens per day (UTC) · window % history on the same grid below"
+      : "window % history per bucket (UTC) · resets read as the level dropping to a new plateau";
   $("dvchart").innerHTML = chartHTML(u);
   renderModelTable(u);
   renderWindowTable(u);

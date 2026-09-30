@@ -83,12 +83,15 @@ export function parseOpenaiAuth(fileObj: unknown): OpenaiAuth | null {
 
 // Pure: limit_window_seconds -> window kind. The payload is self-describing
 // (free = monthly, paid = 5h + weekly); canonical lengths get exact names,
-// then whole days/hours, else a rounded hour estimate.
+// then whole days/hours, else a rounded hour estimate. Kimi's free plan resets
+// on a two-week cycle whose remaining seconds count down hourly – name that
+// window 14d instead of the meaningless "336h".."1h" countdown.
 export function windowKindFromSeconds(seconds: number): string {
   if (seconds === 18_000) return "5h";
   if (seconds === 604_800) return "7d";
   if (seconds === 2_592_000) return "30d";
   if (Number.isFinite(seconds) && seconds > 0) {
+    if (seconds > 13 * 86_400 && seconds <= 15 * 86_400) return "14d";
     if (seconds % 86_400 === 0) return `${seconds / 86_400}d`;
     if (seconds % 3_600 === 0) return `${seconds / 3_600}h`;
   }

@@ -402,11 +402,21 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
 
 // CLI entry: listen, print the one URL – the token rides the fragment and is
 // never written anywhere else – then sit quiet until SIGINT/SIGTERM (exit 0).
+// While running, an hourly sampler probes + harvests even when nobody is
+// watching, so the window-% history fills hourly instead of only when a
+// status call happens.
 export async function runServe(deps: ServeDeps = {}): Promise<void> {
   const h = await startConsole(deps);
   console.log(`http://127.0.0.1:${h.port}/#${h.token}`);
   console.log("token auth required – API calls need Authorization: Bearer <token>");
+  const sampler = setInterval(() => {
+    void collectStatus({ subtrkDir: deps.subtrkDir, providers: deps.providers })
+      .then((c) => harvestUsage(c.out.providers, { subtrkDir: deps.subtrkDir, budgetMs: 30_000 }))
+      .catch(() => {});
+  }, 3_600_000);
+  sampler.unref();
   const stop = (): void => {
+    clearInterval(sampler);
     const force = setTimeout(() => process.exit(0), 1000);
     void h.close().finally(() => {
       clearTimeout(force);

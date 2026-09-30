@@ -16,6 +16,7 @@
 // failures land in the summary, watermarks only advance together with the
 // buckets they produced. The store never holds secrets.
 
+import { createHash } from "node:crypto";
 import { exec, execFile } from "node:child_process";
 import {
   closeSync,
@@ -588,8 +589,10 @@ export function aggregateUsage(
     const hasLocal = mode !== "exclude" && !!(store.localDaily[id] || store.localHourly[id]);
     const daily =
       mode === "only" ? (store.localDaily[id] ?? {}) : mergedSection(store.daily[id], mode === "include" ? store.localDaily[id] : undefined);
-    const hourly =
-      mode === "only" ? (store.localHourly[id] ?? {}) : mergedSection(store.hourly[id], mode === "include" ? store.localHourly[id] : undefined);
+    // Day view aggregates VENDOR hourly only – the local hourly rows are
+    // combined once, further down (merging them here AND there double counts).
+    const hourlyVendor = store.hourly[id] ?? {};
+    const hourly = mode === "only" ? (store.localHourly[id] ?? {}) : mode === "include" ? mergedSection(store.hourly[id], store.localHourly[id]) : hourlyVendor;
     const series: ProviderUsage["series"] = [];
     const byModel = new Map<
       string,
@@ -674,7 +677,7 @@ export function aggregateUsage(
           ? daily[dk]
           : (() => {
               const agg: Record<string, UsageRow> = {};
-              for (const hk of Object.keys(hourly)) {
+              for (const hk of Object.keys(hourlyVendor)) {
                 if (!hk.startsWith(dk)) continue;
                 for (const [model, row] of Object.entries(hourly[hk])) {
                   const target = ensure(agg, model);
@@ -1569,14 +1572,24 @@ export function extractOpenaiWham(body: unknown): Record<string, Record<string, 
   return days;
 }
 
-// Pure: one codex rollout line -> a token delta row. Codex emits BOTH a
-// cumulative total_token_usage and a per-event last_token_usage; the delta
-// for our buckets is last_token_usage. Model attribution rides the nearest
+// Pure: one codex rollout line -> a token DELTA row. Codex re-emits
+// token_count events with a CUMULATIVE total_token_usage (last_token_usage
+// repeats the same response on every status update, so summing it triple
+// counts) – the delta is this snapshot minus the previous one, carried across
+// harvests in the file watermark. Model attribution rides the nearest
 // preceding turn_context line.
+export interface CodexParserState {
+  input: number;
+  cached: number;
+  cw: number;
+  out: number;
+}
+
 export function parseCodexRolloutLine(
   line: string,
   currentModel: string | null,
-): { ts: number; model: string; row: UsageRow; modelUpdate: string | null } | null {
+  prev: CodexParserState | null,
+): { ts: number; model: string; row: UsageRow; modelUpdate: string | null; nextState: CodexParserState } | null {
   let o: unknown;
   try {
     o = JSON.parse(line);
@@ -1586,11 +1599,13 @@ export function parseCodexRolloutLine(
   if (typeof o !== "object" || o === null) return null;
   const rec = o as { type?: unknown; timestamp?: unknown; payload?: Record<string, unknown> | null };
   if (rec.type === "turn_context" && rec.payload && typeof rec.payload.model === "string" && rec.payload.model) {
-    return { ts: 0, model: "", row: {}, modelUpdate: rec.payload.model };
+    return prev
+      ? { ts: 0, model: "", row: {}, modelUpdate: rec.payload.model, nextState: prev }
+      : null;
   }
   if (rec.type !== "event_msg" || !rec.payload || rec.payload.type !== "token_count") return null;
-  const info = rec.payload.info as { last_token_usage?: Record<string, unknown> } | undefined;
-  const u = info?.last_token_usage;
+  const info = rec.payload.info as { total_token_usage?: Record<string, unknown> } | undefined;
+  const u = info?.total_token_usage;
   if (!u || typeof u !== "object") return null;
   const inTot = num(u.input_tokens);
   const cached = num(u.cached_input_tokens) ?? 0;
@@ -1599,19 +1614,28 @@ export function parseCodexRolloutLine(
   if (inTot === null || out === null) return null;
   const ts = typeof rec.timestamp === "string" ? Date.parse(rec.timestamp) : NaN;
   if (!Number.isFinite(ts)) return null;
-  const row: UsageRow = { in: Math.max(0, inTot - cached), req: 1 };
-  if (cached > 0) row.cr = cached;
-  if (cw > 0) row.cw = cw;
-  if (out > 0) row.out = out;
-  return { ts, model: currentModel ?? "codex", row, modelUpdate: null };
+  const next: CodexParserState = { input: inTot, cached, cw, out };
+  const dIn = Math.max(0, inTot - (prev?.input ?? 0));
+  const dCached = Math.max(0, cached - (prev?.cached ?? 0));
+  const dCw = Math.max(0, cw - (prev?.cw ?? 0));
+  const dOut = Math.max(0, out - (prev?.out ?? 0));
+  if (dIn + dCached + dCw + dOut <= 0) return { ts, model: currentModel ?? "codex", row: {}, modelUpdate: null, nextState: next };
+  const row: UsageRow = { in: Math.max(0, dIn - dCached), req: 1 };
+  if (dCached > 0) row.cr = dCached;
+  if (dCw > 0) row.cw = dCw;
+  if (dOut > 0) row.out = dOut;
+  return { ts, model: currentModel ?? "codex", row, modelUpdate: null, nextState: next };
 }
 
 // Pure: one claude transcript line -> a token row (ccusage rules: skip
 // synthetic/error lines; input/cache/cache-read/output from message.usage).
+// Streaming partial writes duplicate the same message.id+requestId with
+// growing usage – the caller dedupes on `dedupeKey`, keeping the FIRST
+// occurrence (the ccusage convention).
 export function parseClaudeTranscriptLine(
   line: string,
   _currentModel: string | null,
-): { ts: number; model: string; row: UsageRow; modelUpdate: string | null } | null {
+): { ts: number; model: string; row: UsageRow; dedupeKey: string | null } | null {
   if (!line.includes('"assistant"') || !line.includes('"usage"')) return null; // cheap prefilter
   let o: unknown;
   try {
@@ -1638,22 +1662,35 @@ export function parseClaudeTranscriptLine(
   if (cr > 0) row.cr = cr;
   if (cw > 0) row.cw = cw;
   if (out > 0) row.out = out;
-  return { ts, model, row, modelUpdate: null };
+  const mid = typeof message.id === "string" ? message.id : "";
+  const rid = typeof rec.requestId === "string" ? rec.requestId : "";
+  const dedupeKey = mid || rid ? createHash("sha256").update(`${mid}|${rid}`).digest("hex").slice(0, 12) : null;
+  return { ts, model, row, dedupeKey };
 }
 
-// Shared incremental JSONL walker: per-file byte offsets in
+// Shared incremental JSONL walker: per-file byte offsets + parser state in
 // state[provider].files; truncated files restart from zero (rare, documented
 // double-count risk – subtrk usage --rebuild is the repair). Processes files
 // newest-first until the budget runs out; offsets advance only for files that
 // were fully processed through their last complete line.
+interface LocalFileWatermark {
+  off: number;
+  size: number;
+  last?: unknown; // parser state carried across harvests (codex cumulative totals)
+}
+
 async function harvestLocalJsonl(
   ctx: JobCtx,
   provider: "claude" | "openai",
   root: string,
-  parseLine: (line: string, currentModel: string | null) => { ts: number; model: string; row: UsageRow; modelUpdate: string | null } | null,
+  parseLine: (
+    line: string,
+    currentModel: string | null,
+    parserState: unknown,
+  ) => { ts?: number; model?: string; row?: UsageRow; modelUpdate?: string | null; nextState?: unknown } | null,
   label: string,
 ): Promise<void> {
-  const state = ctx.store().state[provider] as { at?: number; files?: Record<string, { off: number; size: number }> } | undefined;
+  const state = ctx.store().state[provider] as { at?: number; files?: Record<string, LocalFileWatermark> } | undefined;
   if (state?.at && ctx.now - state.at < OPENAI_LOCAL_TTL_MS) {
     ctx.summary.skipped.push(`${label}: fresh`);
     return;
@@ -1692,7 +1729,7 @@ async function harvestLocalJsonl(
   files.sort((a, b) => b.mtime - a.mtime);
   const watermarks = state?.files ?? {};
   const rowsByHour = new Map<string, Map<string, UsageRow>>();
-  const offsets: Record<string, { off: number; size: number }> = {};
+  const offsets: Record<string, LocalFileWatermark> = {};
   let processed = 0;
   for (const file of files) {
     if (Date.now() + 1_500 > ctx.deadline) {
@@ -1721,6 +1758,7 @@ async function harvestLocalJsonl(
       continue; // file vanished mid-harvest
     }
     let currentModel: string | null = null;
+    let parserState: unknown = wm?.last ?? null; // codex: cumulative totals across runs
     let consumed = 0;
     const lines = text.split("\n");
     for (let i = 0; i < lines.length; i++) {
@@ -1729,12 +1767,15 @@ async function harvestLocalJsonl(
       if (isLast && line !== "") break; // partial line – re-read next round
       consumed += Buffer.byteLength(line, "utf8") + 1;
       if (line === "") continue;
-      const parsed = parseLine(line, currentModel);
+      const parsed = parseLine(line, currentModel, parserState);
       if (parsed?.modelUpdate) {
         currentModel = parsed.modelUpdate;
+        if (parsed.nextState !== undefined) parserState = parsed.nextState;
         continue;
       }
       if (!parsed) continue;
+      if (parsed.nextState !== undefined) parserState = parsed.nextState;
+      if (!parsed.row || parsed.ts === undefined || !parsed.model) continue;
       const hk = hourKey(parsed.ts);
       const models = rowsByHour.get(hk) ?? new Map<string, UsageRow>();
       const target = models.get(parsed.model) ?? {};
@@ -1745,7 +1786,7 @@ async function harvestLocalJsonl(
       models.set(parsed.model, target);
       rowsByHour.set(hk, models);
     }
-    offsets[file.path] = { off: start + consumed, size: file.size };
+    offsets[file.path] = { off: start + consumed, size: file.size, last: parserState };
     processed++;
   }
   if (processed === 0 && rowsByHour.size === 0) {
@@ -1788,7 +1829,7 @@ async function harvestOpenai(ctx: JobCtx): Promise<void> {
     ctx,
     "openai",
     join(homedir(), ".codex", "sessions"),
-    parseCodexRolloutLine,
+    (line, currentModel, parserState) => parseCodexRolloutLine(line, currentModel, parserState as CodexParserState | null),
     "openai/local",
   );
   // 2. wham daily plan-% – server-side, cross-machine
@@ -1863,13 +1904,34 @@ async function harvestOpenai(ctx: JobCtx): Promise<void> {
 }
 
 async function harvestClaudeLocal(ctx: JobCtx): Promise<void> {
+  // Streaming partial writes duplicate message.id+requestId across lines and
+  // resumed sessions replay them across files – dedupe on a bounded recent-id
+  // set (first occurrence wins, the ccusage convention) persisted in state.
+  const state = ctx.store().state.claude as { ids?: string[] } | undefined;
+  const seen = new Set((state?.ids ?? []).slice(-4000));
+  const newIds: string[] = [];
   await harvestLocalJsonl(
     ctx,
     "claude",
     join(homedir(), ".claude", "projects"),
-    parseClaudeTranscriptLine,
+    (line, currentModel, parserState) => {
+      const r = parseClaudeTranscriptLine(line, currentModel);
+      if (!r) return null;
+      if (r.dedupeKey) {
+        if (seen.has(r.dedupeKey)) return null;
+        seen.add(r.dedupeKey);
+        newIds.push(r.dedupeKey);
+      }
+      return { ts: r.ts, model: r.model, row: r.row, modelUpdate: null, nextState: parserState };
+    },
     "claude/local",
   );
+  if (newIds.length > 0) {
+    mutateUsageStore(ctx.dir, (store) => {
+      const s = ensure(store.state, "claude") as { ids?: string[] };
+      s.ids = [...newIds, ...(s.ids ?? [])].slice(0, 4000);
+    }, ctx.now);
+  }
 }
 
 // --- entry point ---

@@ -715,22 +715,31 @@ describe("alibaba/openai/local parsers", () => {
 
   it("parses codex rollout token events with turn_context model attribution", () => {
     const line = JSON.stringify({ timestamp: "2026-09-29T15:53:08Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 30189, cached_input_tokens: 20224, output_tokens: 13 }, last_token_usage: { input_tokens: 30189, cached_input_tokens: 20224, cache_write_input_tokens: 0, output_tokens: 13 } } } });
-    const parsed = parseCodexRolloutLine(line, null);
+    const parsed = parseCodexRolloutLine(line, null, null);
     assert.ok(parsed);
     assert.equal(parsed.model, "codex"); // no turn_context yet
     assert.equal(parsed.row.in, 30189 - 20224);
     assert.equal(parsed.row.cr, 20224);
     assert.equal(parsed.row.out, 13);
-    const turn = parseCodexRolloutLine(JSON.stringify({ timestamp: "t", type: "turn_context", payload: { model: "gpt-6-luna" } }), null);
+    // a re-emitted snapshot with the SAME cumulative totals yields no delta
+    const repeat = parseCodexRolloutLine(line, null, parsed.nextState);
+    assert.equal(repeat?.row.in, undefined);
+    // a larger cumulative snapshot deltas only the growth
+    const grown = parseCodexRolloutLine(JSON.stringify({ timestamp: "2026-09-29T16:00:00Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { input_tokens: 31189, cached_input_tokens: 21224, output_tokens: 23 } } } }), null, parsed.nextState);
+    assert.equal(grown?.row.in, 1000 - 1000 + 0 + 0); // input grew 1000, cached grew 1000 -> uncached delta 0
+    assert.equal(grown?.row.cr, 1000);
+    assert.equal(grown?.row.out, 10);
+    const turn = parseCodexRolloutLine(JSON.stringify({ timestamp: "t", type: "turn_context", payload: { model: "gpt-6-luna" } }), null, { input: 1, cached: 0, cw: 0, out: 0 });
     assert.equal(turn?.modelUpdate, "gpt-6-luna");
-    const withModel = parseCodexRolloutLine(line, "gpt-6-luna");
+    const withModel = parseCodexRolloutLine(line, "gpt-6-luna", null);
     assert.equal(withModel?.model, "gpt-6-luna");
   });
 
   it("parses claude transcript lines with ccusage rules", () => {
-    const line = JSON.stringify({ type: "assistant", timestamp: "2026-09-29T12:00:00Z", isApiErrorMessage: false, message: { model: "claude-opus-5-5", usage: { input_tokens: 100, cache_read_input_tokens: 900, cache_creation_input_tokens: 50, output_tokens: 10 } } });
+    const line = JSON.stringify({ type: "assistant", timestamp: "2026-09-29T12:00:00Z", isApiErrorMessage: false, requestId: "req_1", message: { model: "claude-opus-5-5", id: "msg_1", usage: { input_tokens: 100, cache_read_input_tokens: 900, cache_creation_input_tokens: 50, output_tokens: 10 } } });
     const parsed = parseClaudeTranscriptLine(line, null);
     assert.ok(parsed);
+    assert.ok(parsed.dedupeKey);
     assert.equal(parsed.model, "claude-opus-5-5");
     assert.equal(parsed.row.cr, 900);
     assert.equal(parseClaudeTranscriptLine(JSON.stringify({ type: "assistant", timestamp: "t", message: { model: "<synthetic>", usage: { input_tokens: 5 } } }), null), null);
