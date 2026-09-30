@@ -5,7 +5,7 @@
 // /api/usage route, and the no-secrets guarantee. No network: fetch is always
 // injected; all paths live in temp dirs.
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -27,6 +27,7 @@ import {
   harvestUsage,
   hourKey,
   hourKeyToMs,
+  mergeAlibabaDays,
   mutateUsageStore,
   parseAlibabaMonitor,
   parseClaudeTranscriptLine,
@@ -630,6 +631,75 @@ describe("usage harvest", () => {
     }
   });
 
+  it("adds local transcript deltas exactly once across incremental harvests (regression: double addDeltaLocal)", async () => {
+    // Hermetic fake HOME so the claude local harvest reads our transcript and
+    // nothing real; fetch stubs + tiny budget keep every network job inert.
+    const home = tempDir();
+    const dir = tempDir();
+    const proj = join(home, ".claude", "projects", "p1");
+    mkdirSync(proj, { recursive: true });
+    const transcript = join(proj, "s.jsonl");
+    const msg = (id: string, inTok: number, outTok: number) =>
+      `${JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-09-29T12:00:00Z",
+        requestId: `req_${id}`,
+        isApiErrorMessage: false,
+        message: {
+          model: "claude-opus-5-5",
+          id,
+          usage: {
+            input_tokens: inTok,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            output_tokens: outTok,
+          },
+        },
+      })}\n`;
+    writeFileSync(transcript, msg("m1", 100, 10) + msg("m2", 200, 20));
+    const prevProfile = process.env.USERPROFILE;
+    const prevHome = process.env.HOME;
+    const stub = jsonFetch(() => ({}));
+    try {
+      process.env.USERPROFILE = home;
+      process.env.HOME = home;
+      const base = Date.now();
+      await harvestUsage([], {
+        subtrkDir: dir,
+        budgetMs: 4_000, // above the walker's own reserve, or it aborts unread
+        fetchImpl: stub,
+        envPath: join(dir, "no.env"),
+        now: base,
+      });
+      const hk = hourKey(Date.parse("2026-09-29T12:00:00Z"));
+      const first = readUsageStore(dir).localHourly.claude?.[hk]?.["claude-opus-5-5"];
+      assert.ok(first, "first harvest wrote rows");
+      assert.equal(first.in, 300);
+      assert.equal(first.out, 30);
+      // Append one more message; the next INCREMENTAL harvest must add the
+      // delta exactly once. (The bug: rows were added before AND after the
+      // stale-rebuild wipe – on non-stale rounds both adds survived.)
+      appendFileSync(transcript, msg("m3", 1000, 100));
+      await harvestUsage([], {
+        subtrkDir: dir,
+        budgetMs: 4_000,
+        fetchImpl: stub,
+        envPath: join(dir, "no.env"),
+        now: base + 120_000, // past the local TTL so the harvest runs
+      });
+      const second = readUsageStore(dir).localHourly.claude?.[hk]?.["claude-opus-5-5"];
+      assert.equal(second.in, 1300); // pre-fix: 2300 – the delta counted twice
+      assert.equal(second.out, 130);
+    } finally {
+      if (prevProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = prevProfile;
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+      cleanup(home)();
+      cleanup(dir)();
+    }
+  });
+
   it("records samples from probe results", async () => {
     const dir = tempDir();
     try {
@@ -741,6 +811,28 @@ describe("alibaba/openai/local parsers", () => {
       { login: true },
     );
     assert.equal(parseAlibabaMonitor({ data: {} }), null);
+  });
+
+  it("keeps existing per-model rows when the per-model fetch degrades (regression: silent '(all models)' wipe)", () => {
+    const AGG = "(all models)";
+    const total = { "2026-09-29": { [AGG]: { in: 100, out: 10 } }, "2026-09-30": { [AGG]: { in: 50, out: 5 } } };
+    const existing = { "2026-09-29": { "qwen3.7-plus": { in: 90, out: 9 }, "qwen3.8-max": { in: 10, out: 1 } } };
+    // Degraded round: aggregate fetched, per-model empty.
+    const kept = mergeAlibabaDays(total, {}, existing);
+    assert.deepEqual(kept["2026-09-29"], existing["2026-09-29"]); // NOT wiped to the aggregate
+    assert.deepEqual(kept["2026-09-30"], total["2026-09-30"]); // fresh day, no history -> aggregate fallback
+    // A healthy round (complete) replaces wholesale: fresh per-model wins, no aggregate mixed in.
+    const fresh = { "2026-09-29": { "qwen3.7-plus": { in: 95, out: 9 } } };
+    const replaced = mergeAlibabaDays(total, fresh, existing, true);
+    assert.deepEqual(replaced["2026-09-29"], fresh["2026-09-29"]);
+    assert.ok(!(AGG in replaced["2026-09-29"]));
+    // Partial slug failure: fresh slug overwrites its own row, failed slug keeps existing.
+    const partial = { "2026-09-29": { "qwen3.7-plus": { in: 95, out: 9 } } };
+    const union = mergeAlibabaDays(total, partial, existing);
+    assert.deepEqual(union["2026-09-29"], { "qwen3.7-plus": { in: 95, out: 9 }, "qwen3.8-max": { in: 10, out: 1 } });
+    // An aggregate-only history stays aggregate on a degraded round (no stale mix).
+    const aggOnly = mergeAlibabaDays(total, {}, { "2026-09-29": { [AGG]: { in: 1, out: 1 } } });
+    assert.deepEqual(aggOnly["2026-09-29"], total["2026-09-29"]);
   });
 
   it("parses openai wham daily rows as informational pct", () => {

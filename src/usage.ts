@@ -1288,10 +1288,15 @@ export function extractOrPricing(body: unknown): Record<string, ModelPrice> | nu
 
 const BL_TIMEOUT_MS = 12_000;
 const ALIBABA_TTL_MS = 6 * 3_600_000;
+// Pseudo-model key for aggregate (not per-model) rows – unpriceable, shown as-is.
+const ALIBABA_ALL_MODELS = "(all models)";
 const OPENAI_LOCAL_TTL_MS = 60_000;
 // Bump when local-parser semantics change: stores harvested by an older
 // parser are wiped and re-read once (self-healing, no operator rebuild).
-const LOCAL_PARSER_VERSION = 3;
+// v4: incremental offsets over-counted the trailing newline byte (first
+// appended line per round was lost) and stale rounds double-added their rows –
+// stores from older parsers are wiped and re-derived once, exactly.
+const LOCAL_PARSER_VERSION = 4;
 const OPENAI_WHAM_TTL_MS = 6 * 3_600_000;
 const WHAM_URL = "https://chatgpt.com/backend-api/wham/usage/daily-token-usage-breakdown";
 
@@ -1441,7 +1446,7 @@ export function alibabaRowsFromSeries(
   if (input.size === 0 && total.size === 0) return null;
   const stamps = new Set<number>([...input.keys(), ...total.keys()]);
   const days: Record<string, Record<string, UsageRow>> = {};
-  const MODEL = "(all models)";
+  const MODEL = ALIBABA_ALL_MODELS;
   for (const ts of stamps) {
     const inTot = input.get(ts) ?? 0;
     const cachedV = cached.get(ts) ?? 0;
@@ -1471,9 +1476,43 @@ export function alibabaPerModelRows(series: AlibabaSeries[], model: string): Rec
   const days: Record<string, Record<string, UsageRow>> = {};
   if (!base) return days;
   for (const [dk, rows] of Object.entries(base.days)) {
-    days[dk] = { [model]: rows["(all models)"] ?? {} };
+    days[dk] = { [model]: rows[ALIBABA_ALL_MODELS] ?? {} };
   }
   return days;
+}
+
+// Pure: combine a fresh aggregate fetch, fresh per-model fetches and the
+// store's existing days into the replace payload. A COMPLETE per-model round
+// (every slug fetched) replaces its days wholesale – vendor truth. A degraded
+// round (some or all slug fetches failed, or the model list was unavailable)
+// overlays fresh slugs on the existing attributed rows instead – a slow bl
+// round must never wipe good history back to the unlabeled aggregate. Only a
+// day with neither fresh nor existing per-model rows gets the aggregate row,
+// which is never mixed with per-model rows on one day (same traffic).
+export function mergeAlibabaDays(
+  totalDays: Record<string, Record<string, UsageRow>>,
+  perModelDays: Record<string, Record<string, UsageRow>>,
+  existingDays: Record<string, Record<string, UsageRow>>,
+  perModelComplete = false,
+): Record<string, Record<string, UsageRow>> {
+  const merged: Record<string, Record<string, UsageRow>> = {};
+  for (const [dk, rows] of Object.entries(totalDays)) {
+    const fresh = perModelDays[dk];
+    const day: Record<string, UsageRow> = {};
+    if (!(perModelComplete && fresh)) {
+      const ex = existingDays[dk];
+      if (ex) {
+        for (const [m, r] of Object.entries(ex)) {
+          if (m !== ALIBABA_ALL_MODELS) day[m] = r;
+        }
+      }
+    }
+    if (fresh) {
+      for (const [m, r] of Object.entries(fresh)) day[m] = r;
+    }
+    merged[dk] = Object.keys(day).length > 0 ? day : rows;
+  }
+  return merged;
 }
 
 async function harvestAlibaba(ctx: JobCtx): Promise<void> {
@@ -1550,21 +1589,28 @@ async function harvestAlibaba(ctx: JobCtx): Promise<void> {
     }
     modelsOk++;
   }
+  if (slugs.length === 0) {
+    ctx.summary.skipped.push("alibaba: model list unavailable – aggregate rows only");
+  } else if (modelsOk < slugs.length) {
+    ctx.summary.skipped.push(
+      `alibaba: ${slugs.length - modelsOk}/${slugs.length} model fetches failed – prior rows kept`,
+    );
+  }
   const fromDayKey = dayKey(fromMs);
   const applied = mutateUsageStore(
     ctx.dir,
     (store) => {
       const cur = ensure(store.daily, "alibaba");
+      const existing: Record<string, Record<string, UsageRow>> = {};
+      for (const key of Object.keys(cur)) existing[key] = cur[key];
       for (const key of Object.keys(cur)) {
         if (key >= fromDayKey) delete cur[key];
       }
-      // Per-model rows win where present; days without them fall back to the
-      // aggregate under a labeled pseudo-model.
-      const merged: Record<string, Record<string, UsageRow>> = {};
-      for (const [dk, rows] of Object.entries(totalDays.days)) {
-        merged[dk] = perModelDays[dk] ?? rows;
-      }
-      replaceDailyRows(store, "alibaba", merged);
+      replaceDailyRows(
+        store,
+        "alibaba",
+        mergeAlibabaDays(totalDays.days, perModelDays, existing, slugs.length > 0 && modelsOk === slugs.length),
+      );
       const s = ensure(store.state, "alibaba") as { at?: number };
       s.at = ctx.now;
     },
@@ -1809,7 +1855,10 @@ async function harvestLocalJsonl(
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       const isLast = i === lines.length - 1;
-      if (isLast && line !== "") break; // partial line – re-read next round
+      if (isLast) {
+        if (line !== "") break; // partial line – re-read next round
+        continue; // trailing "" after the final \n: no byte to count (counting it pushed offsets 1 past EOF, and the next incremental read then lost the first appended line)
+      }
       consumed += Buffer.byteLength(line, "utf8") + 1;
       if (line === "") continue;
       const parsed = parseLine(line, currentModel, parserState);
@@ -1854,9 +1903,9 @@ async function harvestLocalJsonl(
   const applied = mutateUsageStore(
     ctx.dir,
     (store) => {
-      for (const [hk, models] of rowsByHour) {
-        for (const [model, row] of models) addDeltaLocal(store, provider, hk, model, row);
-      }
+      // A stale rebuild REPLACES the section: wipe first, then add once. (The
+      // add must never run before the wipe – that double-counts on normal
+      // incremental rounds, where the rows survive untouched.)
       if (staleParser) {
         delete store.localHourly[provider];
         delete store.localDaily[provider];
