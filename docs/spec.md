@@ -207,7 +207,11 @@ secrets** – token counts, window percentages, watermarks and list prices only.
 ```
 
 Bucket keys are UTC (`T13` = hour 13, day keys `YYYY-MM-DD`); the CLI and
-console aggregate to the operator's local calendar at read time. `in` is
+console aggregate to the operator's local calendar at read time. Window edges
+are instants and can fall mid-UTC-day (a local month start east of UTC is the
+previous UTC day): day views clip boundary-day HOURLY buckets to the exact
+in-window hours, while an authoritative daily row on a straddling boundary day
+stays whole-day (vendor daily granularity cannot be split). `in` is
 UNCACHED input, `cr` cache-read, `cw` cache-write, `tot` a split-less total
 (zcode), `usd` a vendor-ACTUAL cost. Estimates are computed at read time so a
 pricing refresh reprices history.

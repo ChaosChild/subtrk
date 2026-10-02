@@ -511,6 +511,73 @@ describe("usage aggregation", () => {
     }
   });
 
+  it("day view clips boundary-day hourly rows to the window (local-month MTD)", () => {
+    // Mirrors the 2026-10-02 incident: a UTC+2 local month start is
+    // Sept 30 22:00Z, so dayKey(fromMs) lands on the PREVIOUS month's last
+    // day. Days built from hourly rows must clip to the in-window hours;
+    // authoritative daily rows on the boundary day stay whole-day.
+    const from = Date.UTC(2026, 8, 30, 22);
+    const to = Date.UTC(2026, 9, 2, 12);
+    const dir = tempDir();
+    try {
+      mutateUsageStore(
+        dir,
+        (s) => {
+          replaceHourlyRange(s, "glm", Date.UTC(2026, 8, 30), to, {
+            "2026-09-30T21": { "GLM-5.3": { in: 2100, cr: 0, out: 210 } }, // local Sept 30 – out
+            "2026-09-30T22": { "GLM-5.3": { in: 2200, cr: 0, out: 220 } }, // local Oct 1 00:xx – in
+            "2026-10-02T11": { "GLM-5.3": { in: 1100, cr: 0, out: 110 } }, // in
+            "2026-10-02T13": { "GLM-5.3": { in: 1300, cr: 0, out: 130 } }, // after toMs – out
+          });
+          replaceHourlyRange(s, "zcode", Date.UTC(2026, 8, 30), to, {
+            "2026-09-30T15": { "glm-5-3": { tot: 999 } }, // local Sept 30 daytime – out
+          });
+          replaceDailyRows(s, "openrouter", {
+            "2026-09-30": { "openai/gpt-5.2": { in: 900, out: 100, req: 10, usd: 0.25 } },
+          });
+          s.localHourly.claude = {
+            "2026-09-30T13": { "claude-opus-4": { in: 130 } }, // out
+            "2026-09-30T22": { "claude-opus-4": { in: 220 } }, // in
+          };
+          s.pricing = {};
+        },
+        to,
+      );
+      const store = readUsageStore(dir);
+      const agg = aggregateUsage(store, { granularity: "day", fromMs: from, toMs: to, local: "include" });
+
+      const glm = agg.providers.glm;
+      assert.deepEqual(
+        glm.series.map((p) => ({ t: p.t, in: p.in })),
+        [
+          { t: "2026-09-30", in: 2200 },
+          { t: "2026-10-02", in: 1100 },
+        ],
+      );
+
+      // zcode's only hour is local September – the provider drops out entirely
+      assert.equal(agg.providers.zcode, undefined);
+
+      // claude this-machine rows clip the same way
+      assert.deepEqual(
+        agg.providers.claude.series.map((p) => ({ t: p.t, in: p.in })),
+        [{ t: "2026-09-30", in: 220 }],
+      );
+
+      // authoritative daily rows on the boundary day stay whole (documented)
+      assert.equal(agg.providers.openrouter.usdActual, 0.25);
+
+      // day and hour views agree on the same window
+      const hourAgg = aggregateUsage(store, { granularity: "hour", fromMs: from, toMs: to, local: "include" });
+      assert.equal(
+        hourAgg.providers.glm.series.reduce((a, b) => a + b.in, 0),
+        glm.series.reduce((a, b) => a + b.in, 0),
+      );
+    } finally {
+      cleanup(dir)();
+    }
+  });
+
   it("lists unpriced models instead of silently pricing at zero", () => {
     const dir = tempDir();
     try {
