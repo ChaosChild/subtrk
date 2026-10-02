@@ -921,6 +921,49 @@ describe("alibaba/openai/local parsers", () => {
     assert.equal(extractOpenaiWham({ data: 5 }), null);
   });
 
+  it("drops prototype-resolving model names from vendor responses (cavet 5d36fb)", () => {
+    // A hostile/buggy vendor response naming a model "__proto__" must not
+    // write onto Object.prototype: the row is dropped at the parse boundary.
+    const hostile = extractOpenaiWham({
+      data: [
+        {
+          date: "2026-10-02",
+          models: [
+            { model: "__proto__", credits: 50 },
+            { model: "constructor", credits: 60 },
+            { model: "gpt-6-luna", credits: 12 },
+          ],
+        },
+      ],
+    });
+    assert.ok(hostile);
+    assert.deepEqual(Object.keys(hostile["2026-10-02"]), ["gpt-6-luna"]);
+    assert.equal(({} as Record<string, unknown>).pct, undefined);
+
+    // Same guarantee at the ensure() sink (glm detail path)
+    const glm = parseGlmDetail({
+      data: {
+        modelUsage: {
+          xTime: ["2026-09-29 13:00:00"],
+          modelDataList: [
+            {
+              modelName: "__proto__",
+              uncachedInputTokensUsage: [10],
+              cachedInputTokensUsage: [],
+              outputTokensUsage: [],
+            },
+            { modelName: "GLM-5.3", uncachedInputTokensUsage: [7], cachedInputTokensUsage: [], outputTokensUsage: [2] },
+          ],
+        },
+      },
+    });
+    assert.ok(glm);
+    const bucket = glm.buckets["2026-09-29 13:00:00"];
+    assert.deepEqual(Object.keys(bucket), ["GLM-5.3"]);
+    assert.equal(bucket["GLM-5.3"].in, 7);
+    assert.equal(({} as Record<string, unknown>).in, undefined);
+  });
+
   it("parses codex rollout token events with turn_context model attribution", () => {
     const line = JSON.stringify({
       timestamp: "2026-09-29T15:53:08Z",

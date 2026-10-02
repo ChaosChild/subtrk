@@ -192,9 +192,18 @@ export function readUsageStore(subtrkDir: string = SUBTRK_DIR): UsageStore {
   }
 }
 
+// Vendor-supplied strings become object keys in the store. These three
+// resolve to the prototype instead of a fresh bucket, so a hostile vendor
+// row must be dropped rather than written – and they never name a real
+// model, bucket or provider.
+const PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
 // Get-or-create for the string-keyed maps the store is built from – kept as a
 // helper because `x[k] ??= {}` inside an expression trips the linter.
+// Prototype-resolving keys get a DETACHED throwaway: the caller's writes go
+// nowhere (the row is parsed, then dropped) and Object.prototype stays clean.
 function ensure<T>(rec: Record<string, T>, key: string): T {
+  if (PROTO_KEYS.has(key)) return {} as T;
   if (!rec[key]) rec[key] = {} as T;
   return rec[key];
 }
@@ -1649,7 +1658,7 @@ export function extractOpenaiWham(body: unknown): Record<string, Record<string, 
       if (typeof m !== "object" || m === null) continue;
       const model = (m as { model?: unknown }).model;
       const credits = num((m as { credits?: unknown }).credits);
-      if (typeof model !== "string" || model === "" || credits === null) continue;
+      if (typeof model !== "string" || model === "" || credits === null || PROTO_KEYS.has(model)) continue;
       bucket[model] ??= {};
       const target = bucket[model];
       target.pct = Math.max(target.pct ?? 0, credits);
