@@ -659,6 +659,15 @@ export function aggregateUsage(
     if (opts.granularity === "day") {
       const fromKey = dayKey(opts.fromMs);
       const toKey = dayKey(opts.toMs);
+      // Window edges are instants and can fall mid-UTC-day: the MTD default
+      // starts at LOCAL midnight, which is the previous UTC day for any
+      // longitude east of UTC. Days built from hourly rows clip to the exact
+      // in-window hours; authoritative daily rows stay whole-day (vendor
+      // daily granularity cannot be split).
+      const firstHour = hourKey(opts.fromMs);
+      const lastHour = hourKey(opts.toMs);
+      const hourInWindow = (hk: string, dk: string): boolean =>
+        (dk !== fromKey || hk >= firstHour) && (dk !== toKey || hk <= lastHour);
       const dayKeys = new Set([...Object.keys(daily), ...Object.keys(hourly).map((k) => k.slice(0, 10))]);
       const sorted = [...dayKeys].filter((k) => k >= fromKey && k <= toKey).sort();
       // include-mode: this-machine hourly rows combine with the vendor rows
@@ -668,7 +677,7 @@ export function aggregateUsage(
       const localAggForDay = (dk: string): Record<string, UsageRow> => {
         const agg: Record<string, UsageRow> = {};
         for (const hk of Object.keys(localHourly)) {
-          if (!hk.startsWith(dk)) continue;
+          if (!hk.startsWith(dk) || !hourInWindow(hk, dk)) continue;
           for (const [model, row] of Object.entries(localHourly[hk])) {
             const target = ensure(agg, model);
             for (const field of ["in", "cw", "cr", "out", "tot", "req", "usd"] as const) {
@@ -685,7 +694,7 @@ export function aggregateUsage(
           : (() => {
               const agg: Record<string, UsageRow> = {};
               for (const hk of Object.keys(hourlyVendor)) {
-                if (!hk.startsWith(dk)) continue;
+                if (!hk.startsWith(dk) || !hourInWindow(hk, dk)) continue;
                 for (const [model, row] of Object.entries(hourly[hk])) {
                   const target = ensure(agg, model);
                   for (const field of ["in", "cw", "cr", "out", "tot", "req", "usd", "pct"] as const) {
