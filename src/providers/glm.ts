@@ -44,11 +44,14 @@ interface GlmLimit {
 
 // Pure: data.limits[] TOKENS_LIMIT entries -> windows (unit 3 = hours, unit 6 = weeks);
 // TIME_LIMIT entries are built-in-tool quota and ignored in v0. data.level -> plan label.
-// Empty state: a JSON-object body with no data.limits (data missing/null, or no limits
-// array) means the current window has had zero GLM queries – limits appear after the
-// first query, typically right after a window reset -> { windows: [], empty: true }.
-// null is reserved for bodies that are not JSON objects at all, arrays included
-// (probe maps that to parse-failure with the existing message).
+// A window sitting at 0% (no query in it yet) omits nextResetTime entirely – skipped as
+// inactive, like claude's resets_at-less entries, never a parse failure.
+// Empty state: no usable windows after that (data missing/null, no limits array, or
+// every TOKENS_LIMIT entry at 0%) means zero GLM queries in the current window ->
+// { windows: [], empty: true }.
+// null is reserved for bodies that are not JSON objects at all, arrays included, and
+// ACTIVE entries with malformed number/percentage/nextResetTime (probe maps null to
+// parse-failure).
 export function parseGlmQuota(body: unknown): { windows: Window[]; plan?: string; empty?: true } | null {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
   const data = (body as { data?: unknown }).data;
@@ -61,6 +64,8 @@ export function parseGlmQuota(body: unknown): { windows: Window[]; plan?: string
     if (typeof raw !== "object" || raw === null) continue;
     const l = raw as GlmLimit;
     if (l.type !== "TOKENS_LIMIT") continue;
+    // z.ai drops nextResetTime while a window is at 0% – inactive, skip it
+    if (l.nextResetTime === undefined || l.nextResetTime === null) continue;
     if (typeof l.number !== "number" || typeof l.percentage !== "number") return null;
     if (typeof l.nextResetTime !== "number" || !Number.isFinite(l.nextResetTime)) return null;
     let kind: string;
@@ -71,6 +76,7 @@ export function parseGlmQuota(body: unknown): { windows: Window[]; plan?: string
     else continue; // unknown unit – ignore entry
     windows.push({ kind, usedPercent: l.percentage, resetsAt: new Date(l.nextResetTime).toISOString() });
   }
+  if (windows.length === 0) return plan ? { windows, plan, empty: true } : { windows, empty: true };
   return { windows, plan };
 }
 
@@ -205,7 +211,7 @@ async function probeInner(): Promise<ProviderResult> {
     return fail({ kind: "parse-failure", message: "quota response was not JSON" }, fetchedAt);
   }
   const parsed = parseGlmQuota(body);
-  if (!parsed) return fail({ kind: "parse-failure", message: "quota response missing data.limits" }, fetchedAt);
+  if (!parsed) return fail({ kind: "parse-failure", message: "quota response shape unrecognized" }, fetchedAt);
   const result: ProviderResult = {
     id: "glm",
     ok: true,
