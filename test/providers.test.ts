@@ -208,6 +208,61 @@ test("glm parseGlmQuota: object body without data.limits is the empty state, non
   assert.equal(parseGlmQuota(null), null);
 });
 
+test("glm parseGlmQuota: 0% window without nextResetTime is skipped, active 7d still parsed", () => {
+  // Live shape seen 2026-10-03: a window at 0% omits nextResetTime entirely.
+  const parsed = parseGlmQuota({
+    code: 200,
+    msg: "Operation successful",
+    data: {
+      level: "max",
+      limits: [
+        {
+          type: "TIME_LIMIT",
+          unit: 5,
+          number: 1,
+          usage: 4000,
+          currentValue: 286,
+          remaining: 3714,
+          percentage: 7,
+          nextResetTime: 1791875132982,
+        },
+        { type: "TOKENS_LIMIT", unit: 3, number: 5, percentage: 0 },
+        { type: "TOKENS_LIMIT", unit: 6, number: 1, percentage: 14, nextResetTime: 1791443132984 },
+      ],
+    },
+  });
+  assert.ok(parsed);
+  assert.deepEqual(parsed.windows, [{ kind: "7d", usedPercent: 14, resetsAt: new Date(1791443132984).toISOString() }]);
+  assert.equal(parsed.plan, "GLM max");
+  assert.equal(parsed.empty, undefined);
+});
+
+test("glm parseGlmQuota: every window fresh is the empty state, malformed ACTIVE entry stays null", () => {
+  const fresh = parseGlmQuota({
+    data: {
+      level: "max",
+      limits: [
+        { type: "TOKENS_LIMIT", unit: 3, number: 5, percentage: 0 },
+        { type: "TOKENS_LIMIT", unit: 6, number: 1, percentage: 0 },
+      ],
+    },
+  });
+  assert.deepEqual(fresh, { windows: [], plan: "GLM max", empty: true });
+  // an active (nextResetTime present) entry with broken fields is still a parse failure
+  assert.equal(
+    parseGlmQuota({
+      data: { limits: [{ type: "TOKENS_LIMIT", unit: 6, number: 1, percentage: "x", nextResetTime: 1791443132984 }] },
+    }),
+    null,
+  );
+  assert.equal(
+    parseGlmQuota({
+      data: { limits: [{ type: "TOKENS_LIMIT", unit: 6, number: 1, percentage: 5, nextResetTime: "soon" }] },
+    }),
+    null,
+  );
+});
+
 test("glm glmAuth: config key + host origin from baseURL, env fallback, null when neither", () => {
   const fromConfig = glmAuth(
     { provider: { zai: { apiKey: "K", options: { baseURL: "https://open.bigmodel.cn/api/paas/v4" } } } },
