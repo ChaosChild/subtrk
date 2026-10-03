@@ -498,6 +498,57 @@ describe("usage aggregation", () => {
     }
   });
 
+  it("series buckets carry per-bucket cost (usdA/usdE) that sums to the totals", () => {
+    const dir = tempDir();
+    try {
+      seed(dir);
+      const agg = aggregateUsage(readUsageStore(dir), { granularity: "day", fromMs: from, toMs: now });
+      // The all-providers spend chart stacks series[].usdA/usdE, so per kind –
+      // vendor-actual (openrouter), estimated (glm) and blended (zcode) – the
+      // buckets must reconstruct the provider totals exactly.
+      for (const id of ["glm", "openrouter", "zcode"]) {
+        const u = agg.providers[id];
+        const sumA = u.series.reduce((a, b) => a + b.usdA, 0);
+        const sumE = u.series.reduce((a, b) => a + b.usdE, 0);
+        assert.ok(Math.abs(sumA - u.usdActual) < 1e-9, `${id} actual: series ${sumA} vs totals ${u.usdActual}`);
+        assert.ok(Math.abs(sumE - u.usdEst) < 1e-9, `${id} est: series ${sumE} vs totals ${u.usdEst}`);
+      }
+      const or = agg.providers.openrouter;
+      assert.equal(
+        or.series.reduce((a, b) => a + b.usdA, 0),
+        0.25,
+      );
+      const zc = agg.providers.zcode;
+      assert.ok(zc.series.reduce((a, b) => a + b.usdE, 0) > 0, "blended estimate lands in the buckets");
+      assert.ok(zc.series.every((b) => b.usdA === 0));
+    } finally {
+      cleanup(dir)();
+    }
+  });
+
+  it("cache-hit rate counts cache writes as misses", () => {
+    const dir = tempDir();
+    try {
+      // Mirrors the live claude shape (review 2026-10-03): ~all cache-read,
+      // a thin write fringe, ~zero uncached input – the old cr/(cr+in)
+      // denominator rounded that to an impossible 100%.
+      mutateUsageStore(
+        dir,
+        (s) => {
+          replaceDailyRows(s, "claude", {
+            [dayKey(now - DAY)]: { "claude-opus-4-6": { in: 100, cw: 10_000, cr: 190_000, out: 900 } },
+          });
+        },
+        now,
+      );
+      const agg = aggregateUsage(readUsageStore(dir), { granularity: "day", fromMs: from, toMs: now });
+      const hit = agg.providers.claude.cacheHit ?? 0;
+      assert.ok(Math.abs(hit - 190_000 / 200_100) < 1e-9);
+    } finally {
+      cleanup(dir)();
+    }
+  });
+
   it("hour view returns the hourly buckets only", () => {
     const dir = tempDir();
     try {
@@ -651,7 +702,10 @@ describe("usage harvest", () => {
     try {
       const summary = await harvestUsage([], {
         subtrkDir: dir,
-        budgetMs: 5_000,
+        // Generous on purpose: under whole-suite file parallelism a 5s budget
+        // could silently skip the analytics job after activity had landed,
+        // leaving hourly rows unwritten and flaking the assertions below.
+        budgetMs: 30_000,
         fetchImpl: jsonFetch((url) => {
           if (url.includes("/activity")) return OR_ACTIVITY();
           if (url.includes("/analytics/query")) return OR_ANALYTICS();

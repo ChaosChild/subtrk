@@ -331,6 +331,13 @@ Three decisions anchor the design:
    in/cache/out mix and labeled "blended"; unpriced models are listed and
    excluded from sums. Month-to-date aggregates use the operator's local
    calendar month.
+4. **Cache writes are misses, and per-bucket cost mirrors the totals.** The
+   cache-hit rate is cache-read / (cache-read + cache-write + uncached input);
+   the original read-only denominator rounded a transcripts-only month (claude:
+   ~all reads, a thin write fringe, near-zero raw input) to an impossible 100%
+   (operator report, 2026-10-03). Usage series carry per-bucket `usdA`/`usdE`
+   under the same actual/estimate/blended rules as the totals, so the
+   all-providers spend chart sums back to the provider totals by construction.
 
 The OpenRouter management key stays optional: init discloses that it is
 account-admin scoped (reads usage across keys, can create keys) and plaintext

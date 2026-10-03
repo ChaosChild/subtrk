@@ -491,7 +491,19 @@ export interface ModelUsage {
 export interface ProviderUsage extends UsageTotals {
   models: ModelUsage[];
   unpriced: string[];
-  series: { t: string; in: number; cr: number; cw: number; out: number; tot: number; req: number }[];
+  // usdA/usdE: per-bucket cost (vendor-actual / estimate-or-blended), additive
+  // since the all-providers spend chart – older readers ignore them.
+  series: {
+    t: string;
+    in: number;
+    cr: number;
+    cw: number;
+    out: number;
+    tot: number;
+    req: number;
+    usdA: number;
+    usdE: number;
+  }[];
   splitless: boolean; // rows carry only `tot` (zcode) – the UI renders table-only
   hasLocal: boolean; // this-machine rows are merged in (claude transcripts, codex rollouts)
   samples: UsageSample[]; // window-% history in range (the chart for %-only providers)
@@ -518,7 +530,11 @@ function addRow(totals: UsageTotals, row: UsageRow): void {
 }
 
 function finalizeCacheHit(totals: UsageTotals): void {
-  const denom = totals.cr + totals.in;
+  // Cache WRITES are input tokens that missed the cache, so they count in the
+  // denominator. The old cr/(cr+in) let a cache-read-heavy source round to an
+  // impossible 100% (claude transcripts: ~all cache-read + a thin write fringe
+  // and ~zero uncached input).
+  const denom = totals.cr + totals.cw + totals.in;
   totals.cacheHit = denom > 0 ? totals.cr / denom : null;
 }
 
@@ -610,6 +626,7 @@ export function aggregateUsage(
           ? mergedSection(store.hourly[id], store.localHourly[id])
           : hourlyVendor;
     const series: ProviderUsage["series"] = [];
+    const blendedBuckets = new Map<string, { model: string; tot: number }[]>();
     const byModel = new Map<
       string,
       { row: UsageRow; actual: number | null; priced: number | null; kind: ModelUsage["usdKind"]; pct: number | null }
@@ -621,6 +638,7 @@ export function aggregateUsage(
     const consume = (key: string, rows: Record<string, UsageRow>) => {
       anyRow = true;
       const bucketTotals = emptyTotals();
+      const blendedTots: { model: string; tot: number }[] = [];
       for (const [model, row] of Object.entries(rows)) {
         if (row.in || row.out || row.cr || row.cw) splitless = false;
         addRow(totals, row);
@@ -642,6 +660,7 @@ export function aggregateUsage(
           acc.actual = (acc.actual ?? 0) + row.usd;
           acc.kind = "actual";
           totals.usdActual += row.usd;
+          bucketTotals.usdActual += row.usd;
         } else if (resolved && (row.in || row.cr || row.cw || row.out)) {
           // Split rows price token-by-token; tot-only rows (zcode) fall through
           // to the blended mix below – a $0 estimate would block it.
@@ -650,10 +669,17 @@ export function aggregateUsage(
             acc.priced = (acc.priced ?? 0) + est.usd;
             acc.kind = acc.kind === "actual" ? "actual" : "estimate";
             totals.usdEst += est.usd;
+            bucketTotals.usdEst += est.usd;
           }
+        } else if ((row.tot ?? 0) > 0) {
+          // Tot-only rows price blended only if the provider PROVES splitless,
+          // which is known only after the loop – stash per bucket so the
+          // series can be patched with the same gate and mix as the totals.
+          blendedTots.push({ model, tot: row.tot ?? 0 });
         }
         byModel.set(model, acc);
       }
+      if (blendedTots.length) blendedBuckets.set(key, blendedTots);
       series.push({
         t: key,
         in: bucketTotals.in,
@@ -662,6 +688,8 @@ export function aggregateUsage(
         out: bucketTotals.out,
         tot: bucketTotals.tot,
         req: bucketTotals.req,
+        usdA: bucketTotals.usdActual,
+        usdE: bucketTotals.usdEst,
       });
     };
 
@@ -771,6 +799,20 @@ export function aggregateUsage(
       });
     }
     models.sort((a, b) => b.tot + b.in + b.cr + b.out - (a.tot + a.in + a.cr + a.out));
+    // Per-bucket blended cost: the same gate and mix as the model-level path
+    // above, so Σ series cost ≡ totals cost for every cost kind (unit-tested).
+    if (splitless && mix) {
+      for (const b of series) {
+        for (const { model, tot } of blendedBuckets.get(b.t) ?? []) {
+          const resolved = priceForModel(store, model);
+          if (!resolved) continue;
+          b.usdE +=
+            tot * mix.in * resolved.price.in +
+            tot * mix.cr * (resolved.price.cr ?? 0) +
+            tot * mix.out * resolved.price.out;
+        }
+      }
+    }
     out[id] = {
       ...totals,
       models,

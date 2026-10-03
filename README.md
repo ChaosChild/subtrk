@@ -46,14 +46,15 @@ Starts the dashboard on a random `127.0.0.1` port and prints the URL to open –
 one page for every tracked provider: usage bars per window (with ≥80%/≥95% warning
 levels), credit pools, a 7-day reset timeline, upcoming resets, and the same
 agent view the CLI prints, auto-refreshing on the cache heartbeat. The top row
-carries month-to-date token and value cards (local calendar month). A provider
-that reports several model classes (Google's Gemini and Claude/GPT, for example)
-renders one card per class. When a provider's error says it is refreshable, its
-card shows a **Refresh now** button that re-runs that provider's own refresh
-action on the host. A gear-icon menu in the header toggles providers on/off, an
-eye-icon menu shows or hides individual cards, every card has an × to hide
-itself, and cards drag individually into any order – all persist across
-restarts (saved to `~/.subtrk/config.json`, like `subtrk init`).
+carries month-to-date token and value cards (local calendar month) – both open
+the all-providers usage page. A provider that reports several model classes
+(Google's Gemini and Claude/GPT, for example) renders one card per class. When
+a provider's error says it is refreshable, its card shows a **Refresh now**
+button that re-runs that provider's own refresh action on the host. A gear-icon
+menu in the header toggles providers on/off, an eye-icon menu shows or hides
+individual cards, every card has an × to hide itself, and cards drag
+individually into any order – all persist across restarts (saved to
+`~/.subtrk/config.json`, like `subtrk init`).
 
 ![Web console](docs/img/console.png)
 
@@ -65,6 +66,17 @@ store with no vendor calls while you browse (details in
 [Usage history](#usage-history)).
 
 ![Usage page](docs/img/console-usage.png)
+
+Both month-to-date cards open the **all-providers usage page** – the same
+day/hour charts with every token-reporting provider stacked on one grid: an
+API-equivalent spend chart (actual where the vendor reports cost, est from
+list rates, blended for totals-only – each segment names its kind on hover),
+a tokens chart, a facts row (top provider by tokens and by value, best and
+weakest cache hit, quietest reporter, requests), and a per-provider table
+with the live windows. Providers without a token surface keep their honest
+dash row instead of fake zeros.
+
+![All-providers usage](docs/img/console-all-usage.png)
 
 The server is loopback-only, requires a per-run token (delivered in the printed
 URL), never emits CORS headers, and status stays read-only – toggles and card
@@ -218,7 +230,10 @@ subtrk usage --rebuild           # re-derive range-API history from the sources
 
 On the dashboard (screenshot above), the month-to-date cards sum the local
 calendar month, this-machine harvests included and labeled, and every provider
-card opens its usage page.
+card – like the two month-to-date cards – opens its usage page. The per-model
+and per-provider tables break the input side into uncached input, cache writes
+and cache reads, and the cache-hit rate counts writes as misses:
+cached / (cached + written + uncached input).
 
 What you get per provider depends on what the vendor exposes: GLM, OpenRouter
 and Alibaba report token splits; OpenRouter costs are the vendor's own numbers

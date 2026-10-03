@@ -19,8 +19,9 @@ Alibaba token-plan telemetry, OpenAI daily breakdown + Codex rollouts, Claude
 local JSONL transcripts, zcode bundle ledger. Local usage store
 (`~/.subtrk/usage.json`) with idempotent harvests, `subtrk usage` CLI, and
 console usage pages (clickable cards, month-to-date token/value cards,
-day/hour charts, per-model cost tables, window-% history). Design and
-sourcing decisions in `docs/decisions.md` (D12–D17).
+day/hour charts, per-model cost tables, window-% history, and an
+all-providers usage page with per-provider stacked spend + token charts).
+Design and sourcing decisions in `docs/decisions.md` (D12–D17).
 
 ## Parked (deliberately out of scope)
 
