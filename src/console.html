@@ -90,7 +90,7 @@ header { border-bottom: 1px solid var(--border); background: var(--surface); pos
 .pdd input { accent-color: var(--accent); margin: 0; }
 @media (max-width: 860px) { .meta .hide-sm { display: none; } }
 @media (max-width: 640px) { .meta { display: none; } }
-.summary > *, .grid > *, .two > * { min-width: 0; }
+.summary > *, .grid > *, .two > *, main.wrap > * { min-width: 0; }
 
 main.wrap { padding-top: 28px; padding-bottom: 48px; display: grid; gap: 20px; }
 
@@ -236,6 +236,35 @@ td.r, th.r { text-align: right; }
 .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border-strong); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.9s linear infinite; vertical-align: -2px; margin-right: 6px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* all-providers usage view (/usage) + clickable MTD cards */
+.stat[data-href] { cursor: pointer; }
+.stat[data-href]:hover { border-color: var(--border-strong); }
+.stat[data-href]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.statgo { float: right; font: 600 10.5px var(--mono); color: var(--text-3); }
+.stat[data-href]:hover .statgo { color: var(--accent); }
+#avstats { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+@media (max-width: 1100px) { #avstats { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 640px) { #avstats { grid-template-columns: 1fr; } }
+.csub { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding: 16px 18px 0; font-size: 13.5px; font-weight: 650; }
+.csub .cnote { font-weight: 500; font-size: 12px; color: var(--text-3); }
+.csub.asec { border-top: 1px dashed var(--border); margin-top: 16px; }
+.kindchip.local { color: var(--text-2); background: var(--muted-soft); }
+.sharebar { display: inline-block; width: 90px; height: 5px; background: var(--track); border-radius: 999px; overflow: hidden; vertical-align: middle; }
+.sharebar i { display: block; height: 100%; border-radius: 999px; }
+/* The card's .pmark is a block-level grid box (it sits in the card header's
+   flex row); inside the table cell it must be inline or the badge and the
+   provider name land on separate lines. */
+#avprov .pmark { display: inline-grid; width: 22px; height: 22px; border-radius: 6px; font-size: 9px; vertical-align: middle; margin-right: 8px; }
+/* The windows column is the one that wraps when the table gets tight. */
+#avprov td:last-child { white-space: normal; min-width: 140px; }
+/* Fixed-width pct box: right-aligned cells would otherwise let a single-digit
+   share pull its bar rightward out of line with the two-digit rows. */
+#avprov .shpct { display: inline-block; min-width: 33px; text-align: right; }
+/* Same discipline for the cost cell: value and chip in fixed-width boxes so
+   "blend" (wider than "est") cannot shove the dollar figure sideways. */
+#avprov .cstval { display: inline-block; min-width: 52px; text-align: right; }
+#avprov .cstchip { display: inline-block; min-width: 42px; text-align: center; }
+
 footer { color: var(--text-3); font-size: 12px; border-top: 1px solid var(--border); padding: 18px 0 32px; }
 footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; justify-content: space-between; }
 footer code { font-family: var(--mono); color: var(--text-2); }
@@ -273,7 +302,7 @@ footer code { font-family: var(--mono); color: var(--text-2); }
   </div>
 </header>
 
-<main class="wrap">
+<main class="wrap" id="dash">
   <div id="banner" class="banner" role="alert" hidden></div>
 
   <section class="summary" id="summary" aria-label="Summary">
@@ -335,12 +364,42 @@ footer code { font-family: var(--mono); color: var(--text-2); }
   <section class="two">
     <div class="card">
       <div class="cardhead"><h3>Per model</h3><span id="dvmnote"></span></div>
-      <div class="tablewrap"><table id="dvmodels"><thead><tr><th>Model</th><th class="r">Input</th><th class="r">Cached</th><th class="r">Output</th><th class="r">Requests</th><th class="r">Cost</th></tr></thead><tbody><tr><td colspan="6">…</td></tr></tbody></table></div>
+      <div class="tablewrap"><table id="dvmodels"><thead><tr><th>Model</th><th class="r">Input</th><th class="r">Cache write</th><th class="r">Cache read</th><th class="r">Output</th><th class="r">Requests</th><th class="r">Cost</th></tr></thead><tbody><tr><td colspan="7">…</td></tr></tbody></table></div>
     </div>
     <div class="card">
       <div class="cardhead"><h3>Window % history</h3><span>sampled at every probe</span></div>
       <div class="tablewrap"><table id="dvwin"><thead><tr><th>Window</th><th class="r">Now</th><th class="r">Resets</th><th class="r">Samples</th></tr></thead><tbody><tr><td colspan="4">…</td></tr></tbody></table></div>
     </div>
+  </section>
+</main>
+
+<!-- M3 all-providers usage view: same shell, path-routed from /usage (both
+     dashboard MTD cards link here). Store-only /api/usage with no provider
+     param returns every provider; the charts stack providers client-side. -->
+<main class="wrap" id="allview" hidden>
+  <div class="sechead" style="margin-top:0">
+    <div>
+      <h2 id="avtitle" style="font-size:19px">All providers · usage</h2>
+      <p id="avsub">…</p>
+    </div>
+    <span style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <span class="seg2" id="avgran"><button type="button" data-g="day" class="on">Day</button><button type="button" data-g="hour">Hour</button></span>
+      <span class="chips2" id="avr">
+        <button type="button" data-r="7">7d</button>
+        <button type="button" data-r="30">30d</button>
+        <button type="button" data-r="mtd" class="on">MTD</button>
+      </span>
+      <a href="/" id="avback" style="font-size:12.5px;color:var(--accent);text-decoration:none">← dashboard</a>
+    </span>
+  </div>
+  <section class="summary" id="avstats" aria-label="Usage facts"></section>
+  <section>
+    <div class="sechead"><h2>Usage</h2><p id="avhint">spend and tokens per provider · stacked bars, split on hover · hour view covers the last 48h</p></div>
+    <div class="card" id="avchart"><div class="empty">loading…</div></div>
+  </section>
+  <section>
+    <div class="sechead"><h2>Per provider</h2><p>windows column is live from /api/status · sampled at every probe</p></div>
+    <div class="card"><div class="tablewrap"><table id="avprov"><thead><tr><th>Provider</th><th class="r">Tokens</th><th class="r">In</th><th class="r">Cache write</th><th class="r">Cache read</th><th class="r">Out</th><th class="r">Requests</th><th class="r">Cost</th><th class="r">Share</th><th>Windows now</th></tr></thead><tbody><tr><td colspan="10">…</td></tr></tbody></table></div></div>
   </section>
 </main>
 
@@ -482,16 +541,18 @@ function cardBadge(p, ws) {
 let ORDER = []; // card keys in display order (config.json `order`) – display hint only
 
 // M3 usage views: /provider/<id> renders the drill-down (serve only routes
-// known provider ids here); everything else is the dashboard. USAGE_MTD feeds
-// the two month-to-date summary cards, USAGE_PROV the drill-down – both come
+// known provider ids there) and /usage the all-providers page (both dashboard
+// MTD cards link to it); everything else is the dashboard. USAGE_MTD feeds the
+// two month-to-date summary cards, USAGE_PROV both usage views – both come
 // from GET /api/usage, which reads the local store only.
 const PROVIDER_VIEW = (() => {
   const m = /^\/provider\/([a-z][a-z0-9-]*)$/.exec(location.pathname);
   return m && META[m[1]] ? m[1] : null;
 })();
+const ALL_VIEW = !PROVIDER_VIEW && location.pathname === "/usage";
 let USAGE_MTD = null;
 let USAGE_PROV = null;
-let DV = { gran: "day", range: "30" }; // hour view always covers the last 48h
+let DV = { gran: "day", range: ALL_VIEW ? "mtd" : "30" }; // hour view always covers the last 48h
 
 const fmtTok = n => {
   const a = Math.abs(n);
@@ -500,6 +561,27 @@ const fmtTok = n => {
   if (a >= 1e3) return (n / 1e3).toFixed(1) + "k";
   return String(Math.round(n));
 };
+// Displayed tokens per provider/bucket follow the drill-down rule: split-less
+// providers (zcode) count `tot`; everyone else counts in + cached + out (cache
+// WRITES feed pricing and the cache-hit rate, not the token displays).
+const tokensFor = u => (u.splitless ? u.tot : u.in + u.cr + u.out);
+const bucketTokens = (u, b) => (u.splitless ? b.tot : b.in + b.cr + b.out);
+// Whether the provider actually stored token counts (pct-only openai wham rows
+// and sample-only providers don't) – drives "reporter" facts and dash cells.
+const hasTokRows = u => u.in + u.cr + u.cw + u.out + u.tot > 0;
+const spendFor = u => u.usdActual + u.usdEst;
+const provName = id => (META[id] || { name: id }).name;
+const statSkeletonHTML = n =>
+  Array.from(
+    { length: n },
+    () => `<div class="card stat"><div class="label">&nbsp;</div><div class="shimmer" style="height:22px;margin-top:6px"></div><div class="shimmer" style="height:12px;margin-top:6px"></div></div>`,
+  ).join("");
+// Chart-only recolor (Lavish review Q7, 2026-10-03): openrouter sits between
+// glm and zcode in the blue-violet band – three near-identical colors in one
+// stacked legend. Cards keep their META marks; only the stacked all-provider
+// charts differ.
+const CHART_COLOR = { openrouter: "#d557a4" };
+const chartColor = id => CHART_COLOR[id] || (META[id] || { color: "#6b7280" }).color;
 const authHeaders = () => (token ? { Authorization: `Bearer ${token}` } : {});
 function usageUrl() {
   const nowMs = now();
@@ -507,7 +589,10 @@ function usageUrl() {
   if (DV.gran === "hour") from = nowMs - 48 * 36e5;
   else if (DV.range === "mtd") { const d = new Date(); from = new Date(d.getFullYear(), d.getMonth(), 1).getTime(); }
   else from = nowMs - Number(DV.range) * 864e5;
-  return `/api/usage?provider=${encodeURIComponent(PROVIDER_VIEW)}&granularity=${DV.gran}&from=${from}&to=${nowMs}`;
+  // Provider views pass ?provider (which the server upgrades to local=include);
+  // the all-providers view wants this-machine rows merged too, explicitly.
+  const scope = PROVIDER_VIEW ? `&provider=${encodeURIComponent(PROVIDER_VIEW)}` : "&local=include";
+  return `/api/usage?granularity=${DV.gran}&from=${from}&to=${nowMs}${scope}`;
 }
 
 function cardRank(key) {
@@ -591,25 +676,33 @@ function summaryHTML() {
 // Pay-as-you-go / Alibaba-credits stat cards are gone – balances live on
 // their provider cards, where they always were.
 function mtdCardsHTML() {
-  const aggs = USAGE_MTD && USAGE_MTD.providers ? Object.values(USAGE_MTD.providers) : [];
+  const aggs = USAGE_MTD && USAGE_MTD.providers ? Object.entries(USAGE_MTD.providers).map(([id, u]) => ({ id, ...u })) : [];
+  // Both cards open the all-providers usage view (data-href, wired in the
+  // dashboard init); .statgo marks them as links like the provider cards.
+  const go = `<span class="statgo">usage →</span>`;
+  const linkAttrs = `data-href="/usage" tabindex="0" role="link" aria-label="Open the all-providers usage page"`;
   if (aggs.length === 0) {
-    return `<div class="card stat"><div class="label">Month-to-date tokens</div><div class="value" style="font-size:20px;color:var(--text-3)">–</div><div class="sub">accumulates from status calls and dashboard refreshes</div></div>
-  <div class="card stat"><div class="label">Month-to-date value</div><div class="value" style="font-size:20px;color:var(--text-3)">–</div><div class="sub">API-equivalent, once usage is recorded</div></div>`;
+    return `<div class="card stat" ${linkAttrs}>${go}<div class="label">MTD tokens</div><div class="value" style="font-size:20px;color:var(--text-3)">–</div><div class="sub">accumulates from status calls and dashboard refreshes</div></div>
+  <div class="card stat" ${linkAttrs}>${go}<div class="label">MTD value</div><div class="value" style="font-size:20px;color:var(--text-3)">–</div><div class="sub">API-equivalent, once usage is recorded</div></div>`;
   }
-  let tin = 0, tcr = 0, tout = 0, ua = 0, ue = 0, actualN = 0, hitDen = 0, localN = 0;
+  let tin = 0, tcr = 0, tcw = 0, tout = 0, ttot = 0, ua = 0, ue = 0;
   for (const u of aggs) {
-    tin += u.in; tcr += u.cr; tout += u.out; ua += u.usdActual; ue += u.usdEst;
-    hitDen += u.in + u.cr;
-    if (u.hasLocal) localN++;
-    if ((u.models || []).some(m => m.usdKind === "actual")) actualN++;
+    tin += u.in; tcr += u.cr; tcw += u.cw; tout += u.out; ua += u.usdActual; ue += u.usdEst;
+    if (u.splitless) ttot += u.tot; // totals-only providers: headline only, no split
   }
+  // Cache writes are misses: hit = cache-read / (read + write + uncached in).
+  // The old read-only denominator rounded a transcripts-only month to 100%.
+  const hitDen = tcr + tcw + tin;
   const hit = hitDen > 0 ? Math.round((tcr / hitDen) * 100) + "%" : "–";
-  const usdLabel = [];
-  if (ua > 0) usdLabel.push(`$${ua.toFixed(2)} actual`);
-  if (ue > 0) usdLabel.push(`$${ue.toFixed(2)} est`);
-  const localNote = localN ? ` · incl. this-machine (${localN})` : "";
-  return `<div class="card stat"><div class="label">Month-to-date tokens</div><div class="value num">${fmtTok(tin + tcr + tout)}</div><div class="sub">in ${fmtTok(tin)} · out ${fmtTok(tout)} · cache hit ${hit}${localNote}</div></div>
-  <div class="card stat"><div class="label">Month-to-date value</div><div class="value num">${ua + ue > 0 ? "$" + (ua + ue).toFixed(2) : "–"}</div><div class="sub">${esc(usdLabel.join(" + ")) || "unpriced models only"}${actualN ? ` · ${actualN} provider${actualN > 1 ? "s" : ""} actual` : ""}${localNote}</div></div>`;
+  // One line of small print each (operator, 2026-10-03): the value card names
+  // the est portion and the top provider, the tokens card just in + cache hit.
+  // Teasers fire only when two or more providers compete for "top".
+  const priced = aggs.filter(u => spendFor(u) > 0);
+  const usdTop = priced.length > 1 ? priced.reduce((a, b) => (spendFor(b) > spendFor(a) ? b : a)) : null;
+  const usdTeaser = usdTop ? ` · top: ${esc(provName(usdTop.id))} $${spendFor(usdTop).toFixed(2)} (${Math.round((spendFor(usdTop) / (ua + ue)) * 100)}%)` : "";
+  const valPart = ue > 0.005 ? `$${ue.toFixed(2)} est` : ua > 0 ? `$${ua.toFixed(2)} actual` : "unpriced models only";
+  return `<div class="card stat" ${linkAttrs}>${go}<div class="label">MTD tokens</div><div class="value num">${fmtTok(tin + tcr + tout + ttot)}</div><div class="sub">in ${fmtTok(tin)} · cache hit ${hit}</div></div>
+  <div class="card stat" ${linkAttrs}>${go}<div class="label">MTD value</div><div class="value num">${ua + ue > 0 ? "$" + (ua + ue).toFixed(2) : "–"}</div><div class="sub">${valPart}${usdTeaser}</div></div>`;
 }
 
 function timelineHTML() {
@@ -684,6 +777,10 @@ function render(data) {
     renderProviderView();
     return;
   }
+  if (ALL_VIEW) {
+    renderAllView();
+    return;
+  }
   renderAll();
   syncProviderMenu(); // the dropdown lives outside the re-rendered innerHTML
   syncCardsMenu();
@@ -706,7 +803,8 @@ async function refetchUsage() {
     }
     if (!ures.ok) return;
     USAGE_PROV = await ures.json();
-    renderProviderView();
+    if (PROVIDER_VIEW) renderProviderView();
+    else renderAllView();
   } catch (e) {
     // A swallowed render/fetch failure looks like a stuck skeleton – say so.
     showBanner("warn", `usage panel error: ${e instanceof Error ? e.message : String(e)}`);
@@ -721,7 +819,7 @@ async function refresh() {
   inFlight = true;
   clearTimeout(timer);
   try {
-    if (PROVIDER_VIEW) void refetchUsage(); // parallel – never waits for probes
+    if (PROVIDER_VIEW || ALL_VIEW) void refetchUsage(); // parallel – never waits for probes
     const res = await fetch("/api/status", {
       cache: "no-store",
       headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -751,7 +849,7 @@ async function refresh() {
         }
       }
     } catch {}
-    if (!PROVIDER_VIEW) {
+    if (!PROVIDER_VIEW && !ALL_VIEW) {
       // Dashboard month-to-date cards: a store-only read too. local=include
       // so the this-machine sections (claude/openai) count toward the totals.
       try {
@@ -940,8 +1038,8 @@ function renderModelTable(u) {
       m => `<tr>
     <td class="mono">${esc(m.model)}</td>
     ${u.splitless
-      ? `<td class="r num">–</td><td class="r num">–</td><td class="r num">–</td>`
-      : `<td class="r num">${fmtTok(m.in)}</td><td class="r num">${fmtTok(m.cr)}</td><td class="r num">${fmtTok(m.out)}</td>`}
+      ? `<td class="r num">–</td><td class="r num">–</td><td class="r num">–</td><td class="r num">–</td>`
+      : `<td class="r num">${fmtTok(m.in)}</td><td class="r num">${m.cw ? fmtTok(m.cw) : "–"}</td><td class="r num">${fmtTok(m.cr)}</td><td class="r num">${fmtTok(m.out)}</td>`}
     <td class="r num">${m.req ? fmtTok(m.req) : "–"}</td>
     <td class="r num">${[
       m.usd != null ? `$${m.usd.toFixed(2)}<span class="kindchip ${m.usdKind}">${m.usdKind === "actual" ? "act" : m.usdKind === "blended" ? "blend" : "est"}</span>` : "",
@@ -1028,33 +1126,219 @@ function renderProviderView() {
   renderModelTable(u);
   renderWindowTable(u);
   $("provview").hidden = false;
-  const dash = document.querySelector("main.wrap");
-  if (dash && dash.id !== "provview") dash.hidden = true;
+  $("dash").hidden = true;
 }
 
-if (PROVIDER_VIEW) {
-  $("dvgran").addEventListener("click", e => {
+// ---------- M3 all-providers view (/usage) ----------
+
+const fmtRangeLabel = () =>
+  DV.gran === "hour" ? "Last 48 hours" : DV.range === "mtd" ? "Month to date" : `Last ${DV.range} days`;
+
+function renderAllView() {
+  $("dash").hidden = true;
+  $("allview").hidden = false;
+  const root = USAGE_PROV;
+  if (!root || !root.providers) {
+    // First paint: skeleton while /api/usage is in flight (~130 ms warm).
+    $("avstats").innerHTML = statSkeletonHTML(5);
+    $("avchart").innerHTML = `<div class="empty"><span class="spin"></span>loading usage…</div>`;
+    return;
+  }
+  const provs = root.providers;
+  const entries = Object.entries(provs).map(([id, u]) => ({ id, u, tok: tokensFor(u), usd: spendFor(u) }));
+  const withTok = entries.filter(e => e.tok > 0).sort((a, b) => b.tok - a.tok);
+  // Quietest reporter = lowest tokens among providers that actually stored
+  // token counts (Q3) – pct-only rows (openai wham) and no-token-surface
+  // providers (google/kimi/opencode) can't win by construction.
+  const reporters = entries.filter(e => hasTokRows(e.u));
+  // Canonical page order: reporters by tokens, then everyone else in payload
+  // order – charts, table and share bars all follow it.
+  const order = [...withTok.map(e => e.id), ...entries.filter(e => e.tok <= 0).map(e => e.id)];
+  const universe = Math.max(((STATUS && STATUS.providers) || []).length, entries.length);
+  $("avsub").textContent = withTok.length
+    ? `${withTok.length} of ${universe} providers report tokens · local usage store, no vendor calls on this page`
+    : `no token usage recorded yet · local usage store, no vendor calls on this page`;
+  $("avstats").innerHTML = allFactsHTML(entries, withTok, reporters, universe);
+  $("avchart").innerHTML = allChartsHTML(provs, order);
+  renderAllProviderTable(entries, order);
+}
+
+function allFactsHTML(entries, withTok, reporters, universe) {
+  const range = fmtRangeLabel();
+  const totTok = withTok.reduce((a, e) => a + e.tok, 0);
+  const totUsd = entries.reduce((a, e) => a + e.usd, 0);
+  const cards = [];
+  const top = withTok[0];
+  cards.push({
+    label: `${range} tokens`,
+    value: totTok > 0 ? fmtTok(totTok) : "–",
+    sub: top
+      ? `top: ${esc(provName(top.id))} ${fmtTok(top.tok)} (${Math.round((top.tok / totTok) * 100)}%)${top.u.hasLocal ? " · this machine" : ""}`
+      : "accumulates from status calls, dashboard refreshes and subtrk usage",
+  });
+  const spenders = entries.filter(e => e.usd > 0).sort((a, b) => b.usd - a.usd);
+  const actualUsd = entries.reduce((a, e) => a + e.u.usdActual, 0);
+  const valSubs = [];
+  if (actualUsd > 0) valSubs.push(`$${actualUsd.toFixed(2)} actual`);
+  if (totUsd - actualUsd > 0.005) valSubs.push(`$${(totUsd - actualUsd).toFixed(2)} est`);
+  if (spenders.length > 1) valSubs.push(`top: ${esc(provName(spenders[0].id))} $${spenders[0].usd.toFixed(2)} (${Math.round((spenders[0].usd / totUsd) * 100)}%)`);
+  cards.push({ label: `${range} value`, value: totUsd > 0 ? "$" + totUsd.toFixed(2) : "–", sub: valSubs.join(" · ") || "unpriced models excluded from sums" });
+  // Blended cache hit across everything, under the fixed read+write+input rule.
+  let cr = 0, den = 0;
+  for (const e of entries) { cr += e.u.cr; den += e.u.cr + e.u.cw + e.u.in; }
+  const hitters = entries.filter(e => e.u.cacheHit != null).sort((a, b) => b.u.cacheHit - a.u.cacheHit);
+  const hitSubs = [];
+  if (hitters.length) hitSubs.push(`best: ${esc(provName(hitters[0].id))} ${Math.round(hitters[0].u.cacheHit * 100)}%`);
+  if (hitters.length > 1) hitSubs.push(`weakest: ${esc(provName(hitters[hitters.length - 1].id))} ${Math.round(hitters[hitters.length - 1].u.cacheHit * 100)}%`);
+  cards.push({ label: "Cache hit", value: den > 0 ? Math.round((cr / den) * 100) + "%" : "–", sub: hitSubs.join(" · ") || "cached / (cached + writes + uncached input)" });
+  const totReq = entries.reduce((a, e) => a + (e.u.req || 0), 0);
+  const reqTop = entries.filter(e => (e.u.req || 0) > 0).sort((a, b) => b.u.req - a.u.req);
+  cards.push({
+    label: `${range} requests`,
+    value: totReq > 0 ? fmtTok(totReq) : "–",
+    sub: reqTop.length > 1 ? `top: ${esc(provName(reqTop[0].id))} ${fmtTok(reqTop[0].u.req)} (${Math.round((reqTop[0].u.req / totReq) * 100)}%)` : "reported by the vendor where available",
+  });
+  // Quietest reporter = lowest tokens among providers that report any (Q3) –
+  // no-token-surface providers (google/kimi/opencode) can't win by construction.
+  const quiet = reporters.slice().sort((a, b) => a.tok - b.tok)[0];
+  cards.push({
+    label: "Providers reporting",
+    value: `${withTok.length}<span style="color:var(--text-3);font-size:18px"> / ${universe}</span>`,
+    sub: quiet ? `quietest with tokens: ${esc(provName(quiet.id))} ${fmtTok(quiet.tok)}` : "no token rows in this range",
+  });
+  return cards.map(s => `<div class="card stat"><div class="label">${s.label}</div><div class="value num">${s.value}</div><div class="sub">${s.sub}</div></div>`).join("");
+}
+
+// One combined card (review note): spend on top, tokens below – the same
+// chart-then-strips structure as the provider drill-down card.
+function allChartsHTML(provs, order) {
+  const active = order.filter(id => (provs[id].series || []).some(b => bucketTokens(provs[id], b) > 0 || b.usdA + b.usdE > 0));
+  if (!active.length) {
+    return `<div class="empty">no usage recorded in this range yet - it accumulates from status calls, dashboard refreshes and subtrk usage</div>`;
+  }
+  const { keys } = bucketKeysFor({});
+  const labelStep = Math.max(1, Math.ceil(keys.length / 12));
+  const grid = id => new Map((provs[id].series || []).map(b => [b.t, b]));
+  let html = `<div class="cardhead"><h3>${esc(fmtRangeLabel())}</h3><span>${DV.gran === "hour" ? "hour buckets · UTC" : "day buckets · UTC"}</span></div>`;
+  // Spend: one stacked bar per bucket, one segment per provider (Q1/Q2: the
+  // actual/est split lives in the hover title, never silently blended).
+  const spenders = active.filter(id => (provs[id].series || []).some(b => b.usdA + b.usdE > 0));
+  if (spenders.length) {
+    const maps = new Map(spenders.map(id => [id, grid(id)]));
+    const max = Math.max(1e-9, ...keys.map(k => spenders.reduce((s, id) => { const b = maps.get(id).get(k); return s + (b ? b.usdA + b.usdE : 0); }, 0)));
+    const bars = keys.map(k => `<div class="bcol2">${spenders.map(id => {
+      const b = maps.get(id).get(k);
+      const v = b ? b.usdA + b.usdE : 0;
+      if (!(v > 0)) return "";
+      const kind = b.usdA > 0 && b.usdE > 0 ? ` · $${b.usdA.toFixed(2)} actual + $${b.usdE.toFixed(2)} est` : b.usdA > 0 ? " · actual" : " · est";
+      return `<div class="bseg2" style="height:${Math.max(1.5, (v / max) * 100)}%;background:${chartColor(id)}" title="${esc(provName(id))} · ${esc(shortBucket(k))}: $${v.toFixed(2)}${esc(kind)}"></div>`;
+    }).join("")}</div>`).join("");
+    const labs = keys.map((k, i) => `<span>${i % labelStep === 0 || i === keys.length - 1 ? esc(shortBucket(k)) : ""}</span>`).join("");
+    const totSpend = spenders.reduce((s, id) => s + provs[id].series.reduce((a, b) => a + b.usdA + b.usdE, 0), 0);
+    const totActual = spenders.reduce((s, id) => s + provs[id].usdActual, 0);
+    html += `<div class="csub">Spend per ${DV.gran === "hour" ? "hour" : "day"}<span class="cnote">stacked per provider · actual where the vendor reports cost, est from list rates, blended for totals-only</span></div>
+      <div class="chartwrap"><div class="bars2 withaxis">${[1, 0.5].map(f => `<div class="gtick" style="bottom:${f * 100}%"><span>$${(max * f).toFixed(2)}</span></div>`).join("")}<div class="vnow"></div>${bars}</div><div class="xlabs">${labs}</div></div>
+      <div style="padding:0 18px"><div class="legend2">${spenders.map(id => `<span><i style="background:${chartColor(id)}"></i>${esc(provName(id))}</span>`).join("")}</div>
+      <div class="tots2"><span>spend <b>$${totSpend.toFixed(2)}</b></span>${totActual > 0 ? `<span>of which actual <b>$${totActual.toFixed(2)}</b></span>` : ""}<span>buckets <b>${keys.length}</b></span></div></div>`;
+  }
+  // Tokens: the same grid, stacked per provider; in/cached/out on hover, the
+  // per-model split stays on each provider's own page.
+  const tokIds = active.filter(id => (provs[id].series || []).some(b => bucketTokens(provs[id], b) > 0));
+  if (tokIds.length) {
+    const maps = new Map(tokIds.map(id => [id, grid(id)]));
+    const max = Math.max(1, ...keys.map(k => tokIds.reduce((s, id) => { const b = maps.get(id).get(k); return s + (b ? bucketTokens(provs[id], b) : 0); }, 0)));
+    const bars = keys.map(k => `<div class="bcol2">${tokIds.map(id => {
+      const b = maps.get(id).get(k);
+      if (!b) return "";
+      const v = bucketTokens(provs[id], b);
+      if (!(v > 0)) return "";
+      const split = provs[id].splitless ? " (totals only)" : ` — in ${fmtTok(b.in)} · cached ${fmtTok(b.cr)} · out ${fmtTok(b.out)}`;
+      return `<div class="bseg2" style="height:${Math.max(1.5, (v / max) * 100)}%;background:${chartColor(id)}" title="${esc(provName(id))} · ${esc(shortBucket(k))}: ${fmtTok(v)} tok${esc(split)}"></div>`;
+    }).join("")}</div>`).join("");
+    const labs = keys.map((k, i) => `<span>${i % labelStep === 0 || i === keys.length - 1 ? esc(shortBucket(k)) : ""}</span>`).join("");
+    const totTok = tokIds.reduce((s, id) => s + provs[id].series.reduce((a, b) => a + bucketTokens(provs[id], b), 0), 0);
+    const localIds = tokIds.filter(id => provs[id].hasLocal);
+    html += `<div class="csub asec">Tokens per ${DV.gran === "hour" ? "hour" : "day"}<span class="cnote">stacked per provider · in / cached / out on hover${localIds.length ? ` · ${localIds.map(id => esc(provName(id))).join(", ")} include this-machine rows` : ""}</span></div>
+      <div class="chartwrap"><div class="bars2 withaxis">${[1, 0.5].map(f => `<div class="gtick" style="bottom:${f * 100}%"><span>${esc(fmtTok(max * f))}</span></div>`).join("")}<div class="vnow"></div>${bars}</div><div class="xlabs">${labs}</div></div>
+      <div style="padding:0 18px"><div class="legend2">${tokIds.map(id => `<span><i style="background:${chartColor(id)}"></i>${esc(provName(id))}</span>`).join("")}</div>
+      <div class="tots2"><span>range total <b>${fmtTok(totTok)} tok</b></span><span>buckets <b>${keys.length}</b></span></div></div>`;
+  }
+  return html;
+}
+
+// Per-provider summary table: every enabled provider (payload providers first,
+// by tokens), with the live windows column (Q4) instead of per-family strips.
+function renderAllProviderTable(entries, order) {
+  const tb = document.querySelector("#avprov tbody");
+  const byId = new Map(entries.map(e => [e.id, e]));
+  const ids = [...order];
+  for (const p of (STATUS && STATUS.providers) || []) if (!ids.includes(p.id)) ids.push(p.id);
+  const totTok = ids.reduce((a, id) => a + (byId.get(id)?.tok ?? 0), 0);
+  tb.innerHTML = ids.map(id => {
+    const e = byId.get(id);
+    const p = ((STATUS && STATUS.providers) || []).find(x => x.id === id);
+    const m = META[id] || { name: id, color: "#6b7280" };
+    const u = e ? e.u : null;
+    const dash = `<span style="color:var(--text-3)">–</span>`;
+    const windows = p && Array.isArray(p.windows) && p.windows.length
+      ? p.windows.map(w => `${w.scope ? esc(w.scope.split("-")[0]) + " " : ""}${esc(w.kind)} ${used(w).toFixed(0)}%`).join(" · ") + (p.stale ? ` <span style="color:var(--warn);font-size:11px">[stale]</span>` : "")
+      : dash;
+    const cost = u && u.usdActual + u.usdEst > 0
+      ? `<span class="cstval">$${(u.usdActual + u.usdEst).toFixed(2)}</span>${u.usdActual > 0 ? `<span class="kindchip cstchip actual">act</span>` : ""}${u.usdEst > 0 ? `<span class="kindchip cstchip ${u.splitless ? "blended" : "estimate"}">${u.splitless ? "blend" : "est"}</span>` : ""}`
+      : dash;
+    const share = e && e.tok > 0 && totTok > 0
+      ? `<span class="sharebar"><i style="width:${Math.max(1, Math.round((e.tok / totTok) * 100))}%;background:${chartColor(id)}"></i></span> <span class="num shpct" style="font-size:11.5px">${Math.round((e.tok / totTok) * 100)}%</span>`
+      : dash;
+    return `<tr>
+      <td><span class="pmark" style="background:${m.color}">${esc(id.slice(0, 2).toUpperCase())}</span>${esc(m.name)}${u && u.hasLocal ? ` <span class="kindchip local">local</span>` : ""}</td>
+      <td class="r num">${e && hasTokRows(e.u) ? fmtTok(e.tok) : dash}</td>
+      ${u && !u.splitless
+        ? `<td class="r num">${fmtTok(u.in)}</td><td class="r num">${u.cw ? fmtTok(u.cw) : dash}</td><td class="r num">${fmtTok(u.cr)}</td><td class="r num">${fmtTok(u.out)}</td>`
+        : `<td class="r num">${dash}</td><td class="r num">${dash}</td><td class="r num">${dash}</td><td class="r num">${dash}</td>`}
+      <td class="r num">${u && u.req ? fmtTok(u.req) : dash}</td>
+      <td class="r num">${cost}</td>
+      <td class="r">${share}</td>
+      <td class="num" style="font-size:12px;color:var(--text-2)">${windows}</td>
+    </tr>`;
+  }).join("");
+}
+
+if (PROVIDER_VIEW || ALL_VIEW) {
+  const prefix = PROVIDER_VIEW ? "dv" : "av";
+  $(prefix + "gran").addEventListener("click", e => {
     const b = e.target instanceof Element ? e.target.closest("button[data-g]") : null;
     if (!b || b.classList.contains("on")) return;
     DV.gran = b.dataset.g;
-    $("dvgran").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
-    $("dvhint").textContent = DV.gran === "hour" ? "stacked tokens per hour · last 48 hours · day labels are UTC" : "stacked tokens per day (UTC) · dashed lines mark window resets";
+    $(prefix + "gran").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+    if (PROVIDER_VIEW) {
+      $("dvhint").textContent = DV.gran === "hour" ? "stacked tokens per hour · last 48 hours · day labels are UTC" : "stacked tokens per day (UTC) · dashed lines mark window resets";
+    } else {
+      $("avhint").textContent = DV.gran === "hour" ? "spend and tokens per hour · last 48 hours (UTC) · hover a segment for the split" : "spend and tokens per day (UTC) · stacked per provider · hover a segment for the split";
+    }
     void refetchUsage(); // store-only read – instant
   });
-  $("dvr").addEventListener("click", e => {
+  $(prefix + "r").addEventListener("click", e => {
     const b = e.target instanceof Element ? e.target.closest("button[data-r]") : null;
     if (!b || b.classList.contains("on")) return;
     DV.range = b.dataset.r;
-    $("dvr").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+    $(prefix + "r").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
     void refetchUsage(); // store-only read – instant
   });
-  document.querySelector("main.wrap").hidden = true; // dashboard sections stay out of the drill-down page
-  $("provview").hidden = false; // visible immediately – skeleton until data lands
-  $("dvchart").innerHTML = `<div class="empty"><span class="spin"></span>loading usage…</div>`;
-  $("dvstats").innerHTML = ["", "", "", ""].map(() => `<div class="card stat"><div class="label">&nbsp;</div><div class="shimmer" style="height:22px;margin-top:6px"></div><div class="shimmer" style="height:12px;margin-top:6px"></div></div>`).join("");
-  // Same-origin navigation MUST carry the URL fragment: the per-run bearer
-  // token lives there and nowhere else (dropped fragment = 401 blank page).
-  $("dvback").href = "/" + location.hash;
+  $("dash").hidden = true; // dashboard sections stay out of the usage views
+  if (PROVIDER_VIEW) {
+    $("provview").hidden = false; // visible immediately – skeleton until data lands
+    $("dvchart").innerHTML = `<div class="empty"><span class="spin"></span>loading usage…</div>`;
+    $("dvstats").innerHTML = statSkeletonHTML(4);
+    // Same-origin navigation MUST carry the URL fragment: the per-run bearer
+    // token lives there and nowhere else (dropped fragment = 401 blank page).
+    $("dvback").href = "/" + location.hash;
+  } else {
+    $("allview").hidden = false; // visible immediately – skeleton until data lands
+    $("avstats").innerHTML = statSkeletonHTML(5);
+    $("avchart").innerHTML = `<div class="empty"><span class="spin"></span>loading usage…</div>`;
+    $("avprov").querySelector("tbody").innerHTML = `<tr><td colspan="10"><span class="spin"></span>loading…</td></tr>`;
+    $("avback").href = "/" + location.hash;
+  }
 } else {
   // Whole provider cards are clickable (M3): navigate to the drill-down.
   // Drag handle, buttons and the card's × stay click-exempt.
@@ -1062,6 +1346,18 @@ if (PROVIDER_VIEW) {
     if (e.target instanceof Element && e.target.closest("button, a, .drag")) return;
     const card = e.target instanceof Element ? e.target.closest("article[data-provider]") : null;
     if (card && card.dataset.provider) location.href = `/provider/${card.dataset.provider}${location.hash}`;
+  });
+  // The two MTD stat cards open the all-providers usage view (data-href).
+  const openUsage = el => {
+    const card = el instanceof Element ? el.closest("[data-href]") : null;
+    if (card) location.href = (card.dataset.href || "/usage") + location.hash;
+  };
+  $("summary").addEventListener("click", e => {
+    if (e.target instanceof Element && e.target.closest("button, a")) return;
+    openUsage(e.target);
+  });
+  $("summary").addEventListener("keydown", e => {
+    if (e.key === "Enter") openUsage(e.target);
   });
 }
 

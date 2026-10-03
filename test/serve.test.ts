@@ -188,6 +188,26 @@ describe("subtrk serve", () => {
     );
   });
 
+  it("/usage and /provider/<id> serve the shell; /usage/extra is a plain 404", async () => {
+    const subtrkDir = mkdtempSync(join(tmpdir(), "subtrk-serve-"));
+    const shellPath = join(subtrkDir, "console.html");
+    writeFileSync(shellPath, "<!doctype html><title>subtrk</title>");
+    await withServer({ providers: [okModule("claude")], subtrkDir, consoleHtmlPath: shellPath }, async (h) => {
+      // The all-providers usage view routes through the same static shell as
+      // the drill-down; deep paths under /usage are NOT views – 404 JSON.
+      for (const path of ["/usage", "/provider/claude"]) {
+        const r = await get(h.port, path);
+        assert.equal(r.status, 200, path);
+        assert.equal(r.headers["content-type"], "text/html; charset=utf-8", path);
+        assert.equal(r.body, "<!doctype html><title>subtrk</title>", path);
+        noCors(r.headers);
+      }
+      const extra = await get(h.port, "/usage/extra");
+      assert.equal(extra.status, 404);
+      assert.deepEqual(JSON.parse(extra.body), { error: "not found" });
+    });
+  });
+
   it("unknown routes → 404 JSON; non-GET → 405 JSON; no CORS headers anywhere", async () => {
     const subtrkDir = mkdtempSync(join(tmpdir(), "subtrk-serve-"));
     await withServer({ providers: [okModule("claude")], subtrkDir }, async (h) => {
