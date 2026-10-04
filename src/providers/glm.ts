@@ -43,7 +43,9 @@ interface GlmLimit {
 }
 
 // Pure: data.limits[] TOKENS_LIMIT entries -> windows (unit 3 = hours, unit 6 = weeks);
-// TIME_LIMIT entries are built-in-tool quota and ignored in v0. data.level -> plan label.
+// TIME_LIMIT unit 5 is the monthly MCP-tool quota (z.ai's web-search / web-reader /
+// zread calls) and joins the windows as a scoped "MCP" entry; other TIME_LIMIT units
+// are older shapes with unknown semantics and stay ignored. data.level -> plan label.
 // A window sitting at 0% (no query in it yet) omits nextResetTime entirely – skipped as
 // inactive, like claude's resets_at-less entries, never a parse failure.
 // Empty state: no usable windows after that (data missing/null, no limits array, or
@@ -60,9 +62,26 @@ export function parseGlmQuota(body: unknown): { windows: Window[]; plan?: string
   const plan = typeof d.level === "string" || typeof d.level === "number" ? `GLM ${String(d.level)}` : undefined;
   if (!Array.isArray(d.limits)) return plan ? { windows: [], plan, empty: true } : { windows: [], empty: true };
   const windows: Window[] = [];
+  const mcpWindows: Window[] = []; // MCP quota renders after the token windows
   for (const raw of d.limits) {
     if (typeof raw !== "object" || raw === null) continue;
     const l = raw as GlmLimit;
+    if (l.type === "TIME_LIMIT") {
+      // unit 5 = the monthly MCP-tool quota; currentValue sums usageDetails
+      // (search-prime / web-reader / zread calls). z.ai drops nextResetTime on
+      // inactive entries here too – same skip rule as tokens.
+      if (l.unit !== 5) continue;
+      if (l.nextResetTime === undefined || l.nextResetTime === null) continue;
+      if (typeof l.percentage !== "number") return null;
+      if (typeof l.nextResetTime !== "number" || !Number.isFinite(l.nextResetTime)) return null;
+      mcpWindows.push({
+        kind: "MCP",
+        scope: "MCP",
+        usedPercent: l.percentage,
+        resetsAt: new Date(l.nextResetTime).toISOString(),
+      });
+      continue;
+    }
     if (l.type !== "TOKENS_LIMIT") continue;
     // z.ai drops nextResetTime while a window is at 0% – inactive, skip it
     if (l.nextResetTime === undefined || l.nextResetTime === null) continue;
@@ -76,6 +95,7 @@ export function parseGlmQuota(body: unknown): { windows: Window[]; plan?: string
     else continue; // unknown unit – ignore entry
     windows.push({ kind, usedPercent: l.percentage, resetsAt: new Date(l.nextResetTime).toISOString() });
   }
+  windows.push(...mcpWindows);
   if (windows.length === 0) return plan ? { windows, plan, empty: true } : { windows, empty: true };
   return { windows, plan };
 }

@@ -117,7 +117,8 @@ function relative(ms: number): string {
 }
 
 function windowLabel(w: Window, scoped: boolean): string {
-  const prefix = scoped && w.scope ? `${w.scope} ` : "";
+  // scope equals kind on the glm MCP quota window – don't print "MCP MCP"
+  const prefix = scoped && w.scope && w.scope !== w.kind ? `${w.scope} ` : "";
   if (typeof w.usedPercent === "number") {
     return `${prefix}${w.kind} ${Math.round(w.usedPercent)}% (reset ${clock(w.resetsAt)})`;
   }

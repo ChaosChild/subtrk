@@ -194,6 +194,8 @@ td.r, th.r { text-align: right; }
 /* usage drill-down */
 .prov { cursor: pointer; }
 .prov:hover { border-color: var(--border-strong); }
+.prov.nolink { cursor: default; }
+.prov.nolink:hover { border-color: var(--border); }
 .chartwrap { position: relative; padding: 30px 18px 8px; }
 .bars2 { position: relative; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; align-items: end; height: 170px; }
 .bars2.withaxis { border-left: 1px solid var(--border-strong); border-bottom: 1px solid var(--border-strong); }
@@ -496,6 +498,12 @@ function windowHTML(w) {
 }
 
 const prettyScope = s => s.split("-").join(" ");
+// "scope kind" label for tables/timeline/agent view; the scope's first word is
+// dropped when it already equals the kind (glm's MCP quota reports both as "MCP").
+const scopeKind = w => {
+  const s = w.scope ? w.scope.split("-")[0] : "";
+  return s && s !== w.kind ? `${s} ${w.kind}` : w.kind;
+};
 
 let HIDDEN = new Set(); // hidden card keys (config.json `hidden`) – display hint only
 const root = document.documentElement; // <html> – carries data-theme for the CSS
@@ -605,6 +613,9 @@ function cardRank(key) {
 function providerCardHTML(p, g, multi) {
   const m = META[p.id] || { name: p.id, color: "#6b7280", ttl: 0 };
   const worst = Math.max(0, ...g.ws.map(used));
+  // The MCP scope is a tool-quota card, not a model class – display only: it
+  // never opens the token drill-down (no MCP data in /provider/<id>).
+  const drill = g.scope !== "MCP";
   let body = "";
   if (p.credits) {
     const c = p.credits, pct = c.total != null ? clampPct((1 - Number(c.remaining) / Number(c.total)) * 100) : null;
@@ -620,8 +631,8 @@ function providerCardHTML(p, g, multi) {
     body += `<div class="err"><span class="k">${esc(p.error.kind)}</span> – ${esc(p.error.message)}${p.error.hint ? `<div class="h">${esc(p.error.hint)}</div>` : ""}${remedy}${ctl}</div>`;
   }
   if (p.note) body += `<div class="note">${esc(p.note)}</div>`;
-  const hideLabel = multi ? "Hide this model class card" : `Hide ${m.name}`;
-  return `<article class="card prov ${worst >= 95 ? "crit" : ""}" draggable="true" data-key="${esc(g.key)}" data-provider="${esc(p.id)}">
+  const hideLabel = !drill ? "Hide the MCP quota card" : multi ? "Hide this model class card" : `Hide ${m.name}`;
+  return `<article class="card prov ${worst >= 95 ? "crit" : ""}${drill ? "" : " nolink"}" draggable="true" data-key="${esc(g.key)}"${drill ? ` data-provider="${esc(p.id)}"` : ""}>
     <div class="phead"><span class="drag" title="Drag to reorder" aria-hidden="true">⠿</span><div class="pmark" style="background:${m.color}">${esc(String(p.id).slice(0, 2).toUpperCase())}</div>
       <div><div class="pname">${esc(m.name)}${multi && g.scope ? ` · ${esc(prettyScope(g.scope))}` : ""}</div><div class="pplan">${esc(p.plan || "")}</div></div>${cardBadge(p, g.ws)}<button type="button" class="cardx" data-x="${esc(g.key)}" data-multi="${multi ? "1" : ""}" aria-label="${esc(hideLabel)}" title="${esc(hideLabel)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div>
     ${body}
@@ -667,7 +678,7 @@ function summaryHTML() {
   const stale = ps.filter(p => p.stale).length, errs = ps.filter(p => p.error).length;
   return nextCard + `
   <div class="card stat"><div class="label">Providers</div><div class="value">${ps.filter(p => p.ok).length}<span style="color:var(--text-3);font-size:18px"> / ${ps.length}</span></div><div class="sub">${errs ? `${errs} degraded` : "all reporting"}${stale ? ` · ${stale} stale` : ""}</div></div>
-  <div class="card stat"><div class="label">Windows ≥80%</div><div class="value" style="color:${hot.length ? "var(--crit)" : "var(--ok)"}">${hot.length}</div><div class="sub">${hot.map(x => `${esc(x.p.id)} ${esc(x.w.scope ? x.w.scope.split("-")[0] + " " : "")}${esc(x.w.kind)}`).join(", ") || "none"}</div></div>
+  <div class="card stat"><div class="label">Windows ≥80%</div><div class="value" style="color:${hot.length ? "var(--crit)" : "var(--ok)"}">${hot.length}</div><div class="sub">${hot.map(x => `${esc(x.p.id)} ${esc(scopeKind(x.w))}`).join(", ") || "none"}</div></div>
   ${mtdCardsHTML()}`;
 }
 
@@ -728,7 +739,7 @@ function timelineHTML() {
 function resetsHTML() {
   return allWindows().map(({ p, w, u }) => `<tr>
     <td>${esc(p.id)}${p.stale ? ` <span style="color:var(--warn);font-size:11px">[stale]</span>` : ""}</td>
-    <td class="mono">${esc(w.scope ? w.scope.split("-")[0] + " " : "")}${esc(w.kind)}</td>
+    <td class="mono">${esc(scopeKind(w))}</td>
     <td class="r num" style="color:var(--${u >= 80 ? level(u) : "text"})">${u.toFixed(0)}%</td>
     <td class="r num">${when(w.resetsAt)}</td>
     <td class="r num" data-until="${esc(w.resetsAt)}"></td></tr>`).join("");
@@ -741,7 +752,7 @@ function termHTML() {
     if (p.credits && p.credits.cycleEndsAt) segs.push(`cycle ends ${new Date(p.credits.cycleEndsAt).toLocaleDateString("en-CA")}`);
     else if (Array.isArray(p.windows)) segs.push(...p.windows.map(w => {
       const u = used(w), t = w.usedPercent != null ? `${u.toFixed(0)}%` : `${((w.remainingFraction ?? 0) * 100).toFixed(0)}% left`;
-      return `${w.scope ? esc(w.scope.split("-")[0]) + " " : ""}${esc(w.kind)} ${t}${u >= 95 ? ' <span class="w">!</span>' : ""}`;
+      return `${esc(scopeKind(w))} ${t}${u >= 95 ? ' <span class="w">!</span>' : ""}`;
     }));
     if (p.note) segs.push(esc(p.id === "opencode" ? "PAYG · no usage API (signals only)" : p.note));
     return `${esc(p.id).padEnd(11)}${segs.join(" · ")}${p.stale ? '   <span class="s">[stale]</span>' : ""}`;
@@ -1281,7 +1292,7 @@ function renderAllProviderTable(entries, order) {
     const u = e ? e.u : null;
     const dash = `<span style="color:var(--text-3)">–</span>`;
     const windows = p && Array.isArray(p.windows) && p.windows.length
-      ? p.windows.map(w => `${w.scope ? esc(w.scope.split("-")[0]) + " " : ""}${esc(w.kind)} ${used(w).toFixed(0)}%`).join(" · ") + (p.stale ? ` <span style="color:var(--warn);font-size:11px">[stale]</span>` : "")
+      ? p.windows.map(w => `${esc(scopeKind(w))} ${used(w).toFixed(0)}%`).join(" · ") + (p.stale ? ` <span style="color:var(--warn);font-size:11px">[stale]</span>` : "")
       : dash;
     const cost = u && u.usdActual + u.usdEst > 0
       ? `<span class="cstval">$${(u.usdActual + u.usdEst).toFixed(2)}</span>${u.usdActual > 0 ? `<span class="kindchip cstchip actual">act</span>` : ""}${u.usdEst > 0 ? `<span class="kindchip cstchip ${u.splitless ? "blended" : "estimate"}">${u.splitless ? "blend" : "est"}</span>` : ""}`

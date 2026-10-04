@@ -167,7 +167,7 @@ test("claude claudeAuth: valid token passes through, skew window expires, bad sh
 
 // ---- glm -------------------------------------------------------------------
 
-test("glm parseGlmQuota: unit 3 -> hours (5h), unit 6 -> 7d, TIME_LIMIT ignored, level -> plan", () => {
+test("glm parseGlmQuota: unit 3 -> hours (5h), unit 6 -> 7d, legacy TIME_LIMIT (unit 4) ignored, level -> plan", () => {
   const parsed = parseGlmQuota(fixture("glm-quota"));
   assert.ok(parsed);
   assert.equal(parsed.windows.length, 2, "TIME_LIMIT entry must be ignored");
@@ -208,7 +208,7 @@ test("glm parseGlmQuota: object body without data.limits is the empty state, non
   assert.equal(parseGlmQuota(null), null);
 });
 
-test("glm parseGlmQuota: 0% window without nextResetTime is skipped, active 7d still parsed", () => {
+test("glm parseGlmQuota: 0% window without nextResetTime is skipped, TIME_LIMIT unit 5 -> scoped MCP window", () => {
   // Live shape seen 2026-10-03: a window at 0% omits nextResetTime entirely.
   const parsed = parseGlmQuota({
     code: 200,
@@ -232,9 +232,66 @@ test("glm parseGlmQuota: 0% window without nextResetTime is skipped, active 7d s
     },
   });
   assert.ok(parsed);
-  assert.deepEqual(parsed.windows, [{ kind: "7d", usedPercent: 14, resetsAt: new Date(1791443132984).toISOString() }]);
+  // MCP joins the windows (after the token windows) as its own scoped card
+  assert.deepEqual(parsed.windows, [
+    { kind: "7d", usedPercent: 14, resetsAt: new Date(1791443132984).toISOString() },
+    { kind: "MCP", scope: "MCP", usedPercent: 7, resetsAt: new Date(1791875132982).toISOString() },
+  ]);
   assert.equal(parsed.plan, "GLM max");
   assert.equal(parsed.empty, undefined);
+});
+
+test("glm parseGlmQuota: TIME_LIMIT unit 5 is the MCP quota, malformed active entries stay parse failures", () => {
+  // Live shape seen 2026-10-04: usageDetails sum (308+18+0) == currentValue.
+  const parsed = parseGlmQuota({
+    data: {
+      level: "max",
+      limits: [
+        { type: "TOKENS_LIMIT", unit: 3, number: 5, percentage: 9, nextResetTime: 1791153859053 },
+        {
+          type: "TIME_LIMIT",
+          unit: 5,
+          number: 1,
+          usage: 4000,
+          currentValue: 326,
+          percentage: 8,
+          nextResetTime: 1791875132982,
+          usageDetails: [
+            { modelCode: "search-prime", usage: 308 },
+            { modelCode: "web-reader", usage: 18 },
+            { modelCode: "zread", usage: 0 },
+          ],
+        },
+      ],
+    },
+  });
+  assert.ok(parsed);
+  assert.deepEqual(parsed.windows, [
+    { kind: "5h", usedPercent: 9, resetsAt: new Date(1791153859053).toISOString() },
+    { kind: "MCP", scope: "MCP", usedPercent: 8, resetsAt: new Date(1791875132982).toISOString() },
+  ]);
+  // an MCP entry without nextResetTime (unused quota) is skipped, not fatal
+  const noReset = parseGlmQuota({
+    data: {
+      limits: [
+        { type: "TIME_LIMIT", unit: 5, percentage: 8 },
+        { type: "TOKENS_LIMIT", unit: 6, number: 1, percentage: 3, nextResetTime: 1791443132984 },
+      ],
+    },
+  });
+  assert.ok(noReset);
+  assert.deepEqual(noReset.windows, [{ kind: "7d", usedPercent: 3, resetsAt: new Date(1791443132984).toISOString() }]);
+  // an active MCP entry with broken fields fails like a broken token window
+  assert.equal(
+    parseGlmQuota({
+      data: { limits: [{ type: "TIME_LIMIT", unit: 5, percentage: "x", nextResetTime: 1791875132982 }] },
+    }),
+    null,
+  );
+  assert.equal(
+    parseGlmQuota({ data: { limits: [{ type: "TIME_LIMIT", unit: 5, percentage: 8, nextResetTime: "soon" }] } }),
+    null,
+  );
 });
 
 test("glm parseGlmQuota: every window fresh is the empty state, malformed ACTIVE entry stays null", () => {
