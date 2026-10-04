@@ -363,7 +363,10 @@ where fetch is used).
 - Parse `data.limits[]`: `TOKENS_LIMIT` entries where `unit` 3 = hours (window length
   `number`×hours, i.e. the 5h window) and `unit` 6 = weeks (weekly window).
   `percentage` = used %, `nextResetTime` = Unix **ms** → `resetsAt`. `data.level`
-  → plan label. `TIME_LIMIT` entries are built-in-tool quota – ignored in v0.
+  → plan label. `TIME_LIMIT` `unit: 5` is the monthly MCP-tool quota (z.ai's
+  web-search / web-reader / zread calls; `currentValue` sums `usageDetails`) and
+  joins the windows as a scoped `MCP` entry; other `TIME_LIMIT` units are older
+  shapes and stay ignored.
 - Empty state: a 200 body with no `data.limits` (data missing/null or no limits
   array) is the **post-reset idle window**, not an error – limits appear after the
   first query. Probe reports ok with `windows: []` and note "no usage reported yet
@@ -821,7 +824,10 @@ One page for every enabled provider, served from the same cache the CLI reads.
   upcoming-resets table and the agent view. A provider whose windows carry
   distinct scopes renders one card per model class (Google's Gemini and
   Claude/GPT classes are separate cards; single-class providers render one
-  card as before) – each card reads 5h before 7d. Every card has an × that
+  card as before) – each card reads 5h before 7d. The glm MCP quota window
+  gets its own "GLM Coding · MCP" card (bar + reset clock, no usage tracking)
+  that is display-only: it never opens the token drill-down, which has no MCP
+  data. Every card has an × that
   disables the provider (single-class) or hides just that model class
   (multi-class, config `hidden` – display only, probing continues); the
   eye-icon card manager lists every reported card with checkboxes to hide or
