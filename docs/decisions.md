@@ -378,3 +378,14 @@ sessions was rejected as unrepresentative of declared-complexity work); the
 complexity taxonomy is `xs s m l xl` declared at start; session
 self-identification is not probed (`--session` stays manual). Stats/estimate
 verbs, the dashboard Tasks section and the agents.ts blurb land in M4b.
+
+5. **M4b: verdicts come from done work, calibrated honestly.** The
+   estimation set is done, leaf, uncontested records (aborted/failed tasks
+   undercount effort); buckets key on derived provider × declared complexity
+   with an explicit fallback chain and low-n flags. `track estimate` maps
+   percent-remaining to tokens by calibrating the window's capacity from the
+   provider's own observed usage inside the window (consumed ÷ used fraction)
+   and shows the arithmetic; costs are computed at read time against the
+   pricing table, so a pricing refresh reprices history. The dashboard shows
+   data (Tasks strip on the dashboard, /track view, /api/track) – the verdict
+   stays a CLI concern for agents, per review.

@@ -51,6 +51,7 @@ export interface TrackRecord {
   usage: TrackUsage | null; // null = no readable local store (attribution "none")
   bySource?: Record<string, TrackUsage>; // zcode:main / zcode:subagent / zcode:compact / claude / codex
   models?: Record<string, number>; // model -> token share 0..1
+  providerHint?: string; // carried from the marker; stats derive from models otherwise
   wallMs: number;
   note?: string;
 }
@@ -431,6 +432,7 @@ async function closeMarker(
     usage,
     bySource: usage === null ? undefined : result?.bySource,
     models: usage === null ? undefined : result?.models,
+    providerHint: marker.providerHint,
     wallMs: t1 - marker.t0,
     note: note?.trim() || undefined,
   };

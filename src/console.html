@@ -272,12 +272,40 @@ footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; justify-content: s
 footer code { font-family: var(--mono); color: var(--text-2); }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; }
 .legend i { display: inline-block; width: 10px; height: 4px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+
+/* M4b track: home-link brand, Tasks section, /track view */
+a.brand { color: inherit; text-decoration: none; }
+a.brand:hover .logo { opacity: .8; }
+#taskscard { cursor: pointer; }
+#taskscard:hover { border-color: var(--border-strong); }
+#taskscard:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.trkrow { display: flex; align-items: center; gap: 10px; padding: 9px 16px; border-bottom: 1px solid var(--border); font-size: 13px; flex-wrap: wrap; min-width: 0; }
+.trkrow:last-child { border-bottom: 0; }
+.trkrow .tid { font-family: var(--mono); font-size: 12px; color: var(--text-2); flex: none; }
+.trkrow .ttask { flex: 1 1 200px; min-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trkrow .tage { color: var(--text-3); font-size: 12px; margin-left: auto; }
+.dotst { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.ds-live { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.ds-fail { background: var(--crit); }
+.ds-done { border: 2px solid var(--text-3); background: transparent; }
+.ds-stale { background: var(--warn); }
+.cxchip { font: 600 10.5px var(--mono); color: var(--text-2); background: var(--surface-2); border: 1px solid var(--border); border-radius: 5px; padding: 0 6px; flex: none; }
+#tvstats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 1000px) { #tvstats { grid-template-columns: 1fr 1fr; } }
+.tbars { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 10px; align-items: end; height: 170px; border-left: 1px solid var(--border-strong); border-bottom: 1px solid var(--border-strong); padding: 18px 10px 0 6px; }
+.tbgroup { display: flex; gap: 5px; align-items: end; height: 100%; min-width: 0; }
+.tbarm { flex: 1 1 0; min-width: 0; position: relative; border-top: 2px dashed; }
+.tbarm i { position: absolute; bottom: 0; left: 0; right: 0; border-radius: 2px 2px 0 0; display: block; }
+.txlabs { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 10px; padding: 0 10px 0 6px; margin-top: 6px; color: var(--text-3); font: 10.5px var(--mono); }
+.txlabs span { text-align: center; overflow: hidden; white-space: nowrap; }
+.txlabs b { display: block; color: var(--text-2); }
+.swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 7px; vertical-align: middle; }
 </style>
 </head>
 <body>
 <header>
   <div class="wrap bar">
-    <div class="brand"><div class="logo">s</div>subtrk <small>console</small></div>
+    <a class="brand" href="/" aria-label="subtrk console home"><div class="logo">s</div>subtrk <small>console</small></a>
     <div class="spacer"></div>
     <div class="meta">
       <span class="hide-sm"><span class="dot"></span>&nbsp; <span id="host">127.0.0.1</span> · token auth</span>
@@ -313,6 +341,12 @@ footer code { font-family: var(--mono); color: var(--text-2); }
     <div class="card stat"><div class="label">Windows ≥80%</div><div class="value">…</div></div>
     <div class="card stat"><div class="label">Pay-as-you-go</div><div class="value">…</div></div>
     <div class="card stat"><div class="label">Alibaba credits</div><div class="value">…</div></div>
+  </section>
+
+  <!-- M4b: live task markers between the summary and the providers grid -->
+  <section id="taskssec" aria-labelledby="h-tasks" hidden>
+    <div class="sechead"><h2 id="h-tasks">Tasks</h2><p id="tasksnote">open markers</p></div>
+    <div class="card" id="taskscard" data-href="/track" tabindex="0" role="link" aria-label="Open the task tracking page"><div class="empty">…</div></div>
   </section>
 
   <section aria-labelledby="h-prov">
@@ -402,6 +436,36 @@ footer code { font-family: var(--mono); color: var(--text-2); }
   <section>
     <div class="sechead"><h2>Per provider</h2><p>windows column is live from /api/status · sampled at every probe</p></div>
     <div class="card"><div class="tablewrap"><table id="avprov"><thead><tr><th>Provider</th><th class="r">Tokens</th><th class="r">In</th><th class="r">Cache write</th><th class="r">Cache read</th><th class="r">Out</th><th class="r">Requests</th><th class="r">Cost</th><th class="r">Share</th><th>Windows now</th></tr></thead><tbody><tr><td colspan="10">…</td></tr></tbody></table></div></div>
+  </section>
+</main>
+
+<!-- M4b track view: same shell, path-routed from /track (the dashboard Tasks
+     card links here). Store-only /api/track; open markers carry live so-far
+     tokens when the harvest is readable. The verdict lives in the CLI
+     (track estimate) – this page shows data, not decisions. -->
+<main class="wrap" id="trackview" hidden>
+  <div class="sechead" style="margin-top:0">
+    <div>
+      <h2 style="font-size:19px">Tasks · track</h2>
+      <p id="tvsub">task-level usage from local harness stores · active first, then recent</p>
+    </div>
+    <a href="/" id="tvback" style="font-size:12.5px;color:var(--accent);text-decoration:none">← dashboard</a>
+  </div>
+  <section class="summary" id="tvstats" aria-label="Task facts"></section>
+  <section>
+    <div class="card">
+      <div class="cardhead"><h3>Last 15</h3><span>dots: green live · red failed/aborted · hollow done · yellow stale · active rows show running wall + live tokens only</span></div>
+      <div class="tablewrap"><table id="tvlast"><thead><tr><th></th><th>id</th><th>task</th><th>cx</th><th>model</th><th class="r">tokens</th><th class="r">est $</th><th class="r">wall</th><th>status</th></tr></thead><tbody><tr><td colspan="9">…</td></tr></tbody></table></div>
+    </div>
+  </section>
+  <section>
+    <div class="sechead"><h2>Usage by complexity</h2><p>one bar per actually tracked model · solid = p50 · dashed top = p90 · gap = not tracked</p></div>
+    <div class="card" id="tvtokchart"><div class="empty">loading…</div></div>
+    <div class="card" id="tvusdchart" style="margin-top:12px"><div class="empty">loading…</div></div>
+  </section>
+  <section>
+    <div class="sechead"><h2>Distributions</h2><p>the same data as the charts, table form · done · leaves · uncontested</p></div>
+    <div class="card"><div class="tablewrap"><table id="tvdist"><thead><tr><th>model</th><th>cx</th><th class="r">n</th><th class="r">tokens p50</th><th class="r">tokens p90</th><th class="r">est $ p50</th><th class="r">est $ p90</th></tr></thead><tbody><tr><td colspan="7">…</td></tr></tbody></table></div></div>
   </section>
 </main>
 
@@ -558,6 +622,9 @@ const PROVIDER_VIEW = (() => {
   return m && META[m[1]] ? m[1] : null;
 })();
 const ALL_VIEW = !PROVIDER_VIEW && location.pathname === "/usage";
+// M4b: /track renders the task view (the dashboard Tasks card links here)
+const TRACK_VIEW = !PROVIDER_VIEW && !ALL_VIEW && location.pathname === "/track";
+let TRACK = null; // last /api/track payload (markers carry live so-far tokens)
 let USAGE_MTD = null;
 let USAGE_PROV = null;
 let DV = { gran: "day", range: ALL_VIEW ? "mtd" : "30" }; // hour view always covers the last 48h
@@ -792,7 +859,12 @@ function render(data) {
     renderAllView();
     return;
   }
+  if (TRACK_VIEW) {
+    renderTrackView();
+    return;
+  }
   renderAll();
+  renderTasks(); // M4b: the Tasks strip fills independently of /api/status
   syncProviderMenu(); // the dropdown lives outside the re-rendered innerHTML
   syncCardsMenu();
 }
@@ -831,6 +903,7 @@ async function refresh() {
   clearTimeout(timer);
   try {
     if (PROVIDER_VIEW || ALL_VIEW) void refetchUsage(); // parallel – never waits for probes
+    if (TRACK_VIEW || (!PROVIDER_VIEW && !ALL_VIEW)) void fetchTrack(); // store-only + bounded live harvest
     const res = await fetch("/api/status", {
       cache: "no-store",
       headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -1314,6 +1387,13 @@ function renderAllProviderTable(entries, order) {
   }).join("");
 }
 
+if (TRACK_VIEW) {
+  $("dash").hidden = true; // the track view replaces the dashboard
+  $("trackview").hidden = false; // visible immediately – skeleton until data lands
+  $("tvstats").innerHTML = statSkeletonHTML(4);
+  $("tvlast").querySelector("tbody").innerHTML = `<tr><td colspan="9"><span class="spin"></span>loading…</td></tr>`;
+  $("tvback").href = "/" + location.hash; // same-origin navigation keeps the fragment token
+}
 if (PROVIDER_VIEW || ALL_VIEW) {
   const prefix = PROVIDER_VIEW ? "dv" : "av";
   $(prefix + "gran").addEventListener("click", e => {
@@ -1358,7 +1438,8 @@ if (PROVIDER_VIEW || ALL_VIEW) {
     const card = e.target instanceof Element ? e.target.closest("article[data-provider]") : null;
     if (card && card.dataset.provider) location.href = `/provider/${card.dataset.provider}${location.hash}`;
   });
-  // The two MTD stat cards open the all-providers usage view (data-href).
+  // The two MTD stat cards open the all-providers usage view (data-href);
+  // the Tasks card opens /track the same way.
   const openUsage = el => {
     const card = el instanceof Element ? el.closest("[data-href]") : null;
     if (card) location.href = (card.dataset.href || "/usage") + location.hash;
@@ -1370,6 +1451,222 @@ if (PROVIDER_VIEW || ALL_VIEW) {
   $("summary").addEventListener("keydown", e => {
     if (e.key === "Enter") openUsage(e.target);
   });
+  $("taskssec").addEventListener("click", e => {
+    if (e.target instanceof Element && e.target.closest("button, a")) return;
+    openUsage(e.target);
+  });
+  $("taskssec").addEventListener("keydown", e => {
+    if (e.key === "Enter") openUsage(e.target);
+  });
+}
+
+// ---------- M4b track: Tasks strip (dashboard) + /track view ----------
+
+const TRK_CX = ["xs", "s", "m", "l", "xl"];
+// Nearest-rank percentile, the same rule as the CLI (src/track-stats.ts).
+const trkPct = (vals, p) => {
+  if (!vals.length) return null;
+  const s = [...vals].sort((a, b) => a - b);
+  return s[Math.min(s.length - 1, Math.max(0, Math.ceil(p * s.length) - 1))];
+};
+const trkProviderOfModel = model => {
+  const m = (model || "").toLowerCase();
+  if (m.startsWith("glm")) return "glm";
+  if (m.startsWith("claude")) return "claude";
+  if (m.startsWith("gpt") || m.startsWith("o1") || m.startsWith("o3") || m.startsWith("codex")) return "openai";
+  if (m.startsWith("qwen")) return "alibaba";
+  if (m.startsWith("muse")) return "opencode";
+  if (m.startsWith("gemini")) return "google";
+  if (m.startsWith("kimi") || m.startsWith("moonshot")) return "kimi";
+  return null;
+};
+const trkModelColor = model => {
+  const id = trkProviderOfModel(model);
+  return id ? chartColor(id) : "#6b7280";
+};
+const trkDominant = r => {
+  let best = null, share = 0;
+  for (const [m, s] of Object.entries(r.models || {})) if (typeof s === "number" && s > share) { share = s; best = m; }
+  return best;
+};
+const trkAgo = ms => {
+  const mins = Math.round(ms / 6e4);
+  if (mins < 1) return "<1m";
+  const d = Math.floor(mins / 1440), h = Math.floor((mins % 1440) / 60), mm = mins % 60;
+  return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${mm}m` : `${mm}m`;
+};
+// The estimation set: done, leaf, uncontested records with numbers.
+const trkUsable = r => r.usage !== null && !r.pending && !r.contested && r.nested === null && r.status === "done";
+
+async function fetchTrack() {
+  try {
+    const res = await fetch("/api/track?live=1", { cache: "no-store", headers: authHeaders() });
+    if (!res.ok) return; // skeleton stays; a 401 already banners via /api/status
+    TRACK = await res.json();
+    if (TRACK_VIEW) renderTrackView();
+    else if (!PROVIDER_VIEW && !ALL_VIEW) renderTasks();
+  } catch {
+    /* the strip/view simply stays on its last render */
+  }
+}
+
+// Dashboard strip: up to 5 open markers; the whole card opens /track.
+function renderTasks() {
+  if (!TRACK) return;
+  const ms = Array.isArray(TRACK.markers) ? TRACK.markers : [];
+  const sec = $("taskssec");
+  if (ms.length === 0) {
+    sec.hidden = true;
+    return;
+  }
+  sec.hidden = false;
+  $("tasksnote").textContent = `${ms.length} open marker${ms.length === 1 ? "" : "s"} · click through to /track`;
+  const rows = ms.slice(0, 5).map(m => {
+    const age = trkAgo(Date.now() - m.t0);
+    const live = m.live && m.live.tokens ? ` · ${fmtTok(m.live.tokens)} tok so far` : "";
+    const stale = Date.now() - m.t0 > 6 * 36e5 ? "  [stale?]" : "";
+    return `<div class="trkrow"><span class="dotst ds-live"></span><span class="tid">${esc(m.id)}${stale}</span><span class="ttask" title="${esc(m.task)}">${esc(m.task)}</span>${m.complexity ? `<span class="cxchip">${esc(m.complexity)}</span>` : ""}<span class="tage">${age}${live}</span></div>`;
+  }).join("");
+  $("taskscard").innerHTML = rows + (ms.length > 5 ? `<div class="empty" style="padding:8px">… ${ms.length - 5} more on /track</div>` : "");
+}
+
+// The model × complexity grid the charts and the distributions table share:
+// { models: [name...], byCx: { cx: { model: { tok: [], usd: [] } } } }
+function trkBuckets(records) {
+  const models = new Map(); // name -> n
+  const byCx = {};
+  for (const r of records) {
+    const model = trkDominant(r) || "?";
+    models.set(model, (models.get(model) || 0) + 1);
+    const cx = r.complexity || "–";
+    (byCx[cx] ??= {});
+    const cell = (byCx[cx][model] ??= { tok: [], usd: [] });
+    cell.tok.push(r.tokens);
+    if (typeof r.usdE === "number") cell.usd.push(r.usdE);
+  }
+  return { models: [...models.entries()].sort((a, b) => b[1] - a[1]).map(e => e[0]), byCx };
+}
+
+function trkChartHTML(buckets, field, fmt) {
+  // One column per complexity, one bar per tracked model: wrapper height =
+  // p90 of the scale, solid fill = p50, dashed wrapper top = the p90 mark.
+  const scaleMax = Math.max(
+    1,
+    ...TRK_CX.flatMap(cx =>
+      Object.values(buckets.byCx[cx] || {}).map(cell => {
+        const p90 = trkPct(cell[field], 0.9);
+        return p90 === null ? 0 : p90;
+      }),
+    ),
+  );
+  const cols = TRK_CX.map(cx => {
+    const cell = buckets.byCx[cx] || {};
+    const bars = buckets.models
+      .filter(m => cell[m])
+      .map(m => {
+        const p50 = trkPct(cell[m][field], 0.5) ?? 0;
+        const p90 = trkPct(cell[m][field], 0.9) ?? p50;
+        const h90 = (p90 / scaleMax) * 100;
+        const fill = p90 > 0 ? Math.max(6, (p50 / p90) * 100) : 0;
+        const color = trkModelColor(m);
+        return `<div class="tbarm" style="height:${h90.toFixed(1)}%;border-color:${color}" title="${esc(m)} · p50 ${fmt(p50)} · p90 ${fmt(p90)}"><i style="height:${fill.toFixed(1)}%;background:${color}"></i></div>`;
+      })
+      .join("");
+    return `<div class="tbgroup">${bars}</div>`;
+  }).join("");
+  const labs = TRK_CX.map(cx => {
+    const cell = buckets.byCx[cx] || {};
+    const vals = buckets.models.filter(m => cell[m]).map(m => {
+      const p50 = trkPct(cell[m][field], 0.5);
+      return p50 === null ? "" : fmt(p50);
+    });
+    return `<span><b>${cx}</b>${vals.join(" · ") || "–"}</span>`;
+  }).join("");
+  const legend = buckets.models.map(m => `<span><i style="background:${trkModelColor(m)}"></i>${esc(m)}</span>`).join("");
+  return `<div style="padding:16px 16px 12px"><div class="tbars">${cols}</div><div class="txlabs">${labs}</div><div class="legend2">${legend}<span><i style="border-top:2px dashed var(--text-3);background:none;height:0"></i>p90</span></div></div>`;
+}
+
+function renderTrackView() {
+  if (!TRACK) return;
+  const markers = Array.isArray(TRACK.markers) ? TRACK.markers : [];
+  const records = Array.isArray(TRACK.records) ? TRACK.records : [];
+  const nowMs = now();
+
+  // Fact cards: model-agnostic headline (the MTD tokens+value pairing).
+  const usable30 = records.filter(r => trkUsable(r) && r.t1 >= nowMs - 30 * 864e5);
+  const toks = usable30.map(r => r.tokens);
+  const usds = usable30.map(r => r.usdE).filter(v => typeof v === "number");
+  const done30 = records.filter(r => r.status === "done" && r.t1 >= nowMs - 30 * 864e5).length;
+  const med = trkPct(toks, 0.5);
+  const p90 = trkPct(toks, 0.9);
+  const medUsd = trkPct(usds, 0.5);
+  const p90Usd = trkPct(usds, 0.9);
+  const stat = (label, value, sub) => `<div class="card stat"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
+  $("tvstats").innerHTML =
+    stat("open tracks", String(markers.length), markers.length ? "live so-far below" : "nothing running") +
+    stat("tracked tasks · 30d", String(done30), `${done30 === usable30.length ? "all done" : usable30.length + " in stats"}`) +
+    stat(
+      "median task · all models",
+      med === null ? "–" : fmtTok(med),
+      toks.length ? `min ${fmtTok(Math.min(...toks))} · max ${fmtTok(Math.max(...toks))} · p90 ${p90 === null ? "–" : fmtTok(p90)} · n=${toks.length}` : "no records yet",
+    ) +
+    stat(
+      "median task value · all models",
+      medUsd === null ? "–" : `$${medUsd.toFixed(2)}`,
+      usds.length ? `max $${Math.max(...usds).toFixed(2)} · p90 ${p90Usd === null ? "–" : `$${p90Usd.toFixed(2)}`}` : "unpriced",
+    );
+
+  // Last 15: active first (live dot, no usage columns), then records newest
+  // first. Dots: green live, red failed/aborted, hollow done, yellow stale.
+  const rows = markers.map(m => {
+    const live = m.live && m.live.tokens ? `<span class="mono">${fmtTok(m.live.tokens)} so far</span>` : `<span style="color:var(--text-3)">–</span>`;
+    return `<tr><td><span class="dotst ds-live"></span></td><td class="mono">${esc(m.id)}</td><td class="wrapcell" style="white-space:normal;min-width:180px">${esc(m.task)}</td><td>${m.complexity ? `<span class="cxchip">${esc(m.complexity)}</span>` : "–"}</td><td class="mono">–</td><td class="r" style="text-align:right">${live}</td><td style="text-align:right;color:var(--text-3)">–</td><td class="r mono" style="text-align:right">${trkAgo(nowMs - m.t0)} ↦</td><td><span class="badge b-ok">running</span></td></tr>`;
+  });
+  const dotFor = r => (r.status === "stale" ? "ds-stale" : r.status === "done" ? "ds-done" : "ds-fail");
+  const statusBadge = r => {
+    if (r.status === "stale") return `<span class="badge b-warn">stale</span>`;
+    if (r.status === "aborted" || r.status === "failed") return `<span class="badge b-muted">${esc(r.status)}</span>`;
+    return `<span class="badge b-ok">${esc(r.attribution)}</span>`;
+  };
+  const flags = r => `${r.contested ? ` <span class="badge b-crit">contested</span>` : ""}${r.nested ? ` <span class="badge b-muted">nested</span>` : ""}${r.pending ? ` <span class="badge b-warn">pending</span>` : ""}`;
+  for (const r of [...records].sort((a, b) => b.t1 - a.t1)) {
+    if (rows.length >= 15) break;
+    const model = trkDominant(r) || "–";
+    const split = r.usage ? `${fmtTok(r.usage.in)} / ${fmtTok(r.usage.cr)}·${fmtTok(r.usage.cw)} / ${fmtTok(r.usage.out)}` : "–";
+    rows.push(
+      `<tr><td><span class="dotst ${dotFor(r)}"></span></td><td class="mono">${esc(r.id)}</td><td style="white-space:normal;min-width:180px">${esc(r.task)}</td><td>${r.complexity ? `<span class="cxchip">${esc(r.complexity)}</span>` : "–"}</td><td class="mono">${esc(model)}</td><td class="r mono" style="text-align:right" title="in / cr·cw / out">${r.tokens ? fmtTok(r.tokens) : "–"}${r.usage ? `<span style="color:var(--text-3)"> (${split})</span>` : ""}</td><td class="r mono" style="text-align:right">${typeof r.usdE === "number" ? `$${r.usdE.toFixed(2)}` : "–"}</td><td class="r mono" style="text-align:right">${trkAgo(r.wallMs)}</td><td>${statusBadge(r)}${flags(r)}</td></tr>`,
+    );
+  }
+  $("tvlast").querySelector("tbody").innerHTML = rows.length
+    ? rows.join("")
+    : `<tr><td colspan="9"><div class="empty">no markers or records yet – agents: subtrk track start --task … / track stop</div></td></tr>`;
+
+  // Charts + distributions over the same usable set.
+  const buckets = trkBuckets(usable30);
+  $("tvtokchart").innerHTML = usable30.length
+    ? trkChartHTML(buckets, "tok", fmtTok)
+    : `<div class="empty">no done tasks yet – distributions fill as agents adopt track start/stop</div>`;
+  $("tvusdchart").innerHTML = usable30.length
+    ? trkChartHTML(buckets, "usd", v => `$${v.toFixed(2)}`)
+    : `<div class="empty">–</div>`;
+  const distRows = [];
+  for (const model of buckets.models) {
+    for (const cx of [...TRK_CX, "–"]) {
+      const cell = (buckets.byCx[cx] || {})[model];
+      if (!cell) continue;
+      const p50 = trkPct(cell.tok, 0.5);
+      const p90tok = trkPct(cell.tok, 0.9);
+      const p50usd = trkPct(cell.usd, 0.5);
+      const p90usd = trkPct(cell.usd, 0.9);
+      distRows.push(
+        `<tr><td><i class="swatch" style="background:${trkModelColor(model)}"></i><span class="mono">${esc(model)}</span></td><td class="mono">${esc(cx)}</td><td class="r mono" style="text-align:right">${cell.tok.length}${cell.tok.length < 3 ? " ⚠" : ""}</td><td class="r mono" style="text-align:right">${p50 === null ? "–" : fmtTok(p50)}</td><td class="r mono" style="text-align:right">${p90tok === null ? "–" : fmtTok(p90tok)}</td><td class="r mono" style="text-align:right">${p50usd === null ? "–" : `$${p50usd.toFixed(2)}`}</td><td class="r mono" style="text-align:right">${p90usd === null ? "–" : `$${p90usd.toFixed(2)}`}</td></tr>`,
+      );
+    }
+  }
+  $("tvdist").querySelector("tbody").innerHTML = distRows.length
+    ? distRows.join("")
+    : `<tr><td colspan="7"><div class="empty">nothing yet</div></td></tr>`;
+  $("tvsub").textContent = `${markers.length} open · ${records.length} records · estimates repriced at read time`;
 }
 
 $("host").textContent = HOST;

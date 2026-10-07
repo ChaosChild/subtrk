@@ -245,12 +245,33 @@ subtrk track prune               # close markers orphaned by crashes (≥3d,
                                  #   --before 24h / --all)
 ```
 
+After a few tasks, the history answers the question that motivated all of
+this — "is my remaining window enough for an m task?" — with your own data:
+
+```bash
+subtrk track stats                          # distributions per provider x
+                                            #   complexity, median task (all
+                                            #   models) with min/max/p90
+subtrk track estimate --provider glm --complexity m
+# history   n=14 (glm, m) · done · leaves
+#   p50 1.21M tok / $3.99      p90 2.05M tok / $6.77
+# window    glm 5h · 18% left
+#   ≈ 1.29M tok remaining  (calibrated: 5.9M consumed at 82% → capacity 7.2M)
+# verdict   median fits · p90 does not — split the task or switch model
+```
+
+On the dashboard, open markers show as a **Tasks** strip (live so-far usage
+included) that clicks through to the `/track` page: last 15 tasks, usage by
+complexity per tracked model in tokens and est value, and the distributions
+table.
+
 Records live in `~/.subtrk/track.json` and carry honesty flags rather than
 guesses: `nested` when one task ran inside another's window, `contested` when
 overlapping tasks provably shared sessions, and `usage: null` when no local
-store was readable — never a machine-wide blur. The upcoming `track stats` /
-`track estimate` (M4b) turn the history into "is my remaining window enough
-for an m task?" answers.
+store was readable — never a machine-wide blur. The agent-instruction blurb
+(`subtrk init --agent`) teaches the whole workflow: check `track status`
+first, stop or prune your own open markers, start before non-trivial tasks,
+stop when done, and ask `track estimate` before large work.
 
 On the dashboard (screenshot above), the month-to-date cards sum the local
 calendar month, this-machine harvests included and labeled, and every provider

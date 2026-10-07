@@ -27,6 +27,7 @@ import {
 import { runInit } from "./init.ts";
 import { runServe } from "./serve.ts";
 import { trackCommand } from "./track.ts";
+import { estimateCommand, statsCommand } from "./track-stats.ts";
 import { aggregateUsage, harvestUsage, mutateUsageStore, readUsageStore } from "./usage.ts";
 
 export interface CliDirs {
@@ -49,7 +50,7 @@ usage:
   subtrk status [flags]   probe enabled providers, compact text
   subtrk usage [flags]    token usage + API-equivalent cost from the local store
   subtrk track <sub>      task-level usage accounting (start, stop, status,
-                          list, prune)
+                          list, stats, estimate, prune)
   subtrk init             one-time interactive setup
   subtrk init --agent <id>  write agent instructions for a harness and exit
                           (claude|zcode|codex|opencode|agy)
@@ -86,6 +87,14 @@ track flags:
     [--note <text>]
   track status          open markers + records still pending harvest
   track list            recent records (--days N, default 30)
+  track stats           usage distributions per provider x complexity
+    [--provider <id>]   one provider
+    [--complexity <cx>] one bucket
+    [--model <name>]    substring filter
+    [--days N]          window (default 30)
+  track estimate        is the remaining window enough for this kind of task?
+    [--provider <id>]   the window to compare against
+    [--complexity <cx>] the bucket to estimate (fallback chain shown)
   track prune           close markers orphaned by crashes/hangs
     [--before 24h]      duration cutoff (d|h|m); default 3d
     [--all]             close every open marker
@@ -241,6 +250,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
         rebuild: { type: "boolean", default: false },
         task: { type: "string" },
         complexity: { type: "string" },
+        model: { type: "string" },
         tags: { type: "string" },
         project: { type: "string" },
         session: { type: "string" },
@@ -264,7 +274,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
   }
   const positionals = parsed.positionals;
   // the only two-verb commands: "auth refresh" and "track <sub>"
-  const TRACK_SUBS = new Set(["start", "stop", "status", "list", "prune"]);
+  const TRACK_SUBS = new Set(["start", "stop", "status", "list", "stats", "estimate", "prune"]);
   if (positionals[0] === "auth") {
     if (positionals[1] !== "refresh" || positionals.length > 2) {
       console.error(`subtrk: unknown command '${positionals.join(" ")}' – try subtrk --help`);
@@ -297,6 +307,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     rebuild,
     task,
     complexity,
+    model,
     tags,
     project,
     session,
@@ -320,6 +331,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     rebuild?: boolean;
     task?: string;
     complexity?: string;
+    model?: string;
     tags?: string;
     project?: string;
     session?: string;
@@ -373,6 +385,16 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     }
   }
   if (cmd === "auth refresh") return authRefresh(provider, deps);
+  if (cmd === "track stats")
+    return statsCommand(
+      { json: json === true, provider: provider.length === 1 ? provider[0] : undefined, complexity, model, days },
+      { subtrkDir: deps.dirs?.subtrk },
+    );
+  if (cmd === "track estimate")
+    return estimateCommand(
+      { json: json === true, provider: provider.length === 1 ? provider[0] : undefined, complexity, model },
+      { subtrkDir: deps.dirs?.subtrk },
+    );
   if (cmd.startsWith("track "))
     return trackCommand(
       {

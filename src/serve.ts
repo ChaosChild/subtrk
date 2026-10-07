@@ -30,6 +30,8 @@ import {
   scrubValue,
 } from "./core.ts";
 import { allProviders, refreshableProviders } from "./providers/index.ts";
+import { type HarvestFn, readTrackStore, type TrackMarker } from "./track.ts";
+import { type EnrichedRecord, enrichRecord } from "./track-stats.ts";
 import { aggregateUsage, harvestUsage, readUsageStore } from "./usage.ts";
 
 export interface ServeDeps {
@@ -39,6 +41,7 @@ export interface ServeDeps {
   port?: number; // default 0 – random ephemeral port
   version?: string; // package version surfaced via /api/config (default: pkgVersion())
   refresh?: (id: string) => Promise<RefreshResult>; // stub seam (tests); default: module registry
+  trackLive?: HarvestFn; // stub seam (tests) for /api/track?live=1; default: real local harvest
 }
 
 export interface ServeHandle {
@@ -172,7 +175,7 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
         return;
       }
       const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
-      if (path === "/" || path === "/usage" || path.startsWith("/provider/")) {
+      if (path === "/" || path === "/usage" || path === "/track" || path.startsWith("/provider/")) {
         if (req.method !== "GET") {
           respond(res, 405, JSON.stringify({ error: "method not allowed" }));
           return;
@@ -285,6 +288,63 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
           console.error(`subtrk: ${errorMessage(err)}`);
           respond(res, 500, JSON.stringify({ error: "usage unavailable" }));
         }
+        return;
+      }
+      if (path === "/api/track") {
+        if (req.method !== "GET") {
+          respond(res, 405, JSON.stringify({ error: "method not allowed" }), "application/json", { allow: "GET" });
+          return;
+        }
+        if (!tokenOk(req.headers.authorization, token)) {
+          respond(res, 401, JSON.stringify({ error: "unauthorized" }));
+          return;
+        }
+        // Store-only read, like /api/usage. Records are enriched at read time
+        // (tokens total + est cost + derived provider) so a pricing refresh
+        // reprices history. ?live=1 adds a bounded so-far harvest per OPEN
+        // marker – local reads only; a failure degrades that row's live data.
+        const live = new URL(req.url ?? "/", "http://127.0.0.1").searchParams.get("live") === "1";
+        void (async () => {
+          try {
+            const dir = deps.subtrkDir ?? SUBTRK_DIR;
+            const tstore = readTrackStore(dir);
+            const ustore = readUsageStore(dir);
+            const records: EnrichedRecord[] = tstore.records.map((r) => enrichRecord(r, ustore));
+            let markers: (TrackMarker & { live?: { tokens: number; attribution: string } | null })[] = tstore.markers;
+            if (live) {
+              const runLive: HarvestFn =
+                deps.trackLive ?? (async (w) => (await import("./track-harvest.ts")).harvestWindow(w));
+              markers = await Promise.all(
+                markers.map(async (m) => {
+                  try {
+                    const h = await runLive({ project: m.project, t0: m.t0, t1: Date.now() });
+                    if (!h?.usage) return { ...m, live: null };
+                    const u = h.usage;
+                    return { ...m, live: { tokens: u.in + u.cr + u.cw + u.out, attribution: h.attribution } };
+                  } catch {
+                    return { ...m, live: null };
+                  }
+                }),
+              );
+            }
+            respond(
+              res,
+              200,
+              JSON.stringify(
+                scrubValue({
+                  schemaVersion: 1,
+                  generatedAt: new Date().toISOString(),
+                  live,
+                  markers,
+                  records,
+                }),
+              ),
+            );
+          } catch (err) {
+            console.error(`subtrk: ${errorMessage(err)}`);
+            respond(res, 500, JSON.stringify({ error: "track unavailable" }));
+          }
+        })();
         return;
       }
       if (path === "/api/refresh") {
