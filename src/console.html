@@ -1495,6 +1495,9 @@ const trkAgo = ms => {
   const d = Math.floor(mins / 1440), h = Math.floor((mins % 1440) / 60), mm = mins % 60;
   return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${mm}m` : `${mm}m`;
 };
+// Track dollars: flash-tier tasks price under a cent – two decimals would
+// render a real cost as $0.00.
+const trkUsd = v => (typeof v !== "number" ? "–" : v > 0 && v < 0.01 ? `$${v.toFixed(3)}` : `$${v.toFixed(2)}`);
 // The estimation set: done, leaf, uncontested records with numbers.
 const trkUsable = r => r.usage !== null && !r.pending && !r.contested && r.nested === null && r.status === "done";
 
@@ -1510,16 +1513,31 @@ async function fetchTrack() {
   }
 }
 
-// Dashboard strip: up to 5 open markers; the whole card opens /track.
+// Dashboard strip: always visible. Open markers when any are running;
+// otherwise the most recent finished task, so the path to /track and the
+// task history never disappears. The whole card opens /track.
 function renderTasks() {
   if (!TRACK) return;
   const ms = Array.isArray(TRACK.markers) ? TRACK.markers : [];
+  const recs = Array.isArray(TRACK.records) ? TRACK.records : [];
   const sec = $("taskssec");
+  sec.hidden = false;
   if (ms.length === 0) {
-    sec.hidden = true;
+    $("tasksnote").textContent = "no open markers · click through to /track";
+    const last = recs.length ? recs.reduce((a, b) => (b.t1 > a.t1 ? b : a)) : null;
+    if (!last) {
+      $("taskscard").innerHTML = `<div class="empty" style="padding:14px">no tracked tasks yet – agents mark them with <span class="mono">subtrk track start</span></div>`;
+      return;
+    }
+    const dot = last.status === "stale" ? "ds-stale" : last.status === "done" ? "ds-done" : "ds-fail";
+    const tail = [
+      last.tokens ? fmtTok(last.tokens) : null,
+      typeof last.usdE === "number" ? trkUsd(last.usdE) : null,
+      `${trkAgo(last.wallMs)} · ended ${trkAgo(Date.now() - last.t1)} ago`,
+    ].filter(Boolean).join(" · ");
+    $("taskscard").innerHTML = `<div class="trkrow"><span class="dotst ${dot}"></span><span class="tid">${esc(last.id)}</span><span class="ttask" title="${esc(last.task)}">${esc(last.task)}</span>${last.complexity ? `<span class="cxchip">${esc(last.complexity)}</span>` : ""}<span class="tage">${tail}</span></div>`;
     return;
   }
-  sec.hidden = false;
   $("tasksnote").textContent = `${ms.length} open marker${ms.length === 1 ? "" : "s"} · click through to /track`;
   const rows = ms.slice(0, 5).map(m => {
     const age = trkAgo(Date.now() - m.t0);
@@ -1612,8 +1630,8 @@ function renderTrackView() {
     ) +
     stat(
       "median task value · all models",
-      medUsd === null ? "–" : `$${medUsd.toFixed(2)}`,
-      usds.length ? `max $${Math.max(...usds).toFixed(2)} · p90 ${p90Usd === null ? "–" : `$${p90Usd.toFixed(2)}`}` : "unpriced",
+      trkUsd(medUsd),
+      usds.length ? `max ${trkUsd(Math.max(...usds))} · p90 ${p90Usd === null ? "–" : trkUsd(p90Usd)}` : "unpriced",
     );
 
   // Last 15: active first (live dot, no usage columns), then records newest
@@ -1634,7 +1652,7 @@ function renderTrackView() {
     const model = trkDominant(r) || "–";
     const split = r.usage ? `${fmtTok(r.usage.in)} / ${fmtTok(r.usage.cr)}·${fmtTok(r.usage.cw)} / ${fmtTok(r.usage.out)}` : "–";
     rows.push(
-      `<tr><td><span class="dotst ${dotFor(r)}"></span></td><td class="mono">${esc(r.id)}</td><td style="white-space:normal;min-width:180px">${esc(r.task)}</td><td>${r.complexity ? `<span class="cxchip">${esc(r.complexity)}</span>` : "–"}</td><td class="mono">${esc(model)}</td><td class="r mono" style="text-align:right" title="in / cr·cw / out">${r.tokens ? fmtTok(r.tokens) : "–"}${r.usage ? `<span style="color:var(--text-3)"> (${split})</span>` : ""}</td><td class="r mono" style="text-align:right">${typeof r.usdE === "number" ? `$${r.usdE.toFixed(2)}` : "–"}</td><td class="r mono" style="text-align:right">${trkAgo(r.wallMs)}</td><td>${statusBadge(r)}${flags(r)}</td></tr>`,
+      `<tr><td><span class="dotst ${dotFor(r)}"></span></td><td class="mono">${esc(r.id)}</td><td style="white-space:normal;min-width:180px">${esc(r.task)}</td><td>${r.complexity ? `<span class="cxchip">${esc(r.complexity)}</span>` : "–"}</td><td class="mono">${esc(model)}</td><td class="r mono" style="text-align:right" title="in / cr·cw / out">${r.tokens ? fmtTok(r.tokens) : "–"}${r.usage ? `<span style="color:var(--text-3)"> (${split})</span>` : ""}</td><td class="r mono" style="text-align:right">${trkUsd(r.usdE)}</td><td class="r mono" style="text-align:right">${trkAgo(r.wallMs)}</td><td>${statusBadge(r)}${flags(r)}</td></tr>`,
     );
   }
   $("tvlast").querySelector("tbody").innerHTML = rows.length
@@ -1647,7 +1665,7 @@ function renderTrackView() {
     ? trkChartHTML(buckets, "tok", fmtTok)
     : `<div class="empty">no done tasks yet – distributions fill as agents adopt track start/stop</div>`;
   $("tvusdchart").innerHTML = usable30.length
-    ? trkChartHTML(buckets, "usd", v => `$${v.toFixed(2)}`)
+    ? trkChartHTML(buckets, "usd", trkUsd)
     : `<div class="empty">–</div>`;
   const distRows = [];
   for (const model of buckets.models) {
@@ -1659,7 +1677,7 @@ function renderTrackView() {
       const p50usd = trkPct(cell.usd, 0.5);
       const p90usd = trkPct(cell.usd, 0.9);
       distRows.push(
-        `<tr><td><i class="swatch" style="background:${trkModelColor(model)}"></i><span class="mono">${esc(model)}</span></td><td class="mono">${esc(cx)}</td><td class="r mono" style="text-align:right">${cell.tok.length}${cell.tok.length < 3 ? " ⚠" : ""}</td><td class="r mono" style="text-align:right">${p50 === null ? "–" : fmtTok(p50)}</td><td class="r mono" style="text-align:right">${p90tok === null ? "–" : fmtTok(p90tok)}</td><td class="r mono" style="text-align:right">${p50usd === null ? "–" : `$${p50usd.toFixed(2)}`}</td><td class="r mono" style="text-align:right">${p90usd === null ? "–" : `$${p90usd.toFixed(2)}`}</td></tr>`,
+        `<tr><td><i class="swatch" style="background:${trkModelColor(model)}"></i><span class="mono">${esc(model)}</span></td><td class="mono">${esc(cx)}</td><td class="r mono" style="text-align:right">${cell.tok.length}${cell.tok.length < 3 ? " ⚠" : ""}</td><td class="r mono" style="text-align:right">${p50 === null ? "–" : fmtTok(p50)}</td><td class="r mono" style="text-align:right">${p90tok === null ? "–" : fmtTok(p90tok)}</td><td class="r mono" style="text-align:right">${p50usd === null ? "–" : trkUsd(p50usd)}</td><td class="r mono" style="text-align:right">${p90usd === null ? "–" : trkUsd(p90usd)}</td></tr>`,
       );
     }
   }
