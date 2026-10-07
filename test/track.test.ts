@@ -77,10 +77,17 @@ function fixture(harvestImpl?: HarvestFn): Fixture {
       calls.windows.push(w);
       return usage(1000, 5000, 200, 400);
     });
-  return { dir, cwd, now, calls, harvest, restore: () => {
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(cwd, { recursive: true, force: true });
-  } };
+  return {
+    dir,
+    cwd,
+    now,
+    calls,
+    harvest,
+    restore: () => {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    },
+  };
 }
 
 // Parse a mini flag argv (--task=x pairs, bare --all) into TrackArgs fields.
@@ -276,7 +283,10 @@ describe("contested + nested detection", () => {
     try {
       await overlappingPair(fx, ["sess_a", "sess_b"]);
       const records = readTrackStore(fx.dir).records;
-      assert.equal(records.some((r) => r.contested), false);
+      assert.equal(
+        records.some((r) => r.contested),
+        false,
+      );
     } finally {
       fx.restore();
     }
@@ -403,10 +413,7 @@ describe("cli dispatch", () => {
     const fx = fixture();
     const cap = captureConsole();
     try {
-      const code = await main(
-        ["track", "start", "--task=via cli", "--json"],
-        { dirs: { subtrk: fx.dir } },
-      );
+      const code = await main(["track", "start", "--task=via cli", "--json"], { dirs: { subtrk: fx.dir } });
       assert.equal(code, 0);
       const parsed = JSON.parse(cap.out[0]) as { marker: { id: string; task: string } };
       assert.equal(parsed.marker.task, "via cli");
@@ -441,7 +448,11 @@ function claudeLine(ts: number, id: string, inTok: number, cr: number, out: numb
     type: "assistant",
     timestamp: new Date(ts).toISOString(),
     requestId: `req_${id}`,
-    message: { id: `msg_${id}`, model: "claude-opus-5-5", usage: { input_tokens: inTok, cache_read_input_tokens: cr, cache_creation_input_tokens: 0, output_tokens: out } },
+    message: {
+      id: `msg_${id}`,
+      model: "claude-opus-5-5",
+      usage: { input_tokens: inTok, cache_read_input_tokens: cr, cache_creation_input_tokens: 0, output_tokens: out },
+    },
   });
 }
 
@@ -450,7 +461,17 @@ function codexTokenLine(ts: number, ordinal: number, totalIn: number, cached: nu
     timestamp: new Date(ts).toISOString(),
     ordinal,
     type: "event_msg",
-    payload: { type: "token_count", info: { total_token_usage: { input_tokens: totalIn, cached_input_tokens: cached, cache_write_input_tokens: 0, output_tokens: out } } },
+    payload: {
+      type: "token_count",
+      info: {
+        total_token_usage: {
+          input_tokens: totalIn,
+          cached_input_tokens: cached,
+          cache_write_input_tokens: 0,
+          output_tokens: out,
+        },
+      },
+    },
   });
 }
 
