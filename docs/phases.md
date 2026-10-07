@@ -23,18 +23,18 @@ day/hour charts, per-model cost tables, window-% history, and an
 all-providers usage page with per-provider stacked spend + token charts).
 Design and sourcing decisions in `docs/decisions.md` (D12–D17).
 
-## M4 – Task-level usage accounting (in progress)
+## M4 – Task-level usage accounting (M4a/M4b shipped in v0.1.18; M4c pending)
 
 Track what a task actually costs, from the harnesses' own local stores, so
 agents can answer "is my remaining window enough?" from history.
 
-- **M4a (PR #35, in review)**: `subtrk track start/stop/status/list/prune`, the
+- **M4a (PR #35)**: `subtrk track start/stop/status/list/prune`, the
   `~/.subtrk/track.json` store, window harvesters (zcode `db.sqlite`
   per-request rows, claude transcripts, codex rollouts) normalized to the
   house `in`/`cr`/`cw`/`out` convention, pending-harvest retry,
   contested/nested detection, open-marker warnings. Decisions in
   `docs/decisions.md` (D18).
-- **M4b (PR #36, stacked on M4a)**: `track stats` + `track estimate`
+- **M4b (PR #37, stacked on M4a)**: `track stats` + `track estimate`
   (distributions per provider × complexity with a fallback chain; the verdict
   calibrates percent-remaining into tokens from observed window usage), the
   dashboard Tasks strip + `/track` view + `GET /api/track` (records enriched
