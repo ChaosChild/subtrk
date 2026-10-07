@@ -24,6 +24,11 @@ shared cache so concurrent agents never hammer provider endpoints.
 | `subtrk usage --days N` | Look back N days (1–365); default is the local calendar month to date |
 | `subtrk usage --hour` | Hourly buckets instead of daily |
 | `subtrk usage --rebuild` | Drop and refetch re-derivable range-API history (glm, openrouter); zcode deltas and % samples are never rebuilt (not re-derivable) |
+| `subtrk track start --task <text>` | Open a task marker; `--complexity xs\|s\|m\|l\|xl`, `--tags a,b`, `--project <dir>` (default cwd), `--provider <id>` hint; warns when markers are already open in the project |
+| `subtrk track stop` | Close the newest open marker for this directory (`--id` to pick, `--status done\|aborted\|failed`, `--note`) and harvest its real token usage from local harness stores (§Track store) |
+| `subtrk track status` | Open markers (age, `stale?` past 6h) + records still pending their harvest retry |
+| `subtrk track list` | Recent records, newest first (`--days N`, default 30) |
+| `subtrk track prune` | Close markers orphaned by crashed/hung harnesses: default ≥3 days, `--before <dur>` (`24h`, `60m`, `3d`), `--all`; closed as `stale` with the harvest still attempted |
 | `subtrk init` | One-time interactive setup (the only interactive command) |
 | `subtrk init --agent <harness>` | Non-interactive: write subtrk's instructions into a harness's global agent file (see §`subtrk init`) |
 | `subtrk auth refresh` | Re-run one provider's interactive credential refresh (`--provider <id>`, see §`subtrk auth refresh`) |
@@ -270,6 +275,37 @@ formula `in·P_in + cr·P_cr + cw·P_cw + out·P_out`), `blended` (split-less
 zcode totals priced with the operator's observed z.ai in/cache/out mix, labeled
 an estimate). Providers with no token surface (claude, google, kimi) surface
 window-% history from `samples` instead of tokens.
+
+## Track store (task-level accounting)
+
+File `~/.subtrk/track.json` (schema version 1, same existence-only lockfile +
+temp-and-rename discipline as the other stores). Markers are passive: nothing
+schedules around them, and they never touch `status`/`nextEvent`. A
+version-mismatched or corrupt file is parked as `track.json.bak` instead of
+being silently discarded – records are NOT re-derivable once their markers are
+gone. Never holds secrets (task text and token counts only; all output passes
+the standard redaction path).
+
+At `track stop` (and at `prune`, and as a bounded retry on `status`/`list`)
+the window `[t0, t1]` is harvested read-only from harness-local stores, all
+normalized to `in` = uncached input:
+
+| Store | Query | Attribution |
+|---|---|---|
+| zcode `~/.zcode/cli/db/db.sqlite` | `model_usage` rows with `started_at ∈ [t0, t1]` joined to `session` by normalized directory; `session_title` rows excluded (harness bookkeeping), `compact` rows included (task-driven burn); inclusive `input_tokens` gets `cr`+`cw` subtracted | `session-window` |
+| claude `~/.claude/projects/<encoded-cwd>/*.jsonl` | per-assistant-message usage inside the window, ccusage dedupe (first occurrence wins); the store reports the exclusive split already | `window` |
+| codex `~/.codex/sessions/**/rollout-*.jsonl` | cumulative `token_count` deltas inside the window, only for rollouts whose `session_meta.cwd` matches the project | `window` |
+
+Nothing readable (antigravity has no local store; node:sqlite unavailable)
+records `usage: null` with attribution `none` – a visible gap, never a
+machine-wide provider delta (operator decision D18). The record keeps the
+exact session-id set it summed. Two structural flags are recomputed
+deterministically over the record set: **nested** (a record's window is
+contained in another's – the inner one points at its container; stats will
+read leaves only) and **contested** (overlapping same-project records that
+provably shared sessions, or any overlap between window-attributed records
+with usage). A busy/failed harvest degrades to a `pending` record retried on
+later invocations – `track stop` itself never blocks the agent.
 
 ## Configuration & secrets
 
