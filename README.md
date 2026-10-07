@@ -258,12 +258,15 @@ subtrk track estimate --provider glm --complexity m
 # window    glm 5h · 18% left (reset 14:05Z)
 #   ≈ 1.29M tok remaining  (calibrated: 5.9M consumed at 82% → capacity 7.2M)
 # verdict   median fits · p90 does not — split the task or switch model
+# help: subtrk track estimate --json | subtrk track start --task <text>
 ```
 
 On the dashboard, open markers show as a **Tasks** strip (live so-far usage
 included) that clicks through to the `/track` page: last 15 tasks, usage by
 complexity per tracked model in tokens and est value, and the distributions
 table.
+
+![Task tracking](docs/img/console-track.png)
 
 Records live in `~/.subtrk/track.json` and carry honesty flags rather than
 guesses: `nested` when one task ran inside another's window, `contested` when

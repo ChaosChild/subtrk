@@ -27,7 +27,7 @@ shared cache so concurrent agents never hammer provider endpoints.
 | `subtrk track start --task <text>` | Open a task marker; `--complexity xs\|s\|m\|l\|xl`, `--tags a,b`, `--project <dir>` (default cwd), `--session <id>` pin (restricts the session-window tier to one harness session), `--provider <id>` hint; warns when markers are already open in the project |
 | `subtrk track stop` | Close the newest open marker for this directory (`--id` to pick, `--status done\|aborted\|failed`, `--note`) and harvest its real token usage from local harness stores (§Track store) |
 | `subtrk track status` | Open markers (age, `stale?` past 6h) + records still pending their harvest retry |
-| `subtrk track list` | Recent records, newest first (`--days N`, default 30) |
+| `subtrk track list` | Recent records, newest first (`--days N`, 1-365, default 30) |
 | `subtrk track stats` | Usage distributions per provider × complexity (`--provider`, `--complexity`, `--model`, `--days`); done, leaf, uncontested records only; model-agnostic headline median with min/max/p90 |
 | `subtrk track estimate` | The go/no-go: history p50/p90 for a bucket (fallback chain shown) vs the provider's live window, percent-remaining calibrated into tokens (`--provider`, `--complexity`, `--model`) |
 | `subtrk track prune` | Close markers orphaned by crashed/hung harnesses: default ≥3 days, `--before <dur>` (`24h`, `60m`, `3d`), `--all`; closed as `stale` with the harvest still attempted |

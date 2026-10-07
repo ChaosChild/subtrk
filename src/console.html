@@ -1584,7 +1584,9 @@ function trkChartHTML(buckets, field, fmt) {
       .map(m => {
         const p50 = trkPct(cell[m][field], 0.5) ?? 0;
         const p90 = trkPct(cell[m][field], 0.9) ?? p50;
-        const h90 = (p90 / scaleMax) * 100;
+        // 3% floor: a nonzero value must stay visible when the column max
+        // dwarfs it ($0.005 flash tasks against $0.19 GLM ones)
+        const h90 = p90 > 0 ? Math.max(3, (p90 / scaleMax) * 100) : 0;
         const fill = p90 > 0 ? Math.max(6, (p50 / p90) * 100) : 0;
         const color = trkModelColor(m);
         return `<div class="tbarm" style="height:${h90.toFixed(1)}%;border-color:${color}" title="${esc(m)} · p50 ${fmt(p50)} · p90 ${fmt(p90)}"><i style="height:${fill.toFixed(1)}%;background:${color}"></i></div>`;

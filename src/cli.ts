@@ -92,10 +92,11 @@ track flags:
     [--provider <id>]   one provider
     [--complexity <cx>] one bucket
     [--model <name>]    substring filter
-    [--days N]          window (default 30)
+    [--days N]          window (default 30; 1-365)
   track estimate        is the remaining window enough for this kind of task?
     [--provider <id>]   the window to compare against
     [--complexity <cx>] the bucket to estimate (fallback chain shown)
+    [--model <name>]    substring filter on the history models
   track prune           close markers orphaned by crashes/hangs
     [--before 24h]      duration cutoff (d|h|m); default 3d
     [--all]             close every open marker

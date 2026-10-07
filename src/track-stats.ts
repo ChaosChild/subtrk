@@ -222,8 +222,8 @@ const CX_ORDER = ["xs", "s", "m", "l", "xl"];
 
 // Pick the best bucket: exact provider×complexity first, then the adjacent
 // complexities of the same provider (the honest neighbors), then provider
-// only, then global. Prefers n>=3; a smaller n is only used when nothing
-// richer exists, and is flagged lowN.
+// only, then any provider at the same complexity, then global. Prefers n>=3;
+// a smaller n is only used when nothing richer exists, and is flagged lowN.
 function pickBucket(
   records: EnrichedRecord[],
   provider: string | null,
