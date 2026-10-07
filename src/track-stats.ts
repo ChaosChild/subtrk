@@ -382,7 +382,8 @@ function fmtTok(n: number): string {
 }
 
 function fmtUsd(n: number | null): string {
-  return n === null ? "–" : `$${n.toFixed(2)}`;
+  if (n === null) return "–";
+  return n > 0 && n < 0.01 ? `$${n.toFixed(3)}` : `$${n.toFixed(2)}`;
 }
 
 export function statsText(out: StatsOut): string[] {

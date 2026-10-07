@@ -10,6 +10,7 @@ import { main } from "../src/cli.ts";
 import {
   type HarvestFn,
   type HarvestResult,
+  type HarvestWindow,
   parseDurationMs,
   readTrackStore,
   trackCommand,
@@ -60,7 +61,7 @@ interface Fixture {
   dir: string;
   cwd: string;
   now: { ms: number };
-  calls: { windows: { project: string; t0: number; t1: number }[] };
+  calls: { windows: HarvestWindow[] };
   harvest: HarvestFn;
   restore: () => void;
 }
@@ -164,6 +165,23 @@ describe("track start", () => {
 });
 
 describe("track stop", () => {
+  it("passes the marker's --session pin through to the harvest and keeps it on the record", async () => {
+    const fx = fixture();
+    const cap = captureConsole();
+    try {
+      await run(fx, ["track", "start", "--task=pinned", "--session=sess_pin_me"]);
+      const code = await run(fx, ["track", "stop"]);
+      assert.equal(code, 0);
+      assert.equal(fx.calls.windows.length, 1);
+      assert.equal(fx.calls.windows[0].session, "sess_pin_me");
+      const store = readTrackStore(fx.dir);
+      assert.equal(store.records[0].sessionPin, "sess_pin_me");
+    } finally {
+      cap.restore();
+      fx.restore();
+    }
+  });
+
   it("closes the newest open marker for the cwd and records harvested usage", async () => {
     const fx = fixture();
     const cap = captureConsole();
@@ -580,6 +598,54 @@ describe("harvestWindow (local stores)", () => {
       assert.ok(res.bySource["zcode:main"] && res.bySource["zcode:subagent"] && res.bySource["zcode:compact"]);
       assert.ok(res.bySource["zcode:main"].in === 200);
       assert.ok((res.models["GLM-5.3"] ?? 0) > (res.models["GLM-5.3-Flash"] ?? 0));
+    } finally {
+      db.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("restricts the session-window tier to the pinned session only", async () => {
+    const home = tempDir("subtrk-home-");
+    const dbDir = join(home, ".zcode", "cli", "db");
+    mkdirSync(dbDir, { recursive: true });
+    process.removeAllListeners("warning");
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(join(dbDir, "db.sqlite"));
+    try {
+      db.exec(`create table session (id text primary key, directory text, time_created integer)`);
+      db.exec(
+        `create table model_usage (id text primary key, session_id text, query_source text, model_id text,
+          provider_id text, started_at integer, input_tokens integer, output_tokens integer,
+          cache_creation_input_tokens integer, cache_read_input_tokens integer)`,
+      );
+      db.prepare(`insert into session (id, directory, time_created) values (?, ?, ?)`).run(
+        "sess_a",
+        "C:\\Work\\Pin",
+        T0,
+      );
+      db.prepare(`insert into session (id, directory, time_created) values (?, ?, ?)`).run(
+        "sess_b",
+        "C:\\Work\\Pin",
+        T0,
+      );
+      const ins = db.prepare(
+        `insert into model_usage (id, session_id, query_source, model_id, provider_id, started_at,
+          input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens)
+         values (?, ?, 'main_turn', 'GLM-5.3', 'p', ?, ?, ?, 0, 0)`,
+      );
+      ins.run("r1", "sess_a", T0 + 60_000, 1000, 100);
+      ins.run("r2", "sess_b", T0 + 90_000, 2000, 200);
+      // pinned: only sess_a's row; unpinned: both (sanity against the same fixture)
+      const pinned = await harvestWindow(
+        { project: "C:/work/pin", t0: T0, t1: T1, session: "sess_a" },
+        { homeDir: home },
+      );
+      assert.ok(pinned);
+      assert.deepEqual(pinned.usage, { in: 1000, cr: 0, cw: 0, out: 100, reqs: 1 });
+      assert.deepEqual(pinned.sessions, ["sess_a"]);
+      const both = await harvestWindow({ project: "C:/work/pin", t0: T0, t1: T1 }, { homeDir: home });
+      assert.ok(both);
+      assert.equal(both.usage?.reqs, 2);
     } finally {
       db.close();
       rmSync(home, { recursive: true, force: true });

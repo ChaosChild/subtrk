@@ -71,16 +71,19 @@ async function harvestZcode(acc: Accumulator, w: HarvestWindow, homeDir: string)
     try {
       // Requests, not sessions, carry the time filter: long-lived mains would
       // be missed by a session.time_created window. session_title rows are
-      // harness bookkeeping, not task burn (compact IS task burn).
+      // harness bookkeeping, not task burn (compact IS task burn). A manual
+      // --session pin restricts this tier to that session only.
+      const pin = typeof w.session === "string" && w.session.trim() !== "" ? w.session.trim() : null;
       const stmt = db.prepare(
         `select mu.session_id as sid, mu.query_source as src, mu.model_id as model,
                 mu.input_tokens as inTok, mu.output_tokens as outTok,
                 mu.cache_creation_input_tokens as cw, mu.cache_read_input_tokens as cr
          from model_usage mu join session s on s.id = mu.session_id
          where mu.started_at >= ? and mu.started_at <= ? and mu.query_source <> 'session_title'
-           and rtrim(lower(replace(s.directory, char(92), '/')), '/') = ?`,
+           and rtrim(lower(replace(s.directory, char(92), '/')), '/') = ?
+           and (? is null or mu.session_id = ?)`,
       );
-      rows = stmt.all(w.t0, w.t1, normalizeDir(w.project)) as unknown[];
+      rows = stmt.all(w.t0, w.t1, normalizeDir(w.project), pin, pin) as unknown[];
     } finally {
       db.close();
     }

@@ -52,6 +52,7 @@ export interface TrackRecord {
   bySource?: Record<string, TrackUsage>; // zcode:main / zcode:subagent / zcode:compact / claude / codex
   models?: Record<string, number>; // model -> token share 0..1
   providerHint?: string; // carried from the marker; stats derive from models otherwise
+  sessionPin?: string; // carried from the marker; retried harvests reuse it
   wallMs: number;
   note?: string;
 }
@@ -77,6 +78,7 @@ export interface HarvestWindow {
   project: string;
   t0: number;
   t1: number;
+  session?: string; // manual pin: restrict the session-window tier to one session id
 }
 
 export type HarvestFn = (w: HarvestWindow) => Promise<HarvestResult | null>;
@@ -308,7 +310,7 @@ export interface TrackArgs {
   days?: string;
 }
 
-const USAGE_HINT = "help: subtrk track start|stop|status|list|prune --help";
+const USAGE_HINT = "help: subtrk track start|stop|status|list|stats|estimate|prune --help";
 
 export async function trackCommand(args: TrackArgs, deps: TrackDeps = {}): Promise<number> {
   const dir = deps.subtrkDir ?? SUBTRK_DIR;
@@ -410,7 +412,7 @@ async function closeMarker(
   let result: HarvestResult | null = null;
   let pending = false;
   try {
-    result = await ctx.harvest({ project: marker.project, t0: marker.t0, t1 });
+    result = await ctx.harvest({ project: marker.project, t0: marker.t0, t1, session: marker.session });
   } catch {
     pending = true;
   }
@@ -433,6 +435,7 @@ async function closeMarker(
     bySource: usage === null ? undefined : result?.bySource,
     models: usage === null ? undefined : result?.models,
     providerHint: marker.providerHint,
+    sessionPin: marker.session,
     wallMs: t1 - marker.t0,
     note: note?.trim() || undefined,
   };
@@ -520,7 +523,7 @@ async function retryPending(dir: string, now: () => number, harvest: HarvestFn):
   for (const rec of pending) {
     let result: HarvestResult | null = null;
     try {
-      result = await harvest({ project: rec.project, t0: rec.t0, t1: rec.t1 });
+      result = await harvest({ project: rec.project, t0: rec.t0, t1: rec.t1, session: rec.sessionPin });
     } catch {
       continue;
     }

@@ -255,7 +255,7 @@ subtrk track stats                          # distributions per provider x
 subtrk track estimate --provider glm --complexity m
 # history   n=14 (glm, m) · done · leaves
 #   p50 1.21M tok / $3.99      p90 2.05M tok / $6.77
-# window    glm 5h · 18% left
+# window    glm 5h · 18% left (reset 14:05Z)
 #   ≈ 1.29M tok remaining  (calibrated: 5.9M consumed at 82% → capacity 7.2M)
 # verdict   median fits · p90 does not — split the task or switch model
 ```

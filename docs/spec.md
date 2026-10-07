@@ -24,7 +24,7 @@ shared cache so concurrent agents never hammer provider endpoints.
 | `subtrk usage --days N` | Look back N days (1–365); default is the local calendar month to date |
 | `subtrk usage --hour` | Hourly buckets instead of daily |
 | `subtrk usage --rebuild` | Drop and refetch re-derivable range-API history (glm, openrouter); zcode deltas and % samples are never rebuilt (not re-derivable) |
-| `subtrk track start --task <text>` | Open a task marker; `--complexity xs\|s\|m\|l\|xl`, `--tags a,b`, `--project <dir>` (default cwd), `--provider <id>` hint; warns when markers are already open in the project |
+| `subtrk track start --task <text>` | Open a task marker; `--complexity xs\|s\|m\|l\|xl`, `--tags a,b`, `--project <dir>` (default cwd), `--session <id>` pin (restricts the session-window tier to one harness session), `--provider <id>` hint; warns when markers are already open in the project |
 | `subtrk track stop` | Close the newest open marker for this directory (`--id` to pick, `--status done\|aborted\|failed`, `--note`) and harvest its real token usage from local harness stores (§Track store) |
 | `subtrk track status` | Open markers (age, `stale?` past 6h) + records still pending their harvest retry |
 | `subtrk track list` | Recent records, newest first (`--days N`, default 30) |
@@ -314,7 +314,8 @@ records with numbers – aborted/failed tasks undercount effort and would skew
 "go" verdicts optimistic. Percentiles are nearest-rank; buckets key on
 derived provider (dominant model prefix, or the marker's `--provider` hint) ×
 declared complexity, with a fallback chain (exact → adjacent complexity →
-provider-wide → global) and low-n flags under 3. Costs are computed at read
+provider-wide → any-provider same complexity → global) and low-n flags
+under 3. Costs are computed at read
 time against the pricing table (the house repricing rule), priced at the
 dominant model's rates. `track estimate` turns percent-remaining into tokens
 by calibration: the provider's own tokens consumed inside the current window

@@ -80,6 +80,7 @@ track flags:
     --complexity <cx>   xs | s | m | l | xl
     --tags a,b          optional labels
     [--project <dir>]   default: current directory
+    [--session <id>]    pin the harvest to one harness session id
     [--provider <id>]   usage bucket hint for later stats
   track stop            close + harvest the real usage into a record
     [--id trk_x]        default: newest open marker for this directory
@@ -281,6 +282,15 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
       return 2;
     }
   } else if (positionals[0] === "track") {
+    if (positionals.length === 1) {
+      // bare `track` (with or without --help): point at the subverbs
+      if (parsed.values.help === true) {
+        console.log(USAGE);
+        return 0;
+      }
+      console.error(`subtrk: usage: subtrk track <${[...TRACK_SUBS].join("|")}> – try subtrk track --help`);
+      return 2;
+    }
     if (!TRACK_SUBS.has(positionals[1] ?? "") || positionals.length > 2) {
       console.error(`subtrk: unknown command '${positionals.join(" ")}' – try subtrk --help`);
       return 2;
@@ -385,14 +395,19 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     }
   }
   if (cmd === "auth refresh") return authRefresh(provider, deps);
+  // track verbs use --provider as a single hint, not a repeatable filter
+  if (cmd.startsWith("track") && provider.length > 1) {
+    console.error("subtrk: track takes a single --provider (usage hint) – try subtrk --help");
+    return 2;
+  }
   if (cmd === "track stats")
     return statsCommand(
-      { json: json === true, provider: provider.length === 1 ? provider[0] : undefined, complexity, model, days },
+      { json: json === true, provider: provider[0], complexity, model, days },
       { subtrkDir: deps.dirs?.subtrk },
     );
   if (cmd === "track estimate")
     return estimateCommand(
-      { json: json === true, provider: provider.length === 1 ? provider[0] : undefined, complexity, model },
+      { json: json === true, provider: provider[0], complexity, model },
       { subtrkDir: deps.dirs?.subtrk },
     );
   if (cmd.startsWith("track "))
@@ -405,7 +420,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
         tags,
         project,
         session,
-        providerHint: provider.length === 1 ? provider[0] : undefined,
+        providerHint: provider[0],
         status,
         note,
         id,
