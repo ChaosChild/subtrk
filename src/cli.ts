@@ -26,6 +26,7 @@ import {
 } from "./core.ts";
 import { runInit } from "./init.ts";
 import { runServe } from "./serve.ts";
+import { trackCommand } from "./track.ts";
 import { aggregateUsage, harvestUsage, mutateUsageStore, readUsageStore } from "./usage.ts";
 
 export interface CliDirs {
@@ -47,6 +48,8 @@ usage:
   subtrk                  same as: subtrk status
   subtrk status [flags]   probe enabled providers, compact text
   subtrk usage [flags]    token usage + API-equivalent cost from the local store
+  subtrk track <sub>      task-level usage accounting (start, stop, status,
+                          list, prune)
   subtrk init             one-time interactive setup
   subtrk init --agent <id>  write agent instructions for a harness and exit
                           (claude|zcode|codex|opencode|agy)
@@ -69,6 +72,24 @@ usage flags:
   --hour                hourly buckets instead of daily
   --rebuild             drop re-derivable history and refetch from the sources
   -h, --help            this screen
+
+track flags:
+  track start           open a marker; prints the id to remember
+    --task <text>       short task description (required)
+    --complexity <cx>   xs | s | m | l | xl
+    --tags a,b          optional labels
+    [--project <dir>]   default: current directory
+    [--provider <id>]   usage bucket hint for later stats
+  track stop            close + harvest the real usage into a record
+    [--id trk_x]        default: newest open marker for this directory
+    [--status <s>]      done (default) | aborted | failed
+    [--note <text>]
+  track status          open markers + records still pending harvest
+  track list            recent records (--days N, default 30)
+  track prune           close markers orphaned by crashes/hangs
+    [--before 24h]      duration cutoff (d|h|m); default 3d
+    [--all]             close every open marker
+  --json                machine-readable output (schemaVersion 1) everywhere
 
 exit codes: 0 ran · 1 runtime failure · 2 usage error · 3 --strict violation`;
 
@@ -218,6 +239,16 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
         days: { type: "string" },
         hour: { type: "boolean", default: false },
         rebuild: { type: "boolean", default: false },
+        task: { type: "string" },
+        complexity: { type: "string" },
+        tags: { type: "string" },
+        project: { type: "string" },
+        session: { type: "string" },
+        status: { type: "string" },
+        note: { type: "string" },
+        id: { type: "string" },
+        before: { type: "string" },
+        all: { type: "boolean", default: false },
         port: { type: "string" },
         agent: { type: "string" },
         help: { type: "boolean", short: "h", default: false },
@@ -232,9 +263,15 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     return 2;
   }
   const positionals = parsed.positionals;
+  // the only two-verb commands: "auth refresh" and "track <sub>"
+  const TRACK_SUBS = new Set(["start", "stop", "status", "list", "prune"]);
   if (positionals[0] === "auth") {
-    // the only two-verb command: exactly "auth refresh"
     if (positionals[1] !== "refresh" || positionals.length > 2) {
+      console.error(`subtrk: unknown command '${positionals.join(" ")}' – try subtrk --help`);
+      return 2;
+    }
+  } else if (positionals[0] === "track") {
+    if (!TRACK_SUBS.has(positionals[1] ?? "") || positionals.length > 2) {
       console.error(`subtrk: unknown command '${positionals.join(" ")}' – try subtrk --help`);
       return 2;
     }
@@ -243,7 +280,12 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     return 2;
   }
   // bare `subtrk` = status, never help
-  const cmd = positionals[0] === "auth" ? "auth refresh" : (positionals[0] ?? "status");
+  const cmd =
+    positionals[0] === "auth"
+      ? "auth refresh"
+      : positionals[0] === "track"
+        ? `track ${positionals[1]}`
+        : (positionals[0] ?? "status");
   const {
     json,
     provider = [],
@@ -253,6 +295,16 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     days,
     hour,
     rebuild,
+    task,
+    complexity,
+    tags,
+    project,
+    session,
+    status,
+    note,
+    id,
+    before,
+    all,
     port,
     agent,
     help,
@@ -266,6 +318,16 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     days?: string;
     hour?: boolean;
     rebuild?: boolean;
+    task?: string;
+    complexity?: string;
+    tags?: string;
+    project?: string;
+    session?: string;
+    status?: string;
+    note?: string;
+    id?: string;
+    before?: string;
+    all?: boolean;
     port?: string;
     agent?: string;
     help?: boolean;
@@ -311,6 +373,26 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     }
   }
   if (cmd === "auth refresh") return authRefresh(provider, deps);
+  if (cmd.startsWith("track "))
+    return trackCommand(
+      {
+        sub: cmd.slice("track ".length),
+        json: json === true,
+        task,
+        complexity,
+        tags,
+        project,
+        session,
+        providerHint: provider.length === 1 ? provider[0] : undefined,
+        status,
+        note,
+        id,
+        before,
+        all: all === true,
+        days,
+      },
+      { subtrkDir: deps.dirs?.subtrk },
+    );
   if (cmd === "usage")
     return usageCommand({ json: json === true, provider, days, hour: hour === true, rebuild: rebuild === true }, deps);
   if (cmd !== "status") {

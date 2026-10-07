@@ -228,6 +228,30 @@ subtrk usage --days 7 --hour     # last 7 days, hourly buckets
 subtrk usage --rebuild           # re-derive range-API history from the sources
 ```
 
+### Task tracking – what did this task cost?
+
+Wrap a task in markers and `subtrk` attributes the real token usage between
+them from the harnesses' own local stores (ZCode's per-request telemetry in
+`~/.zcode/cli/db/db.sqlite`, Claude Code transcripts, Codex rollouts) – no API
+anywhere reports per-task usage:
+
+```bash
+subtrk track start --task "fix the boundary-day bug" --complexity m
+# …the agent works, subagents included…
+subtrk track stop --status done  # harvests in/cr/cw/out for the window
+subtrk track status              # open markers + records pending harvest
+subtrk track list --days 30      # recent records
+subtrk track prune               # close markers orphaned by crashes (≥3d,
+                                 #   --before 24h / --all)
+```
+
+Records live in `~/.subtrk/track.json` and carry honesty flags rather than
+guesses: `nested` when one task ran inside another's window, `contested` when
+overlapping tasks provably shared sessions, and `usage: null` when no local
+store was readable — never a machine-wide blur. The upcoming `track stats` /
+`track estimate` (M4b) turn the history into "is my remaining window enough
+for an m task?" answers.
+
 On the dashboard (screenshot above), the month-to-date cards sum the local
 calendar month, this-machine harvests included and labeled, and every provider
 card – like the two month-to-date cards – opens its usage page. The per-model

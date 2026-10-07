@@ -345,3 +345,36 @@ in `~/.subtrk/env` before asking, the README repeats the trade-off, and a
 missing key degrades to "history unavailable" with everything else working.
 The usage harvest rides existing status/serve paths under a time budget – no
 daemon, no new processes – and `usage.json` holds no secrets.
+
+## D18 · Track – task-level accounting from local harness stores (M4a)
+
+Agents mark task boundaries; subtrk attributes the real token burn between
+the markers by querying harness-local stores read-only. The operator-locked
+shape (Lavish review, 2026-10-07, three rounds):
+
+1. **Attribution ladder without the provider-delta tier.** `session-window`
+   (zcode per-request rows joined to sessions by normalized directory) →
+   `window` (claude/codex transcript scans by project + time) → nothing:
+   unreadable stores record `usage: null` rather than a machine-wide provider
+   delta, which would silently absorb unrelated work. `session_title` rows are
+   excluded (bookkeeping), `compact` rows included (task-driven burn).
+2. **Honesty flags over guesses.** Records keep the exact session-id set they
+   summed; structural overlap detection marks `contested` (both sides) and
+   `nested` (containment; stats will read leaves only). zcode's inclusive
+   `input_tokens` is normalized to the house convention (`in` = uncached).
+3. **track.json, not SQLite.** ~350 B/record (~6 MB/year) does not justify a
+   database; node:sqlite is still experimental on the supported Node range
+   (and warns on stderr). Same lockfile + atomic-rename machinery as the other
+   stores; a version-mismatched file is parked as `.bak` because records are
+   not re-derivable. Revisit at >50k records or a real ad-hoc-SQL need.
+4. **Markers are passive; failures degrade.** No daemon, no scheduling impact.
+   A busy/unreadable store at stop time yields a `pending` record retried on
+   later invocations. `prune` (default ≥3d, `--before 24h`-style durations,
+   `--all`) closes crash-orphaned markers as `stale` with the harvest still
+   attempted – never silently deleted.
+
+Cold start is accepted (no backfill verb – synthetic history from old zcode
+sessions was rejected as unrepresentative of declared-complexity work); the
+complexity taxonomy is `xs s m l xl` declared at start; session
+self-identification is not probed (`--session` stays manual). Stats/estimate
+verbs, the dashboard Tasks section and the agents.ts blurb land in M4b.
