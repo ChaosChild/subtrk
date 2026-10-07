@@ -28,16 +28,18 @@ Design and sourcing decisions in `docs/decisions.md` (D12–D17).
 Track what a task actually costs, from the harnesses' own local stores, so
 agents can answer "is my remaining window enough?" from history.
 
-- **M4a (this PR)**: `subtrk track start/stop/status/list/prune`, the
+- **M4a (PR #35, in review)**: `subtrk track start/stop/status/list/prune`, the
   `~/.subtrk/track.json` store, window harvesters (zcode `db.sqlite`
   per-request rows, claude transcripts, codex rollouts) normalized to the
   house `in`/`cr`/`cw`/`out` convention, pending-harvest retry,
   contested/nested detection, open-marker warnings. Decisions in
   `docs/decisions.md` (D18).
-- **M4b**: `track stats` + `track estimate` (history p50/p90 vs calibrated
-  window remaining), dashboard Tasks section + `/track` drill-down +
-  `/api/track`, the agents.ts blurb (housekeeping first: check status, stop or
-  prune your own open markers).
+- **M4b (PR #36, stacked on M4a)**: `track stats` + `track estimate`
+  (distributions per provider × complexity with a fallback chain; the verdict
+  calibrates percent-remaining into tokens from observed window usage), the
+  dashboard Tasks strip + `/track` view + `GET /api/track` (records enriched
+  at read time, `?live=1` so-far harvest for open markers), the logo→home
+  link, and the agents.ts blurb (housekeeping first).
 - **M4c**: qwen usage-log + opencode session-table harvesters, `--session`
   pinning polish, store compaction (records >365d collapse into aggregates).
 

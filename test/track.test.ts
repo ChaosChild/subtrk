@@ -2,14 +2,17 @@
 // prune, pending-harvest retry, and the window harvesters (zcode sqlite
 // fixture db, claude + codex transcript trees). No network, no real user files.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { main } from "../src/cli.ts";
 import {
   type HarvestFn,
   type HarvestResult,
+  type HarvestWindow,
   parseDurationMs,
   readTrackStore,
   trackCommand,
@@ -18,6 +21,8 @@ import {
 import { harvestWindow } from "../src/track-harvest.ts";
 
 // ---------- helpers ----------
+
+const repoRoot = () => dirname(dirname(fileURLToPath(import.meta.url)));
 
 interface Captured {
   out: string[];
@@ -60,7 +65,7 @@ interface Fixture {
   dir: string;
   cwd: string;
   now: { ms: number };
-  calls: { windows: { project: string; t0: number; t1: number }[] };
+  calls: { windows: HarvestWindow[] };
   harvest: HarvestFn;
   restore: () => void;
 }
@@ -164,6 +169,23 @@ describe("track start", () => {
 });
 
 describe("track stop", () => {
+  it("passes the marker's --session pin through to the harvest and keeps it on the record", async () => {
+    const fx = fixture();
+    const cap = captureConsole();
+    try {
+      await run(fx, ["track", "start", "--task=pinned", "--session=sess_pin_me"]);
+      const code = await run(fx, ["track", "stop"]);
+      assert.equal(code, 0);
+      assert.equal(fx.calls.windows.length, 1);
+      assert.equal(fx.calls.windows[0].session, "sess_pin_me");
+      const store = readTrackStore(fx.dir);
+      assert.equal(store.records[0].sessionPin, "sess_pin_me");
+    } finally {
+      cap.restore();
+      fx.restore();
+    }
+  });
+
   it("closes the newest open marker for the cwd and records harvested usage", async () => {
     const fx = fixture();
     const cap = captureConsole();
@@ -540,8 +562,13 @@ describe("harvestWindow (local stores)", () => {
     const home = tempDir("subtrk-home-");
     const dbDir = join(home, ".zcode", "cli", "db");
     mkdirSync(dbDir, { recursive: true });
-    process.removeAllListeners("warning"); // node:sqlite experimental warning noise in test output
+    // keep the fixture's own node:sqlite import quiet in this process (the
+    // real suppression is regression-tested in a subprocess below)
+    const origEmit = process.emitWarning;
+    process.emitWarning = (() => {}) as typeof process.emitWarning;
     const { DatabaseSync } = await import("node:sqlite");
+    await new Promise((r) => setImmediate(r));
+    process.emitWarning = origEmit;
     const db = new DatabaseSync(join(dbDir, "db.sqlite"));
     try {
       db.exec(`create table session (id text primary key, directory text, time_created integer)`);
@@ -580,6 +607,103 @@ describe("harvestWindow (local stores)", () => {
       assert.ok(res.bySource["zcode:main"] && res.bySource["zcode:subagent"] && res.bySource["zcode:compact"]);
       assert.ok(res.bySource["zcode:main"].in === 200);
       assert.ok((res.models["GLM-5.3"] ?? 0) > (res.models["GLM-5.3-Flash"] ?? 0));
+    } finally {
+      db.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // The operator saw the ExperimentalWarning leak in `subtrk serve` (live
+  // so-far harvest). Suppression must hold on the REAL first-load path:
+  // a fresh node process whose first node:sqlite import happens inside
+  // harvestWindow via importSqlite. In-process tests can't check this –
+  // their fixture imports have already loaded (and warned) the module.
+  it("loads node:sqlite inside harvestWindow without printing the ExperimentalWarning", async () => {
+    const home = tempDir("subtrk-home-");
+    const dbDir = join(home, ".zcode", "cli", "db");
+    mkdirSync(dbDir, { recursive: true });
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(join(dbDir, "db.sqlite"));
+    try {
+      db.exec(`create table session (id text primary key, directory text, time_created integer)`);
+      db.exec(
+        `create table model_usage (id text primary key, session_id text, query_source text, model_id text,
+          provider_id text, started_at integer, input_tokens integer, output_tokens integer,
+          cache_creation_input_tokens integer, cache_read_input_tokens integer)`,
+      );
+      db.prepare(`insert into session (id, directory, time_created) values (?, ?, ?)`).run(
+        "sess_a",
+        "C:\\Work\\Quiet",
+        T0,
+      );
+      db.prepare(
+        `insert into model_usage (id, session_id, query_source, model_id, provider_id, started_at,
+          input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens)
+         values ('r1', 'sess_a', 'main_turn', 'GLM-5.3', 'p', ?, 1000, 100, 0, 0)`,
+      ).run(T0 + 60_000);
+      db.close();
+      const script = `
+        const { harvestWindow } = await import(${JSON.stringify(pathToFileURL(join(repoRoot(), "src", "track-harvest.ts")).href)});
+        const res = await harvestWindow(
+          { project: "C:/work/quiet", t0: ${T0}, t1: ${T1} },
+          { homeDir: process.env.QUIET_HOME },
+        );
+        await new Promise((r) => setImmediate(r));
+        console.log(res ? res.attribution : "null");
+      `;
+      const child = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+        encoding: "utf8",
+        env: { ...process.env, QUIET_HOME: home },
+      });
+      assert.equal(child.status, 0, child.stderr);
+      assert.equal(child.stdout.trim(), "session-window");
+      assert.ok(!child.stderr.includes("ExperimentalWarning"), `ExperimentalWarning leaked:\n${child.stderr}`);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("restricts the session-window tier to the pinned session only", async () => {
+    const home = tempDir("subtrk-home-");
+    const dbDir = join(home, ".zcode", "cli", "db");
+    mkdirSync(dbDir, { recursive: true });
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(join(dbDir, "db.sqlite"));
+    try {
+      db.exec(`create table session (id text primary key, directory text, time_created integer)`);
+      db.exec(
+        `create table model_usage (id text primary key, session_id text, query_source text, model_id text,
+          provider_id text, started_at integer, input_tokens integer, output_tokens integer,
+          cache_creation_input_tokens integer, cache_read_input_tokens integer)`,
+      );
+      db.prepare(`insert into session (id, directory, time_created) values (?, ?, ?)`).run(
+        "sess_a",
+        "C:\\Work\\Pin",
+        T0,
+      );
+      db.prepare(`insert into session (id, directory, time_created) values (?, ?, ?)`).run(
+        "sess_b",
+        "C:\\Work\\Pin",
+        T0,
+      );
+      const ins = db.prepare(
+        `insert into model_usage (id, session_id, query_source, model_id, provider_id, started_at,
+          input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens)
+         values (?, ?, 'main_turn', 'GLM-5.3', 'p', ?, ?, ?, 0, 0)`,
+      );
+      ins.run("r1", "sess_a", T0 + 60_000, 1000, 100);
+      ins.run("r2", "sess_b", T0 + 90_000, 2000, 200);
+      // pinned: only sess_a's row; unpinned: both (sanity against the same fixture)
+      const pinned = await harvestWindow(
+        { project: "C:/work/pin", t0: T0, t1: T1, session: "sess_a" },
+        { homeDir: home },
+      );
+      assert.ok(pinned);
+      assert.deepEqual(pinned.usage, { in: 1000, cr: 0, cw: 0, out: 100, reqs: 1 });
+      assert.deepEqual(pinned.sessions, ["sess_a"]);
+      const both = await harvestWindow({ project: "C:/work/pin", t0: T0, t1: T1 }, { homeDir: home });
+      assert.ok(both);
+      assert.equal(both.usage?.reqs, 2);
     } finally {
       db.close();
       rmSync(home, { recursive: true, force: true });

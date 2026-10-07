@@ -24,10 +24,12 @@ shared cache so concurrent agents never hammer provider endpoints.
 | `subtrk usage --days N` | Look back N days (1–365); default is the local calendar month to date |
 | `subtrk usage --hour` | Hourly buckets instead of daily |
 | `subtrk usage --rebuild` | Drop and refetch re-derivable range-API history (glm, openrouter); zcode deltas and % samples are never rebuilt (not re-derivable) |
-| `subtrk track start --task <text>` | Open a task marker; `--complexity xs\|s\|m\|l\|xl`, `--tags a,b`, `--project <dir>` (default cwd), `--provider <id>` hint; warns when markers are already open in the project |
+| `subtrk track start --task <text>` | Open a task marker; `--complexity xs\|s\|m\|l\|xl`, `--tags a,b`, `--project <dir>` (default cwd), `--session <id>` pin (restricts the session-window tier to one harness session), `--provider <id>` hint; warns when markers are already open in the project |
 | `subtrk track stop` | Close the newest open marker for this directory (`--id` to pick, `--status done\|aborted\|failed`, `--note`) and harvest its real token usage from local harness stores (§Track store) |
 | `subtrk track status` | Open markers (age, `stale?` past 6h) + records still pending their harvest retry |
-| `subtrk track list` | Recent records, newest first (`--days N`, default 30) |
+| `subtrk track list` | Recent records, newest first (`--days N`, 1-365, default 30) |
+| `subtrk track stats` | Usage distributions per provider × complexity (`--provider`, `--complexity`, `--model`, `--days`); done, leaf, uncontested records only; model-agnostic headline median with min/max/p90 |
+| `subtrk track estimate` | The go/no-go: history p50/p90 for a bucket (fallback chain shown) vs the provider's live window, percent-remaining calibrated into tokens (`--provider`, `--complexity`, `--model`) |
 | `subtrk track prune` | Close markers orphaned by crashed/hung harnesses: default ≥3 days, `--before <dur>` (`24h`, `60m`, `3d`), `--all`; closed as `stale` with the harvest still attempted |
 | `subtrk init` | One-time interactive setup (the only interactive command) |
 | `subtrk init --agent <harness>` | Non-interactive: write subtrk's instructions into a harness's global agent file (see §`subtrk init`) |
@@ -306,6 +308,22 @@ read leaves only) and **contested** (overlapping same-project records that
 provably shared sessions, or any overlap between window-attributed records
 with usage). A busy/failed harvest degrades to a `pending` record retried on
 later invocations – `track stop` itself never blocks the agent.
+
+**Stats + estimate (M4b).** The estimation set is done, leaf, uncontested
+records with numbers – aborted/failed tasks undercount effort and would skew
+"go" verdicts optimistic. Percentiles are nearest-rank; buckets key on
+derived provider (dominant model prefix, or the marker's `--provider` hint) ×
+declared complexity, with a fallback chain (exact → adjacent complexity →
+provider-wide → any-provider same complexity → global) and low-n flags
+under 3. Costs are computed at read
+time against the pricing table (the house repricing rule), priced at the
+dominant model's rates. `track estimate` turns percent-remaining into tokens
+by calibration: the provider's own tokens consumed inside the current window
+(from the usage store, this-machine sections included) divided by the used
+fraction gives the window capacity; capacity × remaining fraction is the
+budget the p50/p90 must fit. The estimate payload always shows the
+arithmetic it used; window kinds without a fixed duration (scoped bundles)
+degrade to history-only.
 
 ## Configuration & secrets
 
@@ -809,6 +827,14 @@ One page for every enabled provider, served from the same cache the CLI reads.
   month-to-date, every provider with stored data, day granularity. `from`/`to`
   accept epoch-ms or ISO instants (`from > to` → 400); an unknown `provider`
   → 400; non-GET → 405 with `allow: GET`; same Bearer token as `/api/status`.
+- `GET /api/track[?live=1]` → the track store only: open markers (with a
+  bounded live so-far harvest when `live=1`) plus records enriched at read
+  time (`tokens`, `usdE` estimate, derived `provider`). Same Bearer token,
+  GET-only; a live-harvest failure degrades that marker's `live` to null,
+  never the response.
+- `GET /track` → the same static shell as `/` (path-routed view). The console
+  header's logo/name is the home link; the dashboard shows a Tasks strip
+  (open markers, click-through to /track).
 - `POST /api/refresh?provider=<id>` → re-authorises one provider, behind the
   same Bearer token as `/api/status` (401 on failure). The id must belong to a
   refresh-capable provider (400 `unknown or non-refreshable provider`
