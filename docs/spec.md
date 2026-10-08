@@ -325,6 +325,20 @@ budget the p50/p90 must fit. The estimate payload always shows the
 arithmetic it used; window kinds without a fixed duration (scoped bundles)
 degrade to history-only.
 
+**Track hooks (M4d, D19).** `subtrk track hook --event <session-start|stop>
+--harness <claude|zcode|codex>` is the half the harness runs: `init --agent
+--track` registers it as a lifecycle hook (claude/zcode SessionStart + Stop
+merged into their JSON hook configs; codex as a sentinel-marked
+`[[hooks.*]]` block in `config.toml`). The verb reads only `track.json` and
+`~/.subtrk/hooks-state.json` (per-session last-nudged state, GC'd after 7
+days), scopes markers to the session cwd (equal or ancestor directory), and
+throttles to the first fire per session plus open-marker-set changes. Output
+is the harness's native context-injection shape (`hookSpecificOutput.
+additionalContext`; codex Stop uses a top-level `systemMessage`) or nothing.
+It never writes markers, never probes providers, never blocks: exit 0
+always – a hook cannot know `--task`, and done-vs-aborted is the agent's
+judgment. Reminders are scrubbed like every other rendered string.
+
 ## Configuration & secrets
 
 - `~/.subtrk/config.json` – `{ "enabled": ["claude", "glm", …], "order": ["kimi",
@@ -755,6 +769,17 @@ Re-running is therefore idempotent, and removal is a clean delete of the block
 between the markers. Writes go through a temp file + rename in the target
 directory (two attempts); a failed write is reported, never silently dropped –
 the file belongs to the user.
+
+Tiers (v0.1.19): the section comes in two variants over one shared status
+body. Default is status-only; the track tier (`--track`, or `agents.track:
+true` in `~/.subtrk/config.json`, asked once by interactive init with default
+No) adds the `### track` section – trigger positional ("first actions of the
+task, before the first file read"), not predictive – and, for
+claude/zcode/codex, installs the lifecycle hooks of §Track store. `--no-track`
+overrides per run and also removes previously installed hooks (matching only
+subtrk-tagged handlers; a one-time `.subtrk-bak` copy precedes the first
+modification of a JSON target). No grandfathering: a plain re-run on a
+pre-0.1.19 track blurb writes the status-only tier.
 
 Exit codes: 0 written · 2 unknown or missing harness name – stderr then lists
 every supported harness with its file and whether the section is present right

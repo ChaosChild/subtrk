@@ -389,6 +389,7 @@ verbs, the dashboard Tasks section and the agents.ts blurb land in M4b.
    pricing table, so a pricing refresh reprices history. The dashboard shows
    data (Tasks strip on the dashboard, /track view, /api/track) – the verdict
    stays a CLI concern for agents, per review.
+
 6. **Claude attribution joins the ladder as `session-scan`** (RedCanyon's
    transcript-verified bug list, 2026-10-08). Claude harvests record the exact
    contributing session ids: subagent transcripts (`<session>/subagents/`)
@@ -403,3 +404,37 @@ verbs, the dashboard Tasks section and the agents.ts blurb land in M4b.
    1h-ephemeral cache writes split into `cw1h` (a subset of `cw`, which stays
    the token total) and price at 2× input while 5m writes keep the `cw` rate;
    the local parser version bumped to 5 so stale stores re-read once.
+
+## D19 · Agent tiers + track hooks – status-only default, opt-in enforcement (M4d)
+
+`subtrk init --agent` writes one of two tiers over a shared status body
+(operator-locked 2026-10-08, Lavish review): status-only by default – some
+users never want task tracking in their agents' instructions – or `--track`
+(the interactive init asks once, default No, persisted as `agents.track` in
+`~/.subtrk/config.json`) for the task-tracking section plus lifecycle hooks.
+The track section's trigger is positional, not predictive – "first actions of
+the task, before the first file read", with an applies-to enumeration and the
+350-bytes-vs-unrecoverable asymmetry stated inline – because a forecast gate
+("a task you expect to take more than a few minutes") fails exactly on the
+underestimated tasks, which are the ones worth tracking.
+
+Hooks make the reminder structural instead of prose-deepended:
+`subtrk track hook --event <e> --harness <h>` is registered by init for
+claude (`~/.claude/settings.json`), zcode (`~/.zcode/cli/config.json`, where
+`hooks.enabled: true` must be flipped and init says so) and codex (a
+sentinel-marked `[[hooks.*]]` TOML block, no parsing; the one-time `/hooks`
+trust review is printed). Handlers are identified by the literal
+`subtrk track hook` in their command – removal (via `--no-track`) strips
+exactly those, and a user's own hooks survive both directions (clobber
+fixtures test it; JSON targets get a one-time `.subtrk-bak` copy before the
+first modification). The verb itself is read-only and never blocking: local
+stores only (no network, no provider probes, sub-300ms), markers scoped to
+the session cwd (equal or ancestor), throttled to the first fire per session
+plus open-marker-set changes (`~/.subtrk/hooks-state.json`, GC'd after 7
+days), exit 0 always, silence when there is nothing to say – a hook cannot
+know `--task`, and done-vs-aborted is the agent's judgment. opencode (no
+documented conversation injection – plugin events can only toast the human)
+and agy (`PreInvocation` fires per model call; `Stop` can only force
+continuation) stay instructions-only for now. No grandfathering: a plain
+re-run downgrades pre-0.1.19 track blurbs to status-only, and the release
+notes say how to re-opt-in.

@@ -27,6 +27,7 @@ import {
 import { runInit } from "./init.ts";
 import { runServe } from "./serve.ts";
 import { trackCommand } from "./track.ts";
+import { HOOK_DIALECTS, HOOK_EVENTS, trackHookCommand } from "./track-hook.ts";
 import { estimateCommand, statsCommand } from "./track-stats.ts";
 import { aggregateUsage, harvestUsage, mutateUsageStore, readUsageStore } from "./usage.ts";
 
@@ -50,10 +51,11 @@ usage:
   subtrk status [flags]   probe enabled providers, compact text
   subtrk usage [flags]    token usage + API-equivalent cost from the local store
   subtrk track <sub>      task-level usage accounting (start, stop, status,
-                          list, stats, estimate, prune)
+                          list, stats, estimate, prune, hook)
   subtrk init             one-time interactive setup
   subtrk init --agent <id>  write agent instructions for a harness and exit
-                          (claude|zcode|codex|opencode|agy)
+                          (claude|zcode|codex|opencode|agy); --track adds the
+                          task-tracking section + lifecycle hooks
   subtrk auth refresh     re-authorise one provider interactively (--provider <id>)
   subtrk serve            local web console (loopback only)
   subtrk --version        print the version
@@ -100,6 +102,10 @@ track flags:
   track prune           close markers orphaned by crashes/hangs
     [--before 24h]      duration cutoff (d|h|m); default 3d
     [--all]             close every open marker
+  track hook            emit the harness lifecycle nudge (run by hook configs;
+                        pipe a harness's stdin JSON to preview it)
+    --event <e>         session-start | stop
+    --harness <h>       claude | zcode | codex
   --json                machine-readable output (schemaVersion 1) everywhere
 
 exit codes: 0 ran · 1 runtime failure · 2 usage error · 3 --strict violation`;
@@ -120,9 +126,17 @@ new secrets to ~/.subtrk/env (mode 0600 on POSIX). Secrets are never echoed.
 into harness <id>'s global instructions file (claude|zcode|codex|opencode|agy)
 and exits. Idempotent – only subtrk's own marked block is touched.
 
+The instruction section comes in two tiers (interactive init asks once which
+you want, stored as agents.track in ~/.subtrk/config.json): status-only by
+default, or --track for the task-tracking section plus lifecycle hooks that
+remind agents to run track start/stop (claude, zcode, codex; re-run with
+--no-track to strip both back).
+
 flags:
-  --agent <id>  install agent instructions for <id>, no interaction
-  -h, --help    this screen`;
+  --agent <id>   install agent instructions for <id>, no interaction
+  --track        agent tier with task tracking + hooks (that run only)
+  --no-track     status-only tier; removes previously installed hooks
+  -h, --help     this screen`;
 
 // ---------- text rendering (spec §Text format) ----------
 
@@ -261,8 +275,12 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
         id: { type: "string" },
         before: { type: "string" },
         all: { type: "boolean", default: false },
+        event: { type: "string" },
+        harness: { type: "string" },
         port: { type: "string" },
         agent: { type: "string" },
+        track: { type: "boolean", default: false },
+        "no-track": { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
         version: { type: "boolean", short: "v", default: false },
       },
@@ -276,7 +294,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
   }
   const positionals = parsed.positionals;
   // the only two-verb commands: "auth refresh" and "track <sub>"
-  const TRACK_SUBS = new Set(["start", "stop", "status", "list", "stats", "estimate", "prune"]);
+  const TRACK_SUBS = new Set(["start", "stop", "status", "list", "stats", "estimate", "prune", "hook"]);
   if (positionals[0] === "auth") {
     if (positionals[1] !== "refresh" || positionals.length > 2) {
       console.error(`subtrk: unknown command '${positionals.join(" ")}' – try subtrk --help`);
@@ -327,8 +345,12 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     id,
     before,
     all,
+    event,
+    harness,
     port,
     agent,
+    track,
+    "no-track": noTrack,
     help,
     version: versionFlag,
   } = parsed.values as {
@@ -351,8 +373,12 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     id?: string;
     before?: string;
     all?: boolean;
+    event?: string;
+    harness?: string;
     port?: string;
     agent?: string;
+    track?: boolean;
+    "no-track"?: boolean;
     help?: boolean;
     version?: boolean;
   };
@@ -365,11 +391,16 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     return 0;
   }
   if (cmd === "init") {
+    if (track && noTrack) {
+      console.error("subtrk: pass either --track or --no-track, not both");
+      return 2;
+    }
     try {
       const code = await runInit({
         subtrkDir: deps.dirs?.subtrk,
         agent,
         agentsDir: deps.dirs?.agentsDir,
+        trackTier: track ? true : noTrack ? false : undefined,
       });
       return code ?? 0;
     } catch (err) {
@@ -411,6 +442,22 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
       { json: json === true, provider: provider[0], complexity, model },
       { subtrkDir: deps.dirs?.subtrk },
     );
+  if (cmd === "track hook") {
+    // Registered by `init --agent --track`; run BY the harness at lifecycle
+    // moments. Manually runnable too – pipe a harness's stdin JSON to preview
+    // the exact nudge it would emit.
+    if (!event || !(HOOK_EVENTS as readonly string[]).includes(event)) {
+      console.error(`subtrk: track hook needs --event <${[...HOOK_EVENTS].join("|")}>`);
+      return 2;
+    }
+    if (!harness || !(HOOK_DIALECTS as readonly string[]).includes(harness)) {
+      console.error(`subtrk: track hook needs --harness <${[...HOOK_DIALECTS].join("|")}>`);
+      return 2;
+    }
+    const outcome = trackHookCommand({ event, harness }, { subtrkDir: deps.dirs?.subtrk });
+    if (outcome.output !== "") console.log(outcome.output);
+    return outcome.code;
+  }
   if (cmd.startsWith("track "))
     return trackCommand(
       {

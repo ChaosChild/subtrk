@@ -162,9 +162,25 @@ GLOBAL agent instructions file, so the agent knows how to call subtrk:
 
 The write is idempotent – re-running replaces only subtrk's block between the
 `<!-- subtrk:begin -->` / `<!-- subtrk:end -->` markers and never touches
-anything else; to remove it, delete the block between the markers. On any other
-harness, paste this body into its instructions file manually (without the
-markers – `subtrk init --agent` wraps it in them):
+anything else; to remove it, delete the block between the markers.
+
+The section comes in two tiers. The default is quota guidance only – some
+users never want task tracking in their agents' instructions. Interactive
+`subtrk init` asks once whether to teach it (default No, stored as
+`agents.track` in `~/.subtrk/config.json`); `subtrk init --agent <harness>
+--track` opts in explicitly, `--no-track` opts back out. The track tier also
+registers lifecycle hooks in the harnesses that support them – claude
+(`~/.claude/settings.json`), zcode (`~/.zcode/cli/config.json`) and codex
+(`~/.codex/config.toml`) – so the harness itself reminds the agent to run
+`track start`/`track stop` at session start and turn end (`subtrk track
+hook` under the hood: read-only, throttled to once per session plus
+marker-set changes, never blocks). Every hook entry subtrk writes carries the
+literal `subtrk track hook` in its command; re-running with `--no-track`
+removes exactly those and nothing else, and a JSON target gets a one-time
+`.subtrk-bak` copy before its first modification. opencode and agy get
+instructions only. On any other harness, paste the status body below into its
+instructions file manually (without the markers – `subtrk init --agent`
+wraps it in them):
 
 ```markdown
 ## subtrk
@@ -188,17 +204,25 @@ is the machine-readable contract:
 - when an error's `remedy` is `subtrk auth refresh --provider <id>`, the provider's login expired – you may run that command yourself, but it opens a browser tab on this machine: tell the operator first and wait for their go
 - any other remedy is an interactive operator step (logins, setup prompts) – surface it verbatim instead of attempting it
 - a missing provider means the plan is not configured on this machine, not an error
+```
 
+The `--track` tier appends this section to the body above:
+
+```markdown
 ### track - task effort accounting (local only)
 
-- Housekeeping first: run `subtrk track status` before starting - if a marker
-  you own is still open, stop it (`track stop --id <id> --status aborted`) or,
-  if it is clearly dead (a crashed session), `subtrk track prune`. Never stack
-  open markers.
-- Before a task you expect to take more than a few minutes:
-  `subtrk track start --task "<short description>" --complexity <xs|s|m|l|xl>`
-  and remember the printed id. xs=single-file tweak, s=focused change+tests,
-  m=multi-file feature, l=subsystem, xl=multi-day epic (split it into tracks).
+- Applies to every task that produces or changes a deliverable - code, docs,
+  research writeups, planning, batch runs, releases - and anything expected
+  to span more than a few minutes. When unsure, start a marker: an extra
+  record costs ~350 bytes; a missing one is unrecoverable - that window's
+  burn can never be attributed again, and stats/estimate lose the calibration.
+- First actions of the task, before the first file read or search:
+  1. `subtrk track status` - if a marker you own is still open, stop it
+     (`track stop --id <id> --status aborted`) or, if clearly dead (a crashed
+     session), `subtrk track prune`. Never stack open markers.
+  2. `subtrk track start --task "<short description>" --complexity <xs|s|m|l|xl>`
+     - remember the printed id. xs=quick edit or doc tweak, s=focused change,
+     m=multi-file feature, l=subsystem, xl=multi-day epic (split into tracks).
 - When finished, aborted or failed: `subtrk track stop --status done|aborted|failed`
   (omit --id to close the newest open marker for this folder). subtrk then
   records the task window's real token usage from local harness stores.

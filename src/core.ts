@@ -186,8 +186,9 @@ function sleep(ms: number): Promise<void> {
 export interface SubtrkConfig {
   enabled: ProviderId[];
   order?: string[]; // display order of cards – "<id>" or "<id>:<scope>", unlisted keep registry order
-  hidden?: string[]; // hidden console cards: "<providerId>" or "<providerId>:<scope>"
+  hidden?: string[]; // hidden console cards: "<providerId>" or "<id>:<scope>"
   theme?: "light" | "dark"; // console colour theme – display hint only
+  agents?: { track?: boolean }; // agent-instruction tier (D19): true = track tier
 }
 
 // A card key is a known provider id, optionally scoped: "<id>:<slug>". The slug
@@ -224,12 +225,32 @@ export function loadConfig(subtrkDir: string = SUBTRK_DIR): SubtrkConfig {
   } catch {
     throw new ConfigError(`config is not valid JSON: ${path}`);
   }
-  const file = raw as { enabled?: unknown; order?: unknown; hidden?: unknown; theme?: unknown } | null;
+  const file = raw as {
+    enabled?: unknown;
+    order?: unknown;
+    hidden?: unknown;
+    theme?: unknown;
+    agents?: unknown;
+  } | null;
   // Display hint like order/hidden: only exact "light"/"dark" strings survive.
   const theme = file?.theme === "light" || file?.theme === "dark" ? file.theme : undefined;
+  // Agent tier hint (D19): only an exact boolean survives; anything else is
+  // dropped, never a hard failure.
+  const agentsRaw = file?.agents;
+  const agentsTrack =
+    agentsRaw !== null && typeof agentsRaw === "object" && !Array.isArray(agentsRaw)
+      ? (agentsRaw as { track?: unknown }).track
+      : undefined;
+  const agents = agentsTrack === true || agentsTrack === false ? { track: agentsTrack } : undefined;
   const enabled = file?.enabled;
   if (enabled === undefined) {
-    return { enabled: [...ALL_PROVIDER_IDS], order: parseOrder(file?.order), hidden: parseHidden(file?.hidden), theme };
+    return {
+      enabled: [...ALL_PROVIDER_IDS],
+      order: parseOrder(file?.order),
+      hidden: parseHidden(file?.hidden),
+      theme,
+      agents,
+    };
   }
   if (!Array.isArray(enabled) || enabled.some((e) => typeof e !== "string")) {
     throw new ConfigError(`config.enabled must be an array of provider ids: ${path}`);
@@ -239,6 +260,7 @@ export function loadConfig(subtrkDir: string = SUBTRK_DIR): SubtrkConfig {
     order: parseOrder(file?.order),
     hidden: parseHidden(file?.hidden),
     theme,
+    agents,
   };
 }
 
@@ -256,7 +278,13 @@ function parseHidden(value: unknown): string[] | undefined {
 // writeCacheEntry discipline). Throws on write failure – callers decide.
 export function saveConfig(
   subtrkDir: string,
-  patch: { enabled?: ProviderId[]; order?: string[]; hidden?: string[]; theme?: "light" | "dark" },
+  patch: {
+    enabled?: ProviderId[];
+    order?: string[];
+    hidden?: string[];
+    theme?: "light" | "dark";
+    agents?: { track?: boolean };
+  },
 ): void {
   const path = join(subtrkDir, "config.json");
   let file: Record<string, unknown> = {};
@@ -272,6 +300,14 @@ export function saveConfig(
   if (patch.order !== undefined) file.order = [...patch.order];
   if (patch.hidden !== undefined) file.hidden = [...patch.hidden];
   if (patch.theme !== undefined) file.theme = patch.theme;
+  if (patch.agents?.track !== undefined) {
+    // Merge into any existing agents object so sibling keys survive.
+    const prev =
+      file.agents !== null && typeof file.agents === "object" && !Array.isArray(file.agents)
+        ? (file.agents as Record<string, unknown>)
+        : {};
+    file.agents = { ...prev, track: patch.agents.track };
+  }
   mkdirSync(subtrkDir, { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`);
