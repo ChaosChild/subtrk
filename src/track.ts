@@ -11,7 +11,10 @@ import { ALL_PROVIDER_IDS, acquireLock, releaseLock, SUBTRK_DIR, scrub, scrubVal
 
 // ---------- types ----------
 
-export type Attribution = "session-window" | "window" | "none";
+// Ladder: "session-window" (zcode per-request rows), "session-scan" (claude
+// transcript window scan with the exact contributing session ids recorded),
+// "window" (codex transcript scans – sessions not recorded), "none".
+export type Attribution = "session-window" | "session-scan" | "window" | "none";
 
 export type TrackStatus = "done" | "aborted" | "failed" | "stale";
 
@@ -19,6 +22,7 @@ export interface TrackUsage {
   in: number; // UNCACHED input (inclusive stores normalized at harvest)
   cr: number;
   cw: number;
+  cw1h?: number; // 1h-ephemeral cache-write split (claude); subset of cw, priced apart
   out: number;
   reqs: number;
 }
@@ -47,7 +51,7 @@ export interface TrackRecord {
   contested: boolean; // usage window provably overlaps a sibling record
   nested: string | null; // id of the record whose window contains this one
   pending: boolean; // harvest failed – retried on later invocations
-  sessions: string[]; // exact session ids summed (zcode), or transcript stems
+  sessions: string[]; // exact session ids summed (zcode rows, claude transcript sessions)
   usage: TrackUsage | null; // null = no readable local store (attribution "none")
   bySource?: Record<string, TrackUsage>; // zcode:main / zcode:subagent / zcode:compact / claude / codex
   models?: Record<string, number>; // model -> token share 0..1
@@ -78,7 +82,7 @@ export interface HarvestWindow {
   project: string;
   t0: number;
   t1: number;
-  session?: string; // manual pin: restrict the session-window tier to one session id
+  session?: string; // manual pin: restrict session-attributed tiers (zcode rows, claude transcripts) to one session id
 }
 
 export type HarvestFn = (w: HarvestWindow) => Promise<HarvestResult | null>;
@@ -246,6 +250,16 @@ export function parseDurationMs(value: string): number | null {
   return n * unitMs;
 }
 
+// A record's session list names every store that produced its usage: zcode
+// rows always carry session ids, and claude scans record theirs (session-scan
+// tier). A codex contribution is never session-covered, so a mixed record
+// cannot be refined – overlapping usage stays contested (flag, never average).
+function sessionCovered(r: TrackRecord): boolean {
+  if (r.usage === null || r.sessions.length === 0) return false;
+  if (r.attribution !== "session-window" && r.attribution !== "session-scan") return false;
+  return Object.keys(r.bySource ?? {}).every((k) => k.startsWith("zcode:") || k === "claude");
+}
+
 // Full deterministic pass over the record set: containment marks the inner
 // record `nested` (stats read leaves only); provable overlap between records
 // that both carry usage marks BOTH `contested`. A nested pair is not also
@@ -270,8 +284,8 @@ function recomputeFlags(records: TrackRecord[]): void {
       }
       if (a.usage === null || b.usage === null) continue; // overlap without numbers cannot be contested usage
       if (a.t0 >= b.t1 || b.t0 >= a.t1) continue; // no overlap
-      // Both session-attributed: contested only when they summed shared sessions.
-      if (a.attribution === "session-window" && b.attribution === "session-window") {
+      // Both session-covered: contested only when they summed shared sessions.
+      if (sessionCovered(a) && sessionCovered(b)) {
         const shared = a.sessions.some((s) => b.sessions.includes(s));
         if (!shared) continue;
       }

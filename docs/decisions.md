@@ -390,6 +390,21 @@ verbs, the dashboard Tasks section and the agents.ts blurb land in M4b.
    data (Tasks strip on the dashboard, /track view, /api/track) – the verdict
    stays a CLI concern for agents, per review.
 
+6. **Claude attribution joins the ladder as `session-scan`** (RedCanyon's
+   transcript-verified bug list, 2026-10-08). Claude harvests record the exact
+   contributing session ids: subagent transcripts (`<session>/subagents/`)
+   attribute to their parent session, and a `--session` pin restricts the scan
+   to that session plus its subagents. The shared-session refinement of
+   `contested` therefore covers claude records too – but only when a record's
+   whole usage is session-covered (a codex contribution is not; flag, never
+   average). The marker's project walks up to its git root at HARVEST time to
+   find the session's launch dir (markers keep literal cwds, so `track stop`
+   matching is untouched), and truncated long-path dir names are confirmed by
+   the transcript `cwd` field, never by guessing Claude's hash. Claude's
+   1h-ephemeral cache writes split into `cw1h` (a subset of `cw`, which stays
+   the token total) and price at 2× input while 5m writes keep the `cw` rate;
+   the local parser version bumped to 5 so stale stores re-read once.
+
 ## D19 · Agent tiers + track hooks – status-only default, opt-in enforcement (M4d)
 
 `subtrk init --agent` writes one of two tiers over a shared status body

@@ -4,10 +4,10 @@
 // harness is writing. Every store's accounting convention is normalized here
 // to TrackUsage (in = UNCACHED input): zcode input_tokens is inclusive of
 // cache reads, claude/codex report the exclusive split already.
-import { createReadStream } from "node:fs";
+import { createReadStream, type Dirent } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import * as readline from "node:readline";
 import type { HarvestResult, HarvestWindow, TrackUsage } from "./track.ts";
 import { type CodexParserState, parseClaudeTranscriptLine, parseCodexRolloutLine } from "./usage.ts";
@@ -138,44 +138,224 @@ function encodeClaudePath(p: string): string {
   return p.replace(/[^A-Za-z0-9]/g, "-");
 }
 
-async function harvestClaude(acc: Accumulator, w: HarvestWindow, homeDir: string): Promise<boolean> {
-  let files: string[];
+// Very long launch dirs get the encoded name truncated and hash-suffixed by
+// Claude Code. A candidate must share this much of the encoding before the
+// slower transcript-cwd confirmation runs (the hash itself is never guessed).
+const MIN_SHARED_PREFIX = 20;
+
+function sharedPrefixLen(a: string, b: string): number {
+  const n = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < n && a.charCodeAt(i) === b.charCodeAt(i)) i++;
+  return i;
+}
+
+// First transcript `cwd` in the dir (≤2 files, ≤5 lines each) – the authority
+// on which project a truncated dir name belongs to. null = unreadable/absent.
+async function readDirCwd(dir: string): Promise<string | null> {
+  let names: string[] = [];
   try {
-    const dir = join(homeDir, ".claude", "projects", encodeClaudePath(w.project));
-    const entries = await readdir(dir, { withFileTypes: true });
-    files = entries.filter((e) => e.isFile() && e.name.endsWith(".jsonl")).map((e) => join(dir, e.name));
+    names = (await readdir(dir)).filter((n) => n.endsWith(".jsonl"));
   } catch {
-    return false;
+    return null;
   }
-  let any = false;
-  const seen = new Set<string>(); // streaming replays duplicate message ids – first wins (ccusage rule)
-  for (const file of files) {
+  for (const name of names.sort().slice(0, 2)) {
     try {
-      const st = await stat(file);
-      if (st.mtimeMs < w.t0) continue; // untouched during the window
-    } catch {
-      continue;
-    }
-    const rl = readline.createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
-    for await (const line of rl) {
-      const r = parseClaudeTranscriptLine(line, null);
-      if (!r || r.ts < w.t0 || r.ts > w.t1) continue;
-      if (r.dedupeKey) {
-        if (seen.has(r.dedupeKey)) continue;
-        seen.add(r.dedupeKey);
+      const rl = readline.createInterface({
+        input: createReadStream(join(dir, name), { encoding: "utf8" }),
+        crlfDelay: Infinity,
+      });
+      let lines = 0;
+      for await (const line of rl) {
+        if (++lines > 5) break;
+        try {
+          const o = JSON.parse(line) as { cwd?: unknown };
+          if (typeof o.cwd === "string" && o.cwd !== "") return o.cwd;
+        } catch {
+          /* keep scanning */
+        }
       }
-      const tot = (r.row.in ?? 0) + (r.row.cr ?? 0) + (r.row.cw ?? 0) + (r.row.out ?? 0);
-      if (tot <= 0) continue;
-      any = true;
-      const u = bucket(acc.bySource, "claude");
-      u.in += r.row.in ?? 0;
-      u.cr += r.row.cr ?? 0;
-      u.cw += r.row.cw ?? 0;
-      u.out += r.row.out ?? 0;
-      u.reqs += r.row.req ?? 0;
-      acc.models[r.model] = (acc.models[r.model] ?? 0) + tot;
+    } catch {
+      /* next file */
     }
   }
+  return null;
+}
+
+// Encoded dirs for `project`: the exact name when it exists, else long-path
+// truncated candidates confirmed by their transcript cwd (in name order).
+async function projectDirs(root: string, project: string): Promise<string[]> {
+  const enc = encodeClaudePath(project);
+  const exact = join(root, enc);
+  try {
+    await stat(exact);
+    return [exact];
+  } catch {
+    /* fall through to the truncated scan */
+  }
+  const out: string[] = [];
+  let entries: Dirent[] = [];
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!e.isDirectory() || sharedPrefixLen(e.name, enc) < MIN_SHARED_PREFIX) continue;
+    const cwd = await readDirCwd(join(root, e.name));
+    if (cwd !== null && normalizeDir(cwd) === normalizeDir(project)) out.push(join(root, e.name));
+  }
+  return out;
+}
+
+// Does this encoded dir hold files the window can use? Pinned: the session's
+// own transcript (or one of its subagent files) existing is enough – the pin
+// names the session exactly. Unpinned: any transcript touched in the window.
+async function dirUsable(dir: string, w: HarvestWindow, pin: string | null): Promise<boolean> {
+  if (pin !== null) {
+    try {
+      await stat(join(dir, `${pin}.jsonl`));
+      return true;
+    } catch {
+      /* subagents next */
+    }
+    try {
+      const subs = await readdir(join(dir, pin, "subagents"));
+      return subs.some((n) => n.endsWith(".jsonl"));
+    } catch {
+      return false;
+    }
+  }
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const e of entries) {
+      if (!e.name.endsWith(".jsonl")) continue;
+      if (e.isFile()) {
+        const st = await stat(join(dir, e.name)).catch(() => null);
+        if (st && st.mtimeMs >= w.t0) return true;
+        continue;
+      }
+      if (!e.isDirectory()) continue;
+      const subs = await readdir(join(dir, e.name, "subagents"), { withFileTypes: true }).catch(() => []);
+      for (const f of subs) {
+        if (!f.isFile() || !f.name.endsWith(".jsonl")) continue;
+        const st = await stat(join(dir, e.name, "subagents", f.name)).catch(() => null);
+        if (st && st.mtimeMs >= w.t0) return true;
+      }
+    }
+  } catch {
+    /* unreadable dir */
+  }
+  return false;
+}
+
+// Nearest ancestor holding .git – the walk-up cap. A repo's sessions sit in
+// the repo root's encoded dir; above the repo they belong to other projects.
+async function gitRootOf(p: string): Promise<string | null> {
+  let cur = p;
+  for (;;) {
+    if (await stat(join(cur, ".git")).catch(() => null)) return cur;
+    const parent = dirname(cur);
+    if (parent === cur) return null;
+    cur = parent;
+  }
+}
+
+async function fsRoot(p: string): Promise<string> {
+  let cur = p;
+  for (;;) {
+    const parent = dirname(cur);
+    if (parent === cur) return cur;
+    cur = parent;
+  }
+}
+
+// Claude names the folder after the session's LAUNCH dir while the marker
+// records where `track start` ran – often a subfolder. Walk up from the
+// marker's project to its git root (filesystem root when not in a repo) and
+// use the nearest level whose encoded dir exists and holds usable files. The
+// walk happens at harvest time, so markers already written keep working and
+// `track stop`'s cwd matching is untouched.
+async function claudeDirsFor(root: string, w: HarvestWindow, pin: string | null): Promise<string[]> {
+  const cap = (await gitRootOf(w.project)) ?? (await fsRoot(w.project));
+  let level = w.project;
+  for (;;) {
+    for (const dir of await projectDirs(root, level)) {
+      if (await dirUsable(dir, w, pin)) return [dir];
+    }
+    if (normalizeDir(level) === normalizeDir(cap)) return [];
+    const parent = dirname(level);
+    if (parent === level) return [];
+    level = parent;
+  }
+}
+
+// Session transcripts plus subagent transcripts (<sid>/subagents/*.jsonl,
+// attributed to the parent session – sidechain lines carry its sessionId).
+// A pin restricts the set to that one session (main + subagents).
+async function claudeFilesIn(dir: string, pin: string | null): Promise<{ file: string; session: string }[]> {
+  const files: { file: string; session: string }[] = [];
+  let entries: Dirent[] = [];
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return files;
+  }
+  for (const e of entries) {
+    if (e.isFile() && e.name.endsWith(".jsonl")) {
+      files.push({ file: join(dir, e.name), session: e.name.replace(/\.jsonl$/, "") });
+    }
+  }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const sub = join(dir, e.name, "subagents");
+    const subs = await readdir(sub, { withFileTypes: true }).catch(() => []);
+    for (const f of subs) {
+      if (f.isFile() && f.name.endsWith(".jsonl")) files.push({ file: join(sub, f.name), session: e.name });
+    }
+  }
+  return pin !== null ? files.filter((f) => f.session === pin) : files;
+}
+
+async function harvestClaude(acc: Accumulator, w: HarvestWindow, homeDir: string): Promise<boolean> {
+  const root = join(homeDir, ".claude", "projects");
+  const pin = typeof w.session === "string" && w.session.trim() !== "" ? w.session.trim() : null;
+  const dirs = await claudeDirsFor(root, w, pin);
+  let any = false;
+  const seen = new Set<string>(); // streaming replays duplicate message ids – first wins (ccusage rule), shared across all files
+  const contributed = new Set<string>(); // session ids that produced in-window usage
+  for (const dir of dirs) {
+    for (const { file, session } of await claudeFilesIn(dir, pin)) {
+      try {
+        const st = await stat(file);
+        if (st.mtimeMs < w.t0) continue; // untouched during the window
+      } catch {
+        continue;
+      }
+      const rl = readline.createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
+      for await (const line of rl) {
+        const r = parseClaudeTranscriptLine(line, null);
+        if (!r || r.ts < w.t0 || r.ts > w.t1) continue;
+        if (r.dedupeKey) {
+          if (seen.has(r.dedupeKey)) continue;
+          seen.add(r.dedupeKey);
+        }
+        const tot = (r.row.in ?? 0) + (r.row.cr ?? 0) + (r.row.cw ?? 0) + (r.row.out ?? 0);
+        if (tot <= 0) continue;
+        any = true;
+        contributed.add(r.sessionId ?? session);
+        const u = bucket(acc.bySource, "claude");
+        u.in += r.row.in ?? 0;
+        u.cr += r.row.cr ?? 0;
+        u.cw += r.row.cw ?? 0;
+        if ((r.row.cw1h ?? 0) > 0) u.cw1h = (u.cw1h ?? 0) + (r.row.cw1h ?? 0);
+        u.out += r.row.out ?? 0;
+        u.reqs += r.row.req ?? 0;
+        acc.models[r.model] = (acc.models[r.model] ?? 0) + tot;
+      }
+    }
+  }
+  for (const s of contributed) acc.sessions.add(s);
   return any;
 }
 
@@ -261,8 +441,9 @@ export interface HarvestOpts {
 
 // Sum every readable local store's usage for [t0, t1] in the project. The
 // result's attribution names the best tier that produced numbers:
-// "session-window" (zcode per-request rows), "window" (transcript scans),
-// "none" (nothing readable – the record keeps its task facts only).
+// "session-window" (zcode per-request rows), "session-scan" (claude
+// transcript scans with exact session ids), "window" (codex transcript
+// scans), "none" (nothing readable – the record keeps its task facts only).
 export async function harvestWindow(w: HarvestWindow, opts: HarvestOpts = {}): Promise<HarvestResult | null> {
   const homeDir = opts.homeDir ?? homedir();
   const acc: Accumulator = { bySource: {}, models: {}, sessions: new Set() };
@@ -276,6 +457,7 @@ export async function harvestWindow(w: HarvestWindow, opts: HarvestOpts = {}): P
     usage.in += u.in;
     usage.cr += u.cr;
     usage.cw += u.cw;
+    if (u.cw1h !== undefined) usage.cw1h = (usage.cw1h ?? 0) + u.cw1h;
     usage.out += u.out;
     usage.reqs += u.reqs;
   }
@@ -283,6 +465,6 @@ export async function harvestWindow(w: HarvestWindow, opts: HarvestOpts = {}): P
   if (total <= 0) return null;
   const shares: Record<string, number> = {};
   for (const [model, tok] of Object.entries(acc.models)) shares[model] = tok / total;
-  const attribution = zcode ? "session-window" : claude || codex ? "window" : "none";
+  const attribution = zcode ? "session-window" : claude ? "session-scan" : codex ? "window" : "none";
   return { attribution, usage, bySource: acc.bySource, models: shares, sessions: [...acc.sessions] };
 }

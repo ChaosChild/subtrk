@@ -49,6 +49,7 @@ export interface UsageRow {
   cw?: number;
   cr?: number;
   out?: number;
+  cw1h?: number; // 1h-ephemeral cache-write input (claude split; subset of cw, priced apart)
   tot?: number;
   req?: number;
   usd?: number;
@@ -416,15 +417,24 @@ export function priceForModel(store: UsageStore, model: string): ResolvedPrice |
 }
 
 // Row cost: vendor-actual `usd` wins; else tokens × price; null = unpriced.
+// Claude's 1h-ephemeral cache writes (cw1h, a subset of cw) bill at 2× the
+// input price; the remaining cache writes price at cw (the 5m rate, 1.25×
+// input where priced, input as the fallback).
 export function rowCost(row: UsageRow, price: ModelPrice | null): { usd: number; kind: "actual" | "estimate" } | null {
   if (row.usd !== undefined && Number.isFinite(row.usd)) return { usd: row.usd, kind: "actual" };
   if (!price) return null;
   const uncachedIn = row.in ?? 0;
   const cr = row.cr ?? 0;
   const cw = row.cw ?? 0;
+  const cw1h = Math.min(row.cw1h ?? 0, cw);
   const out = row.out ?? 0;
   return {
-    usd: uncachedIn * price.in + cr * (price.cr ?? 0) + cw * (price.cw ?? price.in) + out * price.out,
+    usd:
+      uncachedIn * price.in +
+      cr * (price.cr ?? 0) +
+      cw1h * (2 * price.in) +
+      (cw - cw1h) * (price.cw ?? price.in) +
+      out * price.out,
     kind: "estimate",
   };
 }
@@ -1353,10 +1363,13 @@ const ALIBABA_ALL_MODELS = "(all models)";
 const OPENAI_LOCAL_TTL_MS = 60_000;
 // Bump when local-parser semantics change: stores harvested by an older
 // parser are wiped and re-read once (self-healing, no operator rebuild).
+// v5: claude rows carry the 1h cache-write split (cw1h) so 1h-ephemeral
+// writes price at 2x input instead of the single cw (5m) rate; stores from
+// older parsers are wiped and re-derived once, exactly.
 // v4: incremental offsets over-counted the trailing newline byte (first
 // appended line per round was lost) and stale rounds double-added their rows –
 // stores from older parsers are wiped and re-derived once, exactly.
-const LOCAL_PARSER_VERSION = 4;
+const LOCAL_PARSER_VERSION = 5;
 const OPENAI_WHAM_TTL_MS = 6 * 3_600_000;
 const WHAM_URL = "https://chatgpt.com/backend-api/wham/usage/daily-token-usage-breakdown";
 
@@ -1767,11 +1780,13 @@ export function parseCodexRolloutLine(
 // synthetic/error lines; input/cache/cache-read/output from message.usage).
 // Streaming partial writes duplicate the same message.id+requestId with
 // growing usage – the caller dedupes on `dedupeKey`, keeping the FIRST
-// occurrence (the ccusage convention).
+// occurrence (the ccusage convention). `sessionId` is the line's session id
+// (subagent sidechain lines carry the PARENT's); `cw1h` splits 1h-ephemeral
+// cache writes out of the cw total so they can price at their own rate.
 export function parseClaudeTranscriptLine(
   line: string,
   _currentModel: string | null,
-): { ts: number; model: string; row: UsageRow; dedupeKey: string | null } | null {
+): { ts: number; model: string; row: UsageRow; dedupeKey: string | null; sessionId: string | null } | null {
   if (!line.includes('"assistant"') || !line.includes('"usage"')) return null; // cheap prefilter
   let o: unknown;
   try {
@@ -1799,10 +1814,14 @@ export function parseClaudeTranscriptLine(
   if (cr > 0) row.cr = cr;
   if (cw > 0) row.cw = cw;
   if (out > 0) row.out = out;
+  const cc = usage.cache_creation as Record<string, unknown> | undefined;
+  const e1h = cc && typeof cc === "object" ? (num(cc.ephemeral_1h_input_tokens) ?? 0) : 0;
+  if (e1h > 0) row.cw1h = Math.min(e1h, cw);
   const mid = typeof message.id === "string" ? message.id : "";
   const rid = typeof rec.requestId === "string" ? rec.requestId : "";
   const dedupeKey = mid || rid ? createHash("sha256").update(`${mid}|${rid}`).digest("hex").slice(0, 12) : null;
-  return { ts, model, row, dedupeKey };
+  const sessionId = typeof rec.sessionId === "string" && rec.sessionId !== "" ? rec.sessionId : null;
+  return { ts, model, row, dedupeKey, sessionId };
 }
 
 // Shared incremental JSONL walker: per-file byte offsets + parser state in
@@ -1933,7 +1952,7 @@ async function harvestLocalJsonl(
       const hk = hourKey(parsed.ts);
       const models = rowsByHour.get(hk) ?? new Map<string, UsageRow>();
       const target = models.get(parsed.model) ?? {};
-      for (const field of ["in", "cw", "cr", "out", "req"] as const) {
+      for (const field of ["in", "cw", "cr", "out", "cw1h", "req"] as const) {
         const v = parsed.row[field];
         if (v !== undefined) target[field] = (target[field] ?? 0) + v;
       }
@@ -2007,7 +2026,7 @@ function addDeltaLocal(store: UsageStore, provider: string, hKey: string, model:
   const hours = ensure(store.localHourly, provider);
   const bucket = ensure(hours, hKey);
   const row = ensure(bucket, model);
-  for (const field of ["in", "cw", "cr", "out", "tot", "req", "usd"] as const) {
+  for (const field of ["in", "cw", "cr", "out", "cw1h", "tot", "req", "usd"] as const) {
     const v = delta[field];
     if (v === undefined) continue;
     row[field] = (row[field] ?? 0) + v;
