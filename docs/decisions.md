@@ -438,3 +438,27 @@ and agy (`PreInvocation` fires per model call; `Stop` can only force
 continuation) stay instructions-only for now. No grandfathering: a plain
 re-run downgrades pre-0.1.19 track blurbs to status-only, and the release
 notes say how to re-opt-in.
+
+## D20 · The npm tarball ships compiled JavaScript (amends D5's shipping premise)
+
+Node's type stripping – default since 23.6 and backported unflagged to the
+22.18 LTS line – deliberately never applies to files under `node_modules`
+(ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING; nodejs/node#57215): packages are
+expected to publish runnable JavaScript, and no flag lifts the exclusion
+(strip/transform both verified). D5's "the shipped tarball is source" premise
+therefore made every real registry install of v0.1.0–v0.1.19 crash at startup
+on any Node meeting the engines gate – invisible to the project's own testing
+because the only human tester ran via an `npm link` junction and repo
+checkouts, both exempt (real path outside `node_modules`), and CI tested the
+repository, never the packed artifact (found 2026-10-08 while installing
+v0.1.19's agent hooks).
+
+Fix (v0.1.20): `tsconfig.build.json` emits `dist/` (erasable syntax only,
+`rewriteRelativeImportExtensions` rewrites the `.ts` import specifiers),
+`prepack` builds it, `bin` → `dist/cli.js`, `files` → `["dist"]` (the shebang
+survives compilation). The repository itself still runs its TypeScript source
+directly – D5's no-build-step development experience is unchanged, runtime
+stays zero-dependency, and the compiler joins typecheck and linter as a
+dev-only tool. A `tarball` CI job now packs, installs into a temp prefix and
+executes the bin the way a user would, so "the published artifact runs" is a
+checked fact instead of an assumption.

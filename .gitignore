@@ -5,3 +5,4 @@ node_modules/
 Thumbs.db
 subtrk-tmp.json
 .lavish/
+dist/

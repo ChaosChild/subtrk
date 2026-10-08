@@ -2,8 +2,9 @@
 
 Version 1.1
 
-`subtrk` is a zero-dependency CLI (TypeScript on Node ≥22.18, executed directly via type
-stripping – no build step) that reports remaining quota across the provider plans it tracks,
+`subtrk` is a zero-dependency CLI (TypeScript source in the repository, executed directly via type
+stripping – no build step in development; the npm package ships compiled JavaScript, D20) that
+reports remaining quota across the provider plans it tracks,
 designed first for AI agents and second for humans. One process per invocation, one
 shared cache so concurrent agents never hammer provider endpoints.
 
