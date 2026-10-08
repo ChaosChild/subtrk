@@ -40,11 +40,12 @@ export const AGENT_TARGETS: Readonly<Record<AgentId, AgentTarget>> = agentTarget
 export const AGENT_SECTION_BEGIN = "<!-- subtrk:begin -->";
 export const AGENT_SECTION_END = "<!-- subtrk:end -->";
 
-// The blurb: a `## subtrk` section an agent of any harness can act on. Keep it
-// terse and in sync with the status contract (spec §Output contract) – when a
-// provider is added, check whether this text needs updating.
-export const AGENT_SECTION = `<!-- subtrk:begin -->
-## subtrk
+// The blurb comes in two tiers (D19). Tier 1 (default) is quota guidance only;
+// tier 2 (opt-in via `init --agent --track` or the config preference) adds the
+// task-tracking section. Keep both terse and in sync with the status contract
+// (spec §Output contract) – when a provider is added, check whether this text
+// needs updating.
+const AGENT_STATUS_BODY = `## subtrk
 
 \`subtrk\` reports remaining quota for the AI plans configured on this machine.
 Use it before committing to large or long-running work on a provider –
@@ -64,26 +65,39 @@ is the machine-readable contract:
 - plain calls go through a shared TTL cache and are polite; \`--fresh\` only when a result is actively stale
 - when an error's \`remedy\` is \`subtrk auth refresh --provider <id>\`, the provider's login expired – you may run that command yourself, but it opens a browser tab on this machine: tell the operator first and wait for their go
 - any other remedy is an interactive operator step (logins, setup prompts) – surface it verbatim instead of attempting it
-- a missing provider means the plan is not configured on this machine, not an error
+- a missing provider means the plan is not configured on this machine, not an error`;
 
-### track - task effort accounting (local only)
+// Tier 2 extension. The trigger is positional, not predictive: "first actions
+// of the task", before any file read – a gate an agent evaluates by forecast
+// ("a task you expect to take more than a few minutes") fails exactly on the
+// underestimated tasks, which are the ones worth tracking.
+const AGENT_TRACK_SECTION = `### track - task effort accounting (local only)
 
-- Housekeeping first: run \`subtrk track status\` before starting - if a marker
-  you own is still open, stop it (\`track stop --id <id> --status aborted\`) or,
-  if it is clearly dead (a crashed session), \`subtrk track prune\`. Never stack
-  open markers.
-- Before a task you expect to take more than a few minutes:
-  \`subtrk track start --task "<short description>" --complexity <xs|s|m|l|xl>\`
-  and remember the printed id. xs=single-file tweak, s=focused change+tests,
-  m=multi-file feature, l=subsystem, xl=multi-day epic (split it into tracks).
+- Applies to every task that produces or changes a deliverable - code, docs,
+  research writeups, planning, batch runs, releases - and anything expected
+  to span more than a few minutes. When unsure, start a marker: an extra
+  record costs ~350 bytes; a missing one is unrecoverable - that window's
+  burn can never be attributed again, and stats/estimate lose the calibration.
+- First actions of the task, before the first file read or search:
+  1. \`subtrk track status\` - if a marker you own is still open, stop it
+     (\`track stop --id <id> --status aborted\`) or, if clearly dead (a crashed
+     session), \`subtrk track prune\`. Never stack open markers.
+  2. \`subtrk track start --task "<short description>" --complexity <xs|s|m|l|xl>\`
+     - remember the printed id. xs=quick edit or doc tweak, s=focused change,
+     m=multi-file feature, l=subsystem, xl=multi-day epic (split into tracks).
 - When finished, aborted or failed: \`subtrk track stop --status done|aborted|failed\`
   (omit --id to close the newest open marker for this folder). subtrk then
   records the task window's real token usage from local harness stores.
 - Before committing to large work, ask:
   \`subtrk track estimate --complexity m --provider <id>\`
   If the verdict says p90 does not fit the remaining window, defer, split the
-  task, or switch model - discovering a rate limit mid-task wastes the work.
-<!-- subtrk:end -->`;
+  task, or switch model - discovering a rate limit mid-task wastes the work.`;
+
+// The full marked section for a tier. Tier 2 = tier 1 + the track section.
+export function agentSectionFor(track: boolean): string {
+  const body = track ? `${AGENT_STATUS_BODY}\n\n${AGENT_TRACK_SECTION}` : AGENT_STATUS_BODY;
+  return `${AGENT_SECTION_BEGIN}\n${body}\n${AGENT_SECTION_END}`;
+}
 
 // Pure: add or replace the marked section. No markers -> append with one blank
 // line before. Markers present -> replace only the block between the first

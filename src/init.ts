@@ -7,8 +7,9 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { hookCapable, installAgentHooks, removeAgentHooks } from "./agent-hooks.ts";
 import type { AgentTarget } from "./agents.ts";
-import { AGENT_SECTION, agentTargets, applyAgentSection, printAgentListing } from "./agents.ts";
+import { agentSectionFor, agentTargets, applyAgentSection, printAgentListing } from "./agents.ts";
 import type { ProviderId } from "./core.ts";
 import { ALL_PROVIDER_IDS, getSecret, loadConfig, registerSecret, SUBTRK_DIR, saveConfig, scrub } from "./core.ts";
 import { claudeAuth } from "./providers/claude.ts";
@@ -19,6 +20,7 @@ export interface InitOpts {
   subtrkDir?: string;
   agentsDir?: string; // base for agent instruction files (replaces homedir; tests)
   agent?: string; // --agent <harness>: only the agent step, then exit
+  trackTier?: boolean; // explicit --track (true) / --no-track (false); undefined = config/default
 }
 
 // ---------- prompts ----------
@@ -377,10 +379,24 @@ async function fetchKimiClientId(): Promise<string | null> {
   }
 }
 
-// `subtrk init --agent <harness>`: write the instructions section, print one
-// line, exit – no provider selection, no checks. Unknown name prints the
-// supported listing on stderr and exits 2.
-function agentStep(name: string, base?: string): number {
+// The instruction tier (D19): an explicit flag wins, else the persisted
+// agents.track preference, else status-only. No grandfathering – a plain
+// refresh on a pre-0.1.19 track blurb downgrades to status-only and the
+// release notes say how to re-opt-in.
+function resolveTrackTier(opts: InitOpts, subtrkDir: string): boolean {
+  if (opts.trackTier !== undefined) return opts.trackTier;
+  try {
+    return loadConfig(subtrkDir).agents?.track === true;
+  } catch {
+    return false;
+  }
+}
+
+// `subtrk init --agent <harness>`: write the instruction section for the
+// resolved tier, install (tier 2) or remove (tier 1) lifecycle hooks where the
+// harness supports them, print what happened, exit – no provider selection,
+// no checks. Unknown name prints the supported listing on stderr and exits 2.
+function agentStep(name: string, base: string | undefined, track: boolean): number {
   const targets: Record<string, AgentTarget> = agentTargets(base);
   const target = targets[name];
   if (!target) {
@@ -388,14 +404,25 @@ function agentStep(name: string, base?: string): number {
     printAgentListing(base);
     return 2;
   }
-  const { status } = applyAgentSection(target.file, AGENT_SECTION);
-  console.log(`${name} – ${status} ${target.file}`);
+  const { status } = applyAgentSection(target.file, agentSectionFor(track));
+  console.log(`${name} – ${status} ${target.file}${track ? " (track tier)" : ""}`);
+  if (track) {
+    if (hookCapable(name)) {
+      const r = installAgentHooks(name, base);
+      for (const line of r.lines) console.log(line);
+    } else {
+      console.log(`${name} – instructions only (no lifecycle hooks for this harness yet)`);
+    }
+  } else if (hookCapable(name)) {
+    const r = removeAgentHooks(name, base);
+    for (const line of r.lines) console.log(line);
+  }
   return 0;
 }
 
 export async function runInit(opts: InitOpts = {}): Promise<number | undefined> {
-  if (opts.agent !== undefined) return agentStep(opts.agent, opts.agentsDir);
   const subtrkDir = opts.subtrkDir ?? SUBTRK_DIR;
+  if (opts.agent !== undefined) return agentStep(opts.agent, opts.agentsDir, resolveTrackTier(opts, subtrkDir));
   const envPath = join(subtrkDir, "env");
   mkdirSync(subtrkDir, { recursive: true });
   const missing: string[] = [];
@@ -420,6 +447,36 @@ export async function runInit(opts: InitOpts = {}): Promise<number | undefined> 
       console.log(`[ok]      selection saved to ~/.subtrk/config.json – tracking: ${picked.join(", ")}`);
     } else {
       console.log("[note]    could not write ~/.subtrk/config.json – selection applies to this run only");
+    }
+  }
+
+  // 0.5 Agent-instruction tier (D19): ask once, default No, persist as
+  //     agents.track. The --agent runs and any later init read this preference.
+  let agentsTrackKnown = false;
+  try {
+    agentsTrackKnown = loadConfig(subtrkDir).agents?.track !== undefined;
+  } catch {
+    agentsTrackKnown = false; // unreadable config – ask and try to persist
+  }
+  if (!agentsTrackKnown && opts.trackTier === undefined) {
+    console.log("");
+    const wantTrack = await askYesNo(
+      "Teach agents task tracking (`subtrk track`)? Adds tracking instructions + lifecycle reminders for agents",
+    );
+    try {
+      saveConfig(subtrkDir, { agents: { track: wantTrack } });
+      console.log(
+        `[ok]      preference saved (agents.track=${wantTrack}) – apply per harness with \`subtrk init --agent <id>${wantTrack ? " --track" : ""}\``,
+      );
+    } catch {
+      console.log("[note]    could not write ~/.subtrk/config.json – the preference applies to this run only");
+    }
+  } else if (opts.trackTier !== undefined) {
+    // An explicit flag in a full interactive run also updates the preference.
+    try {
+      saveConfig(subtrkDir, { agents: { track: opts.trackTier } });
+    } catch {
+      /* preference stays whatever the file had – the flag governs this run */
     }
   }
 

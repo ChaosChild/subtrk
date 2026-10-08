@@ -23,7 +23,7 @@ day/hour charts, per-model cost tables, window-% history, and an
 all-providers usage page with per-provider stacked spend + token charts).
 Design and sourcing decisions in `docs/decisions.md` (D12–D17).
 
-## M4 – Task-level usage accounting (M4a/M4b shipped in v0.1.18; M4c pending)
+## M4 – Task-level usage accounting (M4a/M4b shipped in v0.1.18; M4d agent tiers + hooks in v0.1.19; M4c pending)
 
 Track what a task actually costs, from the harnesses' own local stores, so
 agents can answer "is my remaining window enough?" from history.
@@ -40,6 +40,13 @@ agents can answer "is my remaining window enough?" from history.
   dashboard Tasks strip + `/track` view + `GET /api/track` (records enriched
   at read time, `?live=1` so-far harvest for open markers), the logo→home
   link, and the agents.ts blurb (housekeeping first).
+- **M4d (v0.1.19)**: two-tier agent instructions – status-only default,
+  opt-in `--track` with the rewritten first-actions trigger and the
+  350-bytes-vs-unrecoverable asymmetry – plus `subtrk track hook`: lifecycle
+  nudges installed by init for claude, zcode and codex (session-start +
+  turn-end, state-change throttled, read-only, never blocking; `--no-track`
+  removes them again, tagged handlers only). Decisions in
+  `docs/decisions.md` (D19).
 - **M4c**: qwen usage-log + opencode session-table harvesters, `--session`
   pinning polish, store compaction (records >365d collapse into aggregates).
 
