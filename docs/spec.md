@@ -295,7 +295,7 @@ normalized to `in` = uncached input:
 | Store | Query | Attribution |
 |---|---|---|
 | zcode `~/.zcode/cli/db/db.sqlite` | `model_usage` rows with `started_at ∈ [t0, t1]` joined to `session` by normalized directory; `session_title` rows excluded (harness bookkeeping), `compact` rows included (task-driven burn); inclusive `input_tokens` gets `cr`+`cw` subtracted | `session-window` |
-| claude `~/.claude/projects/<encoded-cwd>/*.jsonl` | per-assistant-message usage inside the window, ccusage dedupe (first occurrence wins); the store reports the exclusive split already | `window` |
+| claude `~/.claude/projects/<encoded-launch-dir>/` (main transcripts + `<sid>/subagents/*.jsonl`) | per-assistant-message usage inside the window, ccusage dedupe first-wins shared across all files; subagent lines attribute to the parent session; 1h-ephemeral cache writes split into `cw1h` (subset of `cw`); the launch dir is found at harvest time by walking the marker's project up to its git root (truncated long-path names confirmed by a transcript `cwd`, never a guessed hash); `--session` pins to that session + its subagents | `session-scan` |
 | codex `~/.codex/sessions/**/rollout-*.jsonl` | cumulative `token_count` deltas inside the window, only for rollouts whose `session_meta.cwd` matches the project | `window` |
 
 Nothing readable (antigravity has no local store; node:sqlite unavailable)

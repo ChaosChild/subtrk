@@ -1,6 +1,6 @@
 {
   "name": "subtrk",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "description": "One command for all your AI subscription quotas – agent-first usage tracking across Claude, GLM, Alibaba, Google, OpenCode Zen and OpenRouter",
   "bin": {
     "subtrk": "src/cli.ts"
