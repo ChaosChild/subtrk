@@ -1,9 +1,9 @@
 {
   "name": "subtrk",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "description": "One command for all your AI subscription quotas – agent-first usage tracking across Claude, GLM, Alibaba, Google, OpenCode Zen and OpenRouter",
   "bin": {
-    "subtrk": "src/cli.ts"
+    "subtrk": "dist/cli.js"
   },
   "type": "module",
   "engines": {
@@ -13,7 +13,9 @@
     "test": "node --test \"test/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
-    "format": "biome format --write ."
+    "format": "biome format --write .",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build"
   },
   "author": "ChaosChild",
   "license": "MIT",
@@ -41,7 +43,7 @@
     "axi"
   ],
   "files": [
-    "src"
+    "dist"
   ],
   "publishConfig": {
     "access": "public"

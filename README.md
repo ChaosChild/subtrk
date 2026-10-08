@@ -97,9 +97,11 @@ politely, and speaks both human and agent.
   output, pre-computed aggregates (`nextEvent`, `recheckAfter`), structured errors
   you branch on by kind (never by message text), exit codes with meaning, no
   interactive traps in agent paths, content before help.
-- **Zero runtime dependencies** – TypeScript executed directly by Node ≥22.18
-  (type stripping). No build step; the dev toolchain (typecheck, linter) is
-  dev-only and never ships.
+- **Zero runtime dependencies** – TypeScript in the repository, executed
+  directly by Node ≥22.18 (type stripping, no build step in development); the
+  npm package ships compiled JavaScript (Node never type-strips under
+  `node_modules`). The dev toolchain (typecheck, linter, compiler) is dev-only
+  and never ships.
 - **Polite by construction** – one shared TTL cache (`~/.subtrk/cache.json`) with
   stale-while-revalidate and a hard 300s floor on the one endpoint known to punish
   polling. Six agents checking simultaneously produce one upstream request.

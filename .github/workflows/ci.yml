@@ -25,3 +25,22 @@ jobs:
       - run: npm run typecheck
       - run: npx biome ci .
       - run: npm test
+
+  # The published artifact must run from a real node_modules install – Node
+  # never type-strips files under node_modules, so the tarball ships compiled
+  # JS (D20). Pack, install and execute exactly the way a user would; this
+  # job is the one that would have caught the 0.1.0–0.1.19 breakage.
+  tarball:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm pack --pack-destination "${{ runner.temp }}"
+      - run: npm install --prefix "${{ runner.temp }}/smoke" "${{ runner.temp }}"/subtrk-*.tgz --no-fund --no-audit
+      - run: node "${{ runner.temp }}/smoke/node_modules/subtrk/dist/cli.js" --version
+      - name: offline verb smoke (track hook)
+        run: echo '{"session_id":"ci"}' | node "${{ runner.temp }}/smoke/node_modules/subtrk/dist/cli.js" track hook --event session-start --harness claude
