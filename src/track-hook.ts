@@ -139,7 +139,8 @@ function writeState(subtrkDir: string, state: HookStateFile, key: string, value:
     const tmp = `${path}.${process.pid}.tmp`;
     try {
       mkdirSync(subtrkDir, { recursive: true });
-      writeFileSync(tmp, `${JSON.stringify({ schemaVersion: 1, sessions }, null, 2)}\n`);
+      const text = JSON.stringify({ schemaVersion: 1, sessions }, null, 2);
+      writeFileSync(tmp, `${text}\n`);
       renameSync(tmp, path);
     } catch {
       try {

@@ -112,6 +112,16 @@ function ourHandler(event: HookEvent, harness: HookHarnessId, kind: "claude" | "
   return handler;
 }
 
+// Key-order-stable JSON for value comparison: JSON.stringify alone follows
+// insertion order, so a stored copy written with a different key order would
+// silently break the idempotency check below.
+function stableJson(v: unknown): string {
+  if (v === null || typeof v !== "object") return JSON.stringify(v) ?? "null";
+  if (Array.isArray(v)) return `[${v.map(stableJson).join(",")}]`;
+  const entries = Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, val]) => `${JSON.stringify(k)}:${stableJson(val)}`).join(",")}}`;
+}
+
 // Upsert our group into eventKey's array of matcher-groups, preserving every
 // foreign group. `install=false` strips ours instead. `changed` is true only
 // when the resulting array differs in VALUE from what was there – a re-install
@@ -128,9 +138,7 @@ function upsertEventGroups(
   const groups = orig === null ? [] : orig.filter((g) => !isOurGroup(g));
   if (group !== null) groups.push(group);
   const same =
-    orig !== null &&
-    orig.length === groups.length &&
-    orig.every((g, i) => JSON.stringify(g) === JSON.stringify(groups[i]));
+    orig !== null && orig.length === groups.length && orig.every((g, i) => stableJson(g) === stableJson(groups[i]));
   if (same || (orig === null && groups.length === 0)) return { changed: false, malformed: false };
   if (groups.length > 0) container[eventKey] = groups;
   else delete container[eventKey];
