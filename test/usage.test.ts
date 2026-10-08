@@ -436,6 +436,19 @@ describe("usage pricing", () => {
     assert.ok(est && est.kind === "estimate");
     assert.equal(rowCost({ in: 1e6 }, null), null);
   });
+
+  it("prices 1h-ephemeral cache writes at 2x input, the rest at the cw rate", () => {
+    const price = { in: 3 / 1e6, out: 15 / 1e6, cr: 0.3 / 1e6, cw: 3.75 / 1e6 };
+    const cost = rowCost({ in: 1000, cw: 1000, cw1h: 600, out: 100 }, price);
+    assert.ok(cost);
+    assert.equal(cost.kind, "estimate");
+    const expected = (1000 * 3 + 600 * 6 + 400 * 3.75 + 100 * 15) / 1e6;
+    assert.ok(Math.abs(cost.usd - expected) < 1e-15, `${cost.usd} vs ${expected}`);
+    // a split larger than cw clamps: all 1000 cache writes bill at 2x input
+    const clamped = rowCost({ cw: 1000, cw1h: 5000 }, price);
+    assert.ok(clamped);
+    assert.ok(Math.abs(clamped.usd - (1000 * 6) / 1e6) < 1e-15);
+  });
 });
 
 // ---------- aggregation ----------
@@ -760,7 +773,7 @@ describe("usage harvest", () => {
     const proj = join(home, ".claude", "projects", "p1");
     mkdirSync(proj, { recursive: true });
     const transcript = join(proj, "s.jsonl");
-    const msg = (id: string, inTok: number, outTok: number) =>
+    const msg = (id: string, inTok: number, outTok: number, e1h = 0) =>
       `${JSON.stringify({
         type: "assistant",
         timestamp: "2026-09-29T12:00:00Z",
@@ -772,7 +785,10 @@ describe("usage harvest", () => {
           usage: {
             input_tokens: inTok,
             cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
+            cache_creation_input_tokens: e1h > 0 ? 500 : 0,
+            ...(e1h > 0
+              ? { cache_creation: { ephemeral_1h_input_tokens: e1h, ephemeral_5m_input_tokens: 500 - e1h } }
+              : {}),
             output_tokens: outTok,
           },
         },
@@ -800,7 +816,7 @@ describe("usage harvest", () => {
       // Append one more message; the next INCREMENTAL harvest must add the
       // delta exactly once. (The bug: rows were added before AND after the
       // stale-rebuild wipe – on non-stale rounds both adds survived.)
-      appendFileSync(transcript, msg("m3", 1000, 100));
+      appendFileSync(transcript, msg("m3", 1000, 100, 200));
       await harvestUsage([], {
         subtrkDir: dir,
         budgetMs: 4_000,
@@ -811,6 +827,8 @@ describe("usage harvest", () => {
       const second = readUsageStore(dir).localHourly.claude?.[hk]?.["claude-opus-5-5"];
       assert.equal(second.in, 1300); // pre-fix: 2300 – the delta counted twice
       assert.equal(second.out, 130);
+      assert.equal(second.cw, 500);
+      assert.equal(second.cw1h, 200); // the 1h split accumulates like every other field
     } finally {
       if (prevProfile === undefined) delete process.env.USERPROFILE;
       else process.env.USERPROFILE = prevProfile;
@@ -1097,6 +1115,34 @@ describe("alibaba/openai/local parsers", () => {
     assert.ok(parsed.dedupeKey);
     assert.equal(parsed.model, "claude-opus-5-5");
     assert.equal(parsed.row.cr, 900);
+    assert.equal(parsed.sessionId, null); // absent on this fixture line
+    // the 1h/5m cache-write split rides along: cw stays the TOTAL, cw1h the
+    // 1h-ephemeral part (clamped to cw)
+    const splitLine = JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-09-29T12:00:00Z",
+      sessionId: "sess_split",
+      requestId: "req_2",
+      message: {
+        model: "claude-opus-5-5",
+        id: "msg_2",
+        usage: {
+          input_tokens: 10,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 500,
+          cache_creation: { ephemeral_1h_input_tokens: 200, ephemeral_5m_input_tokens: 300 },
+          output_tokens: 1,
+        },
+      },
+    });
+    const split = parseClaudeTranscriptLine(splitLine, null);
+    assert.ok(split);
+    assert.equal(split.row.cw, 500);
+    assert.equal(split.row.cw1h, 200);
+    assert.equal(split.sessionId, "sess_split");
+    const clamped = parseClaudeTranscriptLine(splitLine.replace("200", "900"), null);
+    assert.ok(clamped);
+    assert.equal(clamped.row.cw1h, 500); // 900 claims > cw 500 -> clamped
     assert.equal(
       parseClaudeTranscriptLine(
         JSON.stringify({
