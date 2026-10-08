@@ -289,7 +289,11 @@ table.
 Records live in `~/.subtrk/track.json` and carry honesty flags rather than
 guesses: `nested` when one task ran inside another's window, `contested` when
 overlapping tasks provably shared sessions, and `usage: null` when no local
-store was readable — never a machine-wide blur. The agent-instruction blurb
+store was readable — never a machine-wide blur. Claude Code attribution
+records the exact session ids it summed — subagents included, attributed to
+their parent session — resolves the session's launch dir by walking up to the
+git root, and prices 1h cache writes at their real 2× rate. The
+agent-instruction blurb
 (`subtrk init --agent`) teaches the whole workflow: check `track status`
 first, stop or prune your own open markers, start before non-trivial tasks,
 stop when done, and ask `track estimate` before large work.

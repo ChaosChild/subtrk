@@ -265,18 +265,7 @@ describe("track stop", () => {
 describe("contested + nested detection", () => {
   // Overlap without containment needs an --id stop of the OLDER marker while
   // the newer is still open (stop-by-newest always yields containment).
-  async function overlappingPair(fx: Fixture, sessions: string[]): Promise<void> {
-    let n = 0;
-    fx.harvest = async () => {
-      n += 1;
-      return {
-        attribution: "session-window",
-        usage: { in: 1, cr: 1, cw: 0, out: 1, reqs: 1 },
-        bySource: {},
-        models: {},
-        sessions: [sessions[n - 1]],
-      };
-    };
+  async function overlappingFlow(fx: Fixture): Promise<void> {
     await run(fx, ["track", "start", "--task=a"]);
     const idA = readTrackStore(fx.dir).markers[0].id;
     fx.now.ms += 10;
@@ -285,6 +274,26 @@ describe("contested + nested detection", () => {
     await run(fx, ["track", "stop", `--id=${idA}`]);
     fx.now.ms += 10;
     await run(fx, ["track", "stop"]);
+  }
+
+  async function overlappingPair(
+    fx: Fixture,
+    sessions: string[],
+    attribution: HarvestResult["attribution"] = "session-window",
+    bySource: HarvestResult["bySource"] = {},
+  ): Promise<void> {
+    let n = 0;
+    fx.harvest = async () => {
+      n += 1;
+      return {
+        attribution,
+        usage: { in: 1, cr: 1, cw: 0, out: 1, reqs: 1 },
+        bySource,
+        models: {},
+        sessions: [sessions[n - 1]],
+      };
+    };
+    await overlappingFlow(fx);
   }
 
   it("marks overlapping same-project records with shared sessions contested", async () => {
@@ -309,6 +318,52 @@ describe("contested + nested detection", () => {
         records.some((r) => r.contested),
         false,
       );
+    } finally {
+      fx.restore();
+    }
+  });
+
+  it("claude session-scan records refine contested the same way: shared session yes, disjoint no", async () => {
+    const claudeSource = { claude: { in: 1, cr: 1, cw: 0, out: 1, reqs: 1 } };
+    const shared = fixture();
+    try {
+      await overlappingPair(shared, ["cs_1", "cs_1"], "session-scan", claudeSource);
+      assert.ok(readTrackStore(shared.dir).records.every((r) => r.contested));
+    } finally {
+      shared.restore();
+    }
+    const disjoint = fixture();
+    try {
+      await overlappingPair(disjoint, ["cs_1", "cs_2"], "session-scan", claudeSource);
+      assert.equal(
+        readTrackStore(disjoint.dir).records.some((r) => r.contested),
+        false,
+      );
+    } finally {
+      disjoint.restore();
+    }
+  });
+
+  it("a codex contribution voids the session refinement – mixed records stay contested", async () => {
+    const fx = fixture();
+    let n = 0;
+    fx.harvest = async () => {
+      n += 1;
+      const bySource: HarvestResult["bySource"] =
+        n === 1
+          ? { "zcode:main": { in: 1, cr: 1, cw: 0, out: 1, reqs: 1 } }
+          : { claude: { in: 1, cr: 1, cw: 0, out: 1, reqs: 1 }, codex: { in: 1, cr: 1, cw: 0, out: 1, reqs: 1 } };
+      return {
+        attribution: n === 1 ? "session-window" : "session-scan",
+        usage: { in: 1, cr: 1, cw: 0, out: 1, reqs: 1 },
+        bySource,
+        models: {},
+        sessions: [n === 1 ? "zs_1" : "cs_1"], // disjoint ids alone would clear the flag
+      };
+    };
+    try {
+      await overlappingFlow(fx);
+      assert.ok(readTrackStore(fx.dir).records.every((r) => r.contested));
     } finally {
       fx.restore();
     }
@@ -465,15 +520,34 @@ describe("parseDurationMs", () => {
 
 // ---------- harvesters ----------
 
-function claudeLine(ts: number, id: string, inTok: number, cr: number, out: number): string {
+function claudeLine(
+  ts: number,
+  id: string,
+  inTok: number,
+  cr: number,
+  out: number,
+  extra?: { cw?: number; e1h?: number; sessionId?: string; cwd?: string },
+): string {
+  const cw = extra?.cw ?? 0;
+  const e1h = extra?.e1h ?? 0;
   return JSON.stringify({
     type: "assistant",
     timestamp: new Date(ts).toISOString(),
     requestId: `req_${id}`,
+    ...(extra?.sessionId ? { sessionId: extra.sessionId } : {}),
+    ...(extra?.cwd ? { cwd: extra.cwd } : {}),
     message: {
       id: `msg_${id}`,
       model: "claude-opus-5-5",
-      usage: { input_tokens: inTok, cache_read_input_tokens: cr, cache_creation_input_tokens: 0, output_tokens: out },
+      usage: {
+        input_tokens: inTok,
+        cache_read_input_tokens: cr,
+        cache_creation_input_tokens: cw,
+        ...(e1h > 0
+          ? { cache_creation: { ephemeral_1h_input_tokens: e1h, ephemeral_5m_input_tokens: Math.max(0, cw - e1h) } }
+          : {}),
+        output_tokens: out,
+      },
     },
   });
 }
@@ -520,9 +594,119 @@ describe("harvestWindow (local stores)", () => {
       );
       const res = await harvestWindow({ project, t0: T0, t1: T1 }, { homeDir: home });
       assert.ok(res);
-      assert.equal(res.attribution, "window");
+      assert.equal(res.attribution, "session-scan");
       assert.deepEqual(res.usage, { in: 110, cr: 420, cw: 0, out: 55, reqs: 2 });
+      assert.deepEqual(res.sessions, ["sess1"]); // the file stem when lines carry no sessionId
       assert.equal(res.models["claude-opus-5-5"], 1);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // A claude project tree with a parent session (with a 1h cache-write split),
+  // one subagent under it, and an unrelated sibling session.
+  function agentedTree(): { home: string; project: string } {
+    const home = tempDir("subtrk-home-");
+    const project = "C:\\work\\agented";
+    const dir = join(home, ".claude", "projects", "C--work-agented");
+    const sub = join(dir, "sess_par", "subagents");
+    mkdirSync(sub, { recursive: true });
+    const main = claudeLine(T0 + 60_000, "m", 100, 400, 50, { cw: 200, e1h: 120, sessionId: "sess_par" });
+    writeFileSync(
+      join(dir, "sess_par.jsonl"),
+      [claudeLine(T0 - 5_000, "old", 9, 9, 9, { sessionId: "sess_par" }), main].join("\n"),
+    );
+    // the subagent file replays the parent's line (same message id – deduped)
+    writeFileSync(
+      join(sub, "agent-1.jsonl"),
+      [main, claudeLine(T0 + 120_000, "s1", 1000, 0, 60, { sessionId: "sess_par" })].join("\n"),
+    );
+    writeFileSync(join(dir, "sess_solo.jsonl"), claudeLine(T0 + 180_000, "solo", 10, 20, 5));
+    return { home, project };
+  }
+
+  it("records claude sessions, includes subagent files, dedupes across files", async () => {
+    const { home, project } = agentedTree();
+    try {
+      const res = await harvestWindow({ project, t0: T0, t1: T1 }, { homeDir: home });
+      assert.ok(res);
+      assert.equal(res.attribution, "session-scan");
+      // subagent usage attributes to the PARENT session; cw stays the total, cw1h the split
+      assert.deepEqual(res.usage, { in: 1110, cr: 420, cw: 200, cw1h: 120, out: 115, reqs: 3 });
+      assert.deepEqual([...res.sessions].sort(), ["sess_par", "sess_solo"]);
+      assert.equal(res.bySource.claude?.cw1h, 120);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("restricts the claude harvest to the pinned session plus its subagents", async () => {
+    const { home, project } = agentedTree();
+    try {
+      const res = await harvestWindow({ project, t0: T0, t1: T1, session: "sess_par" }, { homeDir: home });
+      assert.ok(res);
+      assert.deepEqual(res.usage, { in: 1100, cr: 400, cw: 200, cw1h: 120, out: 110, reqs: 2 });
+      assert.deepEqual(res.sessions, ["sess_par"]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves the launch dir by walking up from a subfolder, capped at the git root", async () => {
+    const home = tempDir("subtrk-home-");
+    const enc = (p: string) => p.replace(/[^A-Za-z0-9]/g, "-");
+    const repo = join(home, "repo");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    mkdirSync(join(repo, "sub"), { recursive: true });
+    const dirRepo = join(home, ".claude", "projects", enc(repo));
+    const dirHome = join(home, ".claude", "projects", enc(home));
+    mkdirSync(dirRepo, { recursive: true });
+    mkdirSync(dirHome, { recursive: true });
+    writeFileSync(join(dirRepo, "r.jsonl"), claudeLine(T0 + 60_000, "r", 1, 0, 1));
+    writeFileSync(join(dirHome, "h.jsonl"), claudeLine(T0 + 60_000, "h", 1000, 0, 1000));
+    try {
+      // nearest level wins: the git root's dir (cap inclusive), not home's
+      const near = await harvestWindow({ project: join(repo, "sub"), t0: T0, t1: T1 }, { homeDir: home });
+      assert.ok(near);
+      assert.equal(near.attribution, "session-scan");
+      assert.deepEqual(near.sessions, ["r"]);
+      // repo data gone, .git still caps: home's dir is out of reach -> nothing
+      rmSync(dirRepo, { recursive: true, force: true });
+      const capped = await harvestWindow({ project: join(repo, "sub"), t0: T0, t1: T1 }, { homeDir: home });
+      assert.equal(capped, null);
+      // cap removed (no .git anywhere): the walk reaches home's dir
+      rmSync(join(repo, ".git"), { recursive: true, force: true });
+      const far = await harvestWindow({ project: join(repo, "sub"), t0: T0, t1: T1 }, { homeDir: home });
+      assert.ok(far);
+      assert.deepEqual(far.sessions, ["h"]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to truncated dir names, confirmed by the transcript cwd", async () => {
+    const home = tempDir("subtrk-home-");
+    const project = `C:\\work\\${"deep-".repeat(20)}proj`;
+    const full = project.replace(/[^A-Za-z0-9]/g, "-");
+    const stem = full.slice(0, 40);
+    const cwdLine = (cwd: string) => JSON.stringify({ type: "user", timestamp: new Date(T0).toISOString(), cwd });
+    const projects = join(home, ".claude", "projects");
+    // sorted first: shares the truncated prefix but belongs to another project
+    const wrong = join(projects, `${stem}-0000000000`);
+    const right = join(projects, `${stem}-1a2b3c4d5e`);
+    mkdirSync(wrong, { recursive: true });
+    mkdirSync(right, { recursive: true });
+    writeFileSync(
+      join(wrong, "wrong.jsonl"),
+      [cwdLine(`${project}-elsewhere`), claudeLine(T0 + 60_000, "w", 999, 0, 999)].join("\n"),
+    );
+    writeFileSync(join(right, "right.jsonl"), [cwdLine(project), claudeLine(T0 + 60_000, "t", 5, 0, 5)].join("\n"));
+    try {
+      const res = await harvestWindow({ project, t0: T0, t1: T1 }, { homeDir: home });
+      assert.ok(res);
+      assert.equal(res.attribution, "session-scan");
+      assert.deepEqual(res.usage, { in: 5, cr: 0, cw: 0, out: 5, reqs: 1 });
+      assert.deepEqual(res.sessions, ["right"]);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
