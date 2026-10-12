@@ -89,7 +89,12 @@ export function fileState(path: string): string {
 
 /** One-way digest of an env value – the value itself is never stored. */
 export function envValueDigest(value: string | undefined): string {
-  return createHash("sha256")
+  // NOT password storage: this is a change-detection fingerprint so the cache
+  // stamp can notice "the credential value changed" without ever keeping the
+  // value. It is recomputed per read, never compared against user input, and
+  // conveys nothing an attacker could verify offline – a fast hash is the
+  // point. Suppressed for CodeQL, which flags getSecret-derived hashing.
+  return createHash("sha256") // codeql[js/insecure-password-hash]
     .update(JSON.stringify(["subtrk-env-v1", value ?? null]))
     .digest("hex");
 }

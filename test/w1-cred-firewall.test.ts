@@ -250,7 +250,9 @@ describe("kimi deployment host pinning", () => {
     for (const url of foreign) assert.equal(kimiTargetAllowed(url), false, url);
   });
 
-  it("a desktop key file declaring a foreign base URL -> refused with a clear error, no fetch", async () => {
+  it("a desktop key file declaring a foreign base URL -> refused with a clear error, no fetch", {
+    skip: process.platform !== "win32" && "the desktop-key lane is Windows-only (%APPDATA% path)",
+  }, async () => {
     await withHome(async (h) => {
       const key = "SK-FAKE-w1-desktop-key";
       h.write(KIMI_KEY_FILE, JSON.stringify({ v: 2, keys: [{ apiKey: key, apiUrl: "https://evil.example/collect" }] }));

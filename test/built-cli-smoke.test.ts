@@ -44,6 +44,8 @@ const SECRET_KEYS = [
   "ANTIGRAVITY_CLIENT_ID",
   "ANTIGRAVITY_CLIENT_SECRET",
   "ZCODE_CREDENTIAL_SECRET",
+  "MINIMAX_API_KEY",
+  "DEEPSEEK_API_KEY",
 ];
 const ALL_PROVIDER_BUT_GOOGLE = ["claude", "glm", "alibaba", "opencode", "openrouter", "openai", "kimi", "zcode"];
 
@@ -129,7 +131,9 @@ describe("built dist/cli.js end-to-end (offline)", () => {
     assert.equal(parsed.schemaVersion, 2);
     assert.match(parsed.checkedAt, /Z$/);
     assert.match(parsed.recheckAfter, /Z$/);
-    const expected = WIN ? ALL_PROVIDER_BUT_GOOGLE : [...ALL_PROVIDER_BUT_GOOGLE, "google"];
+    const expected = WIN
+      ? ALL_PROVIDER_BUT_GOOGLE
+      : [...ALL_PROVIDER_BUT_GOOGLE, "google", "minimax", "deepseek"];
     assert.deepEqual(parsed.providers.map((p) => p.id).sort(), [...expected].sort());
     for (const p of parsed.providers) {
       assert.equal(p.ok, false, `${p.id} must fail offline`);
@@ -247,9 +251,10 @@ describe("built dist/cli.js end-to-end (offline)", () => {
       for (const m of text.matchAll(/new URL\(\s*"([^"]+)",\s*import\.meta\.url\s*\)/g)) {
         reads.push(posix.normalize(posix.join(modDir, m[1])));
       }
-      for (const m of text.matchAll(
-        /join\(\s*dirname\(fileURLToPath\(import\.meta\.url\)\),\s*((?:"[^"]+"\s*,?\s*)+)\)/g,
-      )) {
+      // Linear on purpose: the args blob is captured without nesting, then the
+      // quoted strings are extracted in a second pass (a "\s*,?\s*"-loop inside
+      // a + quantifier backtracks exponentially — flagged by CodeQL).
+      for (const m of text.matchAll(/join\(\s*dirname\(fileURLToPath\(import\.meta\.url\)\),\s*([^)]*)\)/g)) {
         const parts = [...m[1].matchAll(/"([^"]+)"/g)].map((p) => p[1]);
         reads.push(posix.normalize(posix.join(modDir, ...parts)));
       }
