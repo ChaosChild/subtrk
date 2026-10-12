@@ -239,13 +239,22 @@ describe("built dist/cli.js end-to-end (offline)", () => {
       shell: true,
     });
     assert.equal(pack.status, 0, pack.stderr);
-    // npm's --json shape varies by version (array of pack results vs a single
-    // object) and notices can precede the JSON on stdout — take the first JSON
-    // blob and normalize.
-    const blob = pack.stdout.slice(Math.min(...["[", "{"].map((c) => pack.stdout.indexOf(c)).filter((i) => i >= 0)));
-    const parsed = JSON.parse(blob) as unknown;
-    const packResult = (Array.isArray(parsed) ? parsed[0] : parsed) as { files: { path: string }[] };
-    const shipped = new Set(packResult.files.map((f) => f.path));
+    // npm's pack --json shape varies across versions (array of results vs one
+    // object, and notices can precede the JSON); the dry-run notice block
+    // ("npm notice 1.2kB dist/cli.js") lists the same members as a fallback.
+    const startCandidates = ["[", "{"].map((c) => pack.stdout.indexOf(c)).filter((i) => i >= 0);
+    const parsed = startCandidates.length
+      ? (JSON.parse(pack.stdout.slice(Math.min(...startCandidates))) as unknown)
+      : undefined;
+    const packResult = (Array.isArray(parsed) ? parsed[0] : parsed) as { files?: { path: string }[] } | undefined;
+    let paths = packResult?.files?.map((f) => f.path);
+    if (!paths || paths.length === 0) {
+      paths = [...pack.stdout.matchAll(/^npm notice\s+[\d.]+\s*[kMG]?B?\s+(\S+)\s*$/gm)].map((m) =>
+        posix.normalize(m[1]),
+      );
+    }
+    assert.ok(paths.length > 0, `could not read the pack file list; output was: ${pack.stdout.slice(0, 500)}`);
+    const shipped = new Set(paths);
     const reads: string[] = [];
     const srcRoot = join(repoRoot, "src");
     for (const rel of readdirSync(srcRoot, { recursive: true, encoding: "utf8" })) {
