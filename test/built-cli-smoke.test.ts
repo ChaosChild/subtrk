@@ -131,9 +131,7 @@ describe("built dist/cli.js end-to-end (offline)", () => {
     assert.equal(parsed.schemaVersion, 2);
     assert.match(parsed.checkedAt, /Z$/);
     assert.match(parsed.recheckAfter, /Z$/);
-    const expected = WIN
-      ? ALL_PROVIDER_BUT_GOOGLE
-      : [...ALL_PROVIDER_BUT_GOOGLE, "google", "minimax", "deepseek"];
+    const expected = WIN ? ALL_PROVIDER_BUT_GOOGLE : [...ALL_PROVIDER_BUT_GOOGLE, "google", "minimax", "deepseek"];
     assert.deepEqual(parsed.providers.map((p) => p.id).sort(), [...expected].sort());
     for (const p of parsed.providers) {
       assert.equal(p.ok, false, `${p.id} must fail offline`);
