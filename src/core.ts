@@ -16,7 +16,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type FetchTurn, fetchLockPath, takeFetchTurn, withLockSync } from "./lib/fetch-lock.ts";
+import { type FetchTurn, fetchLockHeld, fetchLockPath, takeFetchTurn, withLockSync } from "./lib/fetch-lock.ts";
 import { envValueDigest, fileState, stampDigest, type TracedInputs, withInputTrace } from "./lib/input-trace.ts";
 // pace/runway enrichment of the status output (schemaVersion 2). pace.ts is
 // pure and imports only types from this module, so the edge is one-way at
@@ -90,6 +90,10 @@ export interface ProviderResult {
   windows?: Window[];
   credits?: Credits;
   note?: string;
+  // Additive: why a stale result carries no error (stale-while-revalidate –
+  // a peer is refreshing this provider). Stale-on-error results explain
+  // themselves through `error` instead; `stale` is never unexplained.
+  staleReason?: string;
   // Additive (schemaVersion stays 1): per-surface usage mix where a provider
   // exposes one (claude's seven_day_breakdown: Claude Code / Chats / Cowork).
   surfaces?: { key: string; name: string; percent: number }[];
@@ -707,17 +711,22 @@ export async function fetchProvider(p: ProviderModule, opts: FetchOpts = {}): Pr
   const stampGate = p.tracesInputs === true;
   const entry = readCacheEntry(cachePath, p.id);
   const entryUsable = entry !== null && (!stampGate || stampMatches(p.id, entry.stamp));
-  let held = false;
   if (entry && entryUsable && !opts.fresh) {
     const age = now - entry.fetchedAt;
     if (age < p.ttlMs) return { ...entry.data, stale: false };
-    if (age < 2 * p.ttlMs) {
-      // Stale-while-revalidate: a live peer is already refreshing.
-      if (!acquireLock(lockPath)) return { ...entry.data, stale: true };
-      held = true;
+    // Stale-while-revalidate: a live peer is already refreshing THIS provider.
+    // The signal is the per-provider fetch lock – the global cache lock is held
+    // by whichever sibling provider is probing in the same status run, which
+    // pinned a short-TTL neighbour's 1x-2x window on bare stale (vk-11).
+    if (age < 2 * p.ttlMs && fetchLockHeld(fetchLockPath(dirname(cachePath), p.id))) {
+      return {
+        ...entry.data,
+        stale: true,
+        staleReason: `refresh in progress in another subtrk process – serving data cached ${Math.round(age / 1000)}s ago`,
+      };
     }
   }
-  if (!held) held = acquireLock(lockPath);
+  const held = acquireLock(lockPath);
   let turn: FetchTurn<ProviderResult> | null = null;
   try {
     // W1.2 per-provider single-flight: while another process probes this

@@ -299,6 +299,18 @@ describe("--fields text filter", () => {
     }
   });
 
+  it("vk-11: an error-less stale result prints its reason after the marker", async () => {
+    const cap = captureConsole();
+    try {
+      const swr = okModule("kimi", { stale: true, staleReason: "refresh in progress in another subtrk process" });
+      const code = await main(["status"], { providers: [swr], dirs: { subtrk: tempSubtrkDir() } });
+      assert.equal(code, 0);
+      assert.match(cap.out.join("\n"), /^kimi .*\[stale\] refresh in progress in another subtrk process$/m);
+    } finally {
+      cap.restore();
+    }
+  });
+
   it("windows only: credits and the error segment are filtered out", async () => {
     const cap = captureConsole();
     try {

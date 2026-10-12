@@ -122,6 +122,14 @@ export function withLockSync<T>(
 }
 
 /**
+ * Whether a live peer holds the lock at `path` right now – a peek, never a
+ * take (an abandoned lock is cleared as a side effect, like a waiter would).
+ */
+export function fetchLockHeld(path: string, staleMs: number = STALE_MS): boolean {
+  return settleHolder(path, staleMs) === "held";
+}
+
+/**
  * Create the lock file exclusively with O_EXCL ("wx") – atomic on every
  * platform Node supports, so exactly one process wins. `undefined` means
  * another process holds it; `"unavailable"` means no lock can be taken here.

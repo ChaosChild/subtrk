@@ -268,7 +268,7 @@ function renderText(
       else if (show("errors")) line += ` · error: ${r.error.kind} – ${oneLine(r.error.message)}`;
     }
     if (show("hints") && r.error?.hint) line += ` – hint: ${oneLine(r.error.hint)}`;
-    if (r.stale) line += "  [stale]";
+    if (r.stale) line += r.error || !r.staleReason ? "  [stale]" : `  [stale] ${oneLine(r.staleReason)}`;
     if (isHot(r)) line += " !";
     lines.push(scrub(line.trimEnd()));
   }

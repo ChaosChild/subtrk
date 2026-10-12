@@ -133,6 +133,7 @@ interface ProviderResult {
   windows?: Window[];           // on error-fallback these are the cached values
   credits?: Credits;            // ditto
   note?: string;                // e.g. opencode's constant PAYG note
+  staleReason?: string;         // why an error-less stale was served (SWR); error-fallback explains via error
   surfaces?: { key: string; name: string; percent: number }[]; // per-surface usage mix where a provider exposes one (claude's seven_day_breakdown); additive, schemaVersion stays 1
   refreshable?: true;           // module supports interactive refresh (additive, schemaVersion stays 1)
   error?: ProviderError;        // present iff ok === false
@@ -165,8 +166,11 @@ File `~/.subtrk/cache.json` (via `os.homedir()` – never manual `~` expansion):
   "claude": { "data": <ProviderResult>, "fetchedAt": 1789500000, "ttlMs": 300000 } }
 ```
 
-- **Reads:** fresh (age < ttl) → serve. Expired < 2×ttl and the refresh lock is held by
-  another live process → serve with `stale: true` (stale-while-revalidate). Otherwise probe.
+- **Reads:** fresh (age < ttl) → serve. Expired < 2×ttl and **this provider's** fetch
+  lock (`locks/fetch-<id>.lock`) is held by another live process → serve with `stale: true`
+  and a `staleReason` (stale-while-revalidate). Otherwise probe. The global `cache.json.lock`
+  is never the SWR signal: a status run probes providers in parallel, so a sibling always
+  holds it, which pinned short-TTL neighbours' 1×–2×ttl windows on bare stale (vk-11).
 - **Lock:** existence-only file `cache.json.lock` containing `{pid, startedAt}`, created
   with exclusive create, fd closed immediately (existence is the lock), released in
   `finally`. **No stealing.** GC by any process when `process.kill(pid, 0)` says the
