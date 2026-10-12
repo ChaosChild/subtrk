@@ -189,6 +189,12 @@ const KIND_MS: Record<string, number> = {
   "30d": 30 * 86_400_000,
 };
 
+export type CalibrationConfidence =
+  | "calibrated:current-window"
+  | "calibrated:history"
+  | "estimated:history-sparse"
+  | "unknown";
+
 export interface EstimateWindow {
   provider: string;
   kind: string;
@@ -198,6 +204,11 @@ export interface EstimateWindow {
   capacityTok: number | null;
   remainingTok: number | null;
   calibrated: boolean;
+  // vk-11 calibration ladder: which rung produced capacityTok (additive;
+  // estimate --json schemaVersion stays 1). historyN = prior generations used
+  // (0 on the current-window rungs).
+  confidence?: CalibrationConfidence;
+  historyN?: number;
 }
 
 export interface EstimateOut {
@@ -257,10 +268,72 @@ function pickBucket(
   };
 }
 
-// Window + calibration: percent-remaining becomes tokens via the operator's
-// own observed usage in the window's period (capacity ≈ consumed / used).
-// stale = the probe said so, or the window already reset (its percent now
-// describes a period that is over).
+// Capacity from the provider's own prior windows: group the window samples
+// (each probe's used%/resetsAt observation) by resetsAt rounded to the minute
+// — vendors jitter resetsAt by milliseconds, and unrounded one window
+// splinters into hundreds (real claude store: 702 raw 5h values in 35 days →
+// 23 windows). A generation qualifies when its final used% is >= 10% (below
+// that, used÷used is the noise the 2% gate exists for) and the usage store has
+// tokens for its period; its capacity estimate is periodTokens ÷ finalUsed.
+// >= 3 qualifying generations → median (one outlier cannot swing it); 1–2 →
+// pooled Σtokens / Σused.
+function historyCapacity(
+  provider: string,
+  ustore: UsageStore,
+  windowKey: string,
+  durationMs: number,
+  currentResetMs: number,
+  nowMs: number,
+): { capacityTok: number; n: number; pooled: boolean } | null {
+  const minute = 60_000;
+  const currentGen = Math.floor(currentResetMs / minute);
+  const finals = new Map<number, { final: number; resetMs: number }>();
+  for (const s of ustore.samples[provider] ?? []) {
+    if (s.k !== windowKey || s.stale === true || typeof s.u !== "number") continue;
+    const resetMs = Date.parse(s.r);
+    if (!Number.isFinite(resetMs) || resetMs > nowMs) continue;
+    const gen = Math.floor(resetMs / minute);
+    if (gen === currentGen) continue; // the current window is never its own history
+    const g = finals.get(gen);
+    if (g) g.final = Math.max(g.final, s.u);
+    else finals.set(gen, { final: s.u, resetMs });
+  }
+  const caps: number[] = [];
+  let sumTok = 0;
+  let sumUsed = 0;
+  let n = 0;
+  for (const g of finals.values()) {
+    if (g.final < 10) continue;
+    const agg = aggregateUsage(ustore, {
+      provider,
+      granularity: "hour",
+      fromMs: g.resetMs - durationMs,
+      toMs: g.resetMs - 1, // [reset − duration, reset) – the row AT reset belongs to the next window
+      local: "include",
+    });
+    const u = agg.providers[provider];
+    const consumed = u ? (u.splitless ? u.tot : u.in + u.cr + u.cw + u.out) : 0;
+    if (!(consumed > 0)) continue;
+    caps.push(consumed / (g.final / 100));
+    sumTok += consumed;
+    sumUsed += g.final / 100;
+    n++;
+  }
+  if (n === 0) return null;
+  if (n >= 3) return { capacityTok: percentile(caps, 0.5) ?? 0, n, pooled: false };
+  return { capacityTok: sumTok / sumUsed, n, pooled: true };
+}
+
+// Window + calibration ladder (vk-11): percent-remaining becomes tokens via
+// the first rung that holds –
+//   1. calibrated:current-window  used >= 10% and in-window tokens > 0
+//   2. calibrated:history         >= 3 prior generations → median capacity
+//   3. calibrated:current-window  used 2–10% (today's 2% gate), no rung 2
+//   4. estimated:history-sparse   1–2 qualifying generations, pooled
+//   5. unknown                    not calibrated – the reason names what's missing
+// A barely-used current window is the NOISY estimator (real glm store: exactly
+// 2% self-calibrated to 11x the history median), which is why history outranks
+// rung 3. stale = the probe said so, or the window already reset.
 function readWindow(
   provider: string,
   subtrkDir: string,
@@ -272,9 +345,10 @@ function readWindow(
   const durationMs = KIND_MS[win.kind];
   const resetMs = Date.parse(win.resetsAt);
   const used = Math.min(100, Math.max(0, win.usedPercent)) / 100;
+  const ustore = readUsageStore(subtrkDir);
   let consumedTok: number | null = null;
   if (Number.isFinite(resetMs)) {
-    const agg = aggregateUsage(readUsageStore(subtrkDir), {
+    const agg = aggregateUsage(ustore, {
       provider,
       granularity: "hour",
       fromMs: resetMs - durationMs,
@@ -287,7 +361,35 @@ function readWindow(
       if (consumed > 0) consumedTok = consumed;
     }
   }
-  const capacityTok = consumedTok !== null && used >= 0.02 ? consumedTok / used : null;
+  const hist =
+    Number.isFinite(resetMs)
+      ? historyCapacity(
+          provider,
+          ustore,
+          win.scope ? `${win.kind}·${win.scope}` : win.kind,
+          durationMs,
+          resetMs,
+          nowMs,
+        )
+      : null;
+  let capacityTok: number | null = null;
+  let confidence: CalibrationConfidence = "unknown";
+  let historyN = 0;
+  if (consumedTok !== null && used >= 0.1) {
+    capacityTok = consumedTok / used;
+    confidence = "calibrated:current-window";
+  } else if (hist && !hist.pooled) {
+    capacityTok = hist.capacityTok;
+    confidence = "calibrated:history";
+    historyN = hist.n;
+  } else if (consumedTok !== null && used >= 0.02) {
+    capacityTok = consumedTok / used;
+    confidence = "calibrated:current-window";
+  } else if (hist) {
+    capacityTok = hist.capacityTok;
+    confidence = "estimated:history-sparse";
+    historyN = hist.n;
+  }
   const remainingTok = capacityTok !== null ? capacityTok * (1 - used) : null;
   return {
     window: {
@@ -298,7 +400,9 @@ function readWindow(
       consumedTok,
       capacityTok,
       remainingTok,
-      calibrated: remainingTok !== null,
+      calibrated: capacityTok !== null,
+      confidence,
+      historyN,
     },
     stale: cached.data.stale === true || !(resetMs > nowMs),
   };
@@ -401,6 +505,7 @@ export interface SuggestCandidate {
   p90Tok: number;
   p50Usd: number | null;
   p90Usd: number | null;
+  confidence?: CalibrationConfidence; // the window calibration rung behind this suggestion
 }
 
 export interface SuggestOut {
@@ -434,9 +539,15 @@ export function buildSuggest(
     if (!read) reason = "no cached window with a fixed-duration kind (run subtrk status)";
     else if (read.stale)
       reason = `stale window data (${read.window.kind}, reset ${read.window.resetsAt}) – run subtrk status`;
-    else if ((read.window.usedPercent ?? 0) < 2) reason = "window under 2% used – too little to calibrate capacity";
-    else if (read.window.remainingTok === null || read.window.capacityTok === null)
-      reason = "no token history in the current window – cannot calibrate capacity";
+    else if (read.window.confidence === "unknown" || read.window.capacityTok === null) {
+      // Honest skip: name what is missing. Today's 2% wording stays (existing
+      // assertions pin it) with the missing history called out beside it.
+      const parts: string[] = [];
+      if ((read.window.usedPercent ?? 0) < 2) parts.push("window under 2% used");
+      else parts.push("no token history in the current window");
+      parts.push(`no prior ${read.window.kind} window to calibrate from`);
+      reason = parts.join(" – ");
+    }
     const w = read?.window;
     if (reason || !w || w.remainingTok === null || w.capacityTok === null) {
       excluded.push({ provider, model: null, reason: reason ?? "uncalibrated window" });
@@ -480,6 +591,7 @@ export function buildSuggest(
         p90Tok,
         p50Usd: percentile(usd, 0.5),
         p90Usd: percentile(usd, 0.9),
+        confidence: w.confidence,
       });
     }
   }
@@ -547,8 +659,9 @@ function suggestText(sg: SuggestOut): string[] {
   if (sg.candidates.length === 0) lines.push("  no evaluable provider × model");
   for (const c of sg.candidates) {
     const flags = [c.lowN ? "low-n" : "", c.fellBack ? "fallback bucket" : ""].filter(Boolean).join(", ");
+    const conf = c.confidence ? ` · ${c.confidence}` : "";
     lines.push(
-      `  ${`${c.provider}/${c.model}`.padEnd(28)} ${fitLabel[c.fits]} · headroom ${Math.round(c.headroomPct)}% · reset ${c.resetsAt.slice(11, 16)}Z · ${fmtUsd(c.p50Usd)} / ${fmtUsd(c.p90Usd)}${flags ? ` · ${flags}` : ""}`,
+      `  ${`${c.provider}/${c.model}`.padEnd(28)} ${fitLabel[c.fits]} · headroom ${Math.round(c.headroomPct)}% · reset ${c.resetsAt.slice(11, 16)}Z · ${fmtUsd(c.p50Usd)} / ${fmtUsd(c.p90Usd)}${flags ? ` · ${flags}` : ""}${conf}`,
     );
   }
   for (const x of sg.excluded) lines.push(`  skipped ${x.provider}${x.model ? `/${x.model}` : ""}: ${x.reason}`);
@@ -580,10 +693,17 @@ export function estimateText(out: EstimateOut & { suggest?: SuggestOut }): strin
     const pct = typeof w.usedPercent === "number" ? Math.round(w.usedPercent) : null;
     const left = pct === null ? "?" : String(100 - pct);
     lines.push(`window    ${w.provider} ${w.kind} · ${left}% left (reset ${w.resetsAt.slice(11, 16)}Z)`);
-    if (w.calibrated && w.remainingTok !== null && w.capacityTok !== null && w.consumedTok !== null) {
-      lines.push(
-        `  ≈ ${fmtTok(w.remainingTok)} tok remaining  (calibrated: ${fmtTok(w.consumedTok)} consumed at ${pct}% → capacity ${fmtTok(w.capacityTok)})`,
-      );
+    if (w.calibrated && w.remainingTok !== null && w.capacityTok !== null) {
+      if ((w.confidence === "calibrated:history" || w.confidence === "estimated:history-sparse") && w.historyN !== undefined) {
+        const verb = w.confidence === "calibrated:history" ? "median" : "pooled";
+        lines.push(
+          `  ≈ ${fmtTok(w.remainingTok)} tok remaining  (${w.confidence} – ${verb} capacity ${fmtTok(w.capacityTok)} over ${w.historyN} prior ${w.kind} windows)`,
+        );
+      } else if (w.consumedTok !== null) {
+        lines.push(
+          `  ≈ ${fmtTok(w.remainingTok)} tok remaining  (calibrated: ${fmtTok(w.consumedTok)} consumed at ${pct}% → capacity ${fmtTok(w.capacityTok)})`,
+        );
+      }
     }
   }
   const verdictLabel: Record<EstimateOut["verdict"], string> = {
