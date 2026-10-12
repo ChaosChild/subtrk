@@ -7,7 +7,7 @@
 // nothing leaves the machine.
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,6 +32,7 @@ const build = ((): { ok: boolean; detail: string } => {
 
 // ---- sanitized child environment --------------------------------------------
 const tempHomes: string[] = [];
+const serveChildren: ChildProcessWithoutNullStreams[] = [];
 const SECRET_KEYS = [
   "ANTHROPIC_AUTH_TOKEN",
   "OPENCODE_API_KEY",
@@ -47,6 +48,7 @@ const SECRET_KEYS = [
 const ALL_PROVIDER_BUT_GOOGLE = ["claude", "glm", "alibaba", "opencode", "openrouter", "openai", "kimi", "zcode"];
 
 after(() => {
+  for (const c of serveChildren) c.kill();
   for (const h of tempHomes) rmSync(h, { recursive: true, force: true });
 });
 
@@ -179,5 +181,44 @@ describe("built dist/cli.js end-to-end (offline)", () => {
     assert.equal(parsed.schemaVersion, 1);
     assert.ok(["day", "hour"].includes(parsed.granularity));
     assert.deepEqual(parsed.providers, {});
+  });
+
+  // Regression: the published 0.1.20 tarball shipped without dist/console.html
+  // (tsc doesn't copy it), so `serve` answered every request with
+  // "console shell missing". The build now copies the shell; this test boots
+  // the real binary so the shell can never silently vanish from the package.
+  it("serve serves the console shell at / and guards the API (dist/console.html must ship)", { skip: skipBuild }, async () => {
+    assert.ok(existsSync(join(repoRoot, "dist", "console.html")), "build must copy the console shell into dist/");
+    const child = spawn(process.execPath, [cliPath, "serve"], {
+      env: childEnv(),
+      windowsHide: true,
+    });
+    serveChildren.push(child);
+    const base = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`serve printed no URL; stdout=${child.stdout ?? ""}`)), 15_000);
+      child.stdout?.on("data", (chunk: string | Buffer) => {
+        const m = /http:\/\/127\.0\.0\.1:\d+\/#[0-9a-f]+/.exec(String(chunk));
+        if (m) {
+          clearTimeout(timer);
+          resolve(m[0].split("#")[0]);
+        }
+      });
+      child.on("exit", (code) => {
+        clearTimeout(timer);
+        reject(new Error(`serve exited early (code ${code})`));
+      });
+    });
+    try {
+      const shell = await fetch(base);
+      assert.equal(shell.status, 200);
+      assert.match(shell.headers.get("content-type") ?? "", /text\/html/);
+      const body = await shell.text();
+      assert.match(body, /<html/i);
+      assert.match(body, /subtrk/i);
+      const api = await fetch(`${base}api/status`);
+      assert.equal(api.status, 401, "API without the bearer token must not leak status data");
+    } finally {
+      child.kill();
+    }
   });
 });
