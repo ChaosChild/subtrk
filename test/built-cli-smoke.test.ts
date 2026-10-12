@@ -239,7 +239,13 @@ describe("built dist/cli.js end-to-end (offline)", () => {
       shell: true,
     });
     assert.equal(pack.status, 0, pack.stderr);
-    const shipped = new Set((JSON.parse(pack.stdout) as { files: { path: string }[] }[])[0].files.map((f) => f.path));
+    // npm's --json shape varies by version (array of pack results vs a single
+    // object) and notices can precede the JSON on stdout — take the first JSON
+    // blob and normalize.
+    const blob = pack.stdout.slice(Math.min(...["[", "{"].map((c) => pack.stdout.indexOf(c)).filter((i) => i >= 0)));
+    const parsed = JSON.parse(blob) as unknown;
+    const packResult = (Array.isArray(parsed) ? parsed[0] : parsed) as { files: { path: string }[] };
+    const shipped = new Set(packResult.files.map((f) => f.path));
     const reads: string[] = [];
     const srcRoot = join(repoRoot, "src");
     for (const rel of readdirSync(srcRoot, { recursive: true, encoding: "utf8" })) {
