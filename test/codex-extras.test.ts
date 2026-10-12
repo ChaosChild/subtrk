@@ -2,7 +2,7 @@
 // Fixtures only; the fallback runs a canned JSON-RPC node script – no network.
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -66,7 +66,10 @@ test("spend_control -> credits; rate_limit null accepted only with credits", () 
 });
 
 test("resolveCodexCommand: argv array, override fail-closed", () => {
-  assert.deepEqual(resolveCodexCommand({}), { file: "codex", args: [...CODEX_ARGS] });
+  // The default lane resolves the binary from the PATH entries only; an empty
+  // PATH means unavailable (it used to return a bare "codex", which lets the
+  // CWD intercept the spawn on Windows).
+  assert.equal(resolveCodexCommand({}), null);
   assert.deepEqual(CODEX_ARGS, ["-s", "read-only", "-a", "never", "app-server"]);
   assert.deepEqual(resolveCodexCommand({ SUBTRK_CODEX_BINARY: FAKE }, "/node"), {
     file: "/node",
@@ -139,4 +142,142 @@ test("probe: HTTP 500 with stored login -> rpc fallback result; 429 -> no fallba
       else process.env[k] = v;
     }
   }
+});
+
+// ---- fixes (final-verification review): fallback gating, budget, PATH-only binary
+
+// A stored login is needed for the probe to get as far as the usage read.
+function withCodexHome(): { home: string; restore: () => void } {
+  const home = mkdtempSync(join(tmpdir(), "subtrk-codex-home-"));
+  mkdirSync(join(home, ".codex"));
+  writeFileSync(
+    join(home, ".codex", "auth.json"),
+    JSON.stringify({ auth_mode: "chatgpt", tokens: { access_token: "fake-token", account_id: "acct_fixture" } }),
+  );
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, BIN: process.env.SUBTRK_CODEX_BINARY };
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  process.env.SUBTRK_CODEX_BINARY = FAKE;
+  return {
+    home,
+    restore: () => {
+      if (saved.HOME === undefined) delete process.env.HOME;
+      else process.env.HOME = saved.HOME;
+      if (saved.USERPROFILE === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = saved.USERPROFILE;
+      if (saved.BIN === undefined) delete process.env.SUBTRK_CODEX_BINARY;
+      else process.env.SUBTRK_CODEX_BINARY = saved.BIN;
+      rmSync(home, { recursive: true, force: true });
+    },
+  };
+}
+
+test("probe: offline-style network failure (no HTTP status) spawns NO fallback", async (t) => {
+  const ctx = withCodexHome();
+  t.after(ctx.restore);
+  const argvOut = join(mkdtempSync(join(tmpdir(), "subtrk-codex-off-")), "argv.json");
+  // The fixture records its argv on startup – the file's absence proves no spawn.
+  process.env.FAKE_CODEX_ARGV_OUT = argvOut;
+  t.after(() => delete process.env.FAKE_CODEX_ARGV_OUT);
+  const realFetch = globalThis.fetch;
+  // DNS-style failure: fetchText maps it to http-error WITHOUT a status –
+  // definitive-HTTP-only gating means the app-server must not even spawn.
+  globalThis.fetch = async () => {
+    throw new Error("getaddrinfo EAI_AGAIN chatgpt.com");
+  };
+  t.after(() => {
+    globalThis.fetch = realFetch;
+  });
+  const { default: openai } = await import("../src/providers/openai.ts");
+  const r = await openai.probe();
+  assert.equal(r.ok, false);
+  assert.equal(r.error?.kind, "http-error");
+  assert.equal(r.error?.status, undefined, "a network-level failure carries no HTTP status");
+  assert.ok(!existsSync(argvOut), "the codex app-server must not spawn when merely offline");
+});
+
+test("probe: an unusable body (parse-failure) is still definitive and fires the fallback", async (t) => {
+  const ctx = withCodexHome();
+  t.after(ctx.restore);
+  const argvOut = join(mkdtempSync(join(tmpdir(), "subtrk-codex-def-")), "argv.json");
+  process.env.FAKE_CODEX_ARGV_OUT = argvOut;
+  t.after(() => delete process.env.FAKE_CODEX_ARGV_OUT);
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("not json at all", { status: 200 });
+  t.after(() => {
+    globalThis.fetch = realFetch;
+  });
+  const { default: openai } = await import("../src/providers/openai.ts");
+  const parsed = await openai.probe();
+  assert.equal(parsed.ok, true, "the fallback rescues an unusable body");
+  assert.equal(parsed.plan, "ChatGPT plus");
+  assert.ok(existsSync(argvOut), "the fallback spawned for the definitive parse failure");
+});
+
+test("resolveCodexCommand: default binary resolves from PATH directories only, never the CWD", () => {
+  const base = mkdtempSync(join(tmpdir(), "subtrk-codex-path-"));
+  const savedCwd = process.cwd();
+  process.chdir(base); // the planted-CWD case AND a colon-free relative dir for the posix split
+  try {
+    const empty = join(base, "path-without-codex");
+    const planted = join(base, "planted-cwd");
+    mkdirSync(empty);
+    mkdirSync(planted);
+    // What a hostile CWD would hold: a planted codex.exe next to a .cmd shim.
+    writeFileSync(join(planted, "codex.exe"), "not an executable");
+    writeFileSync(join(planted, "codex.cmd"), "@echo planted");
+    // A bare "codex" would let libuv find the planted binary (it searches the
+    // CWD before PATH on Windows); resolution must scan PATH only.
+    assert.equal(resolveCodexCommand({ PATH: empty, Path: empty }, "/node", "win32"), null);
+    assert.equal(resolveCodexCommand({ PATH: empty, Path: empty }, "/node", "linux"), null);
+    // A PATH directory holding codex.exe IS found, as an absolute file.
+    assert.deepEqual(resolveCodexCommand({ PATH: planted, Path: planted }, "/node", "win32"), {
+      file: join(planted, "codex.exe"),
+      args: [...CODEX_ARGS],
+    });
+    // Only a .cmd shim on PATH: skipped outright (no-shell rule) -> unavailable.
+    const shimOnly = join(base, "shim-only");
+    mkdirSync(shimOnly);
+    writeFileSync(join(shimOnly, "codex.cmd"), "@echo shim");
+    assert.equal(resolveCodexCommand({ PATH: shimOnly, Path: shimOnly }, "/node", "win32"), null);
+    // POSIX discipline: the extensionless `codex` file is the candidate.
+    const relDir = "codex-posix";
+    mkdirSync(relDir);
+    writeFileSync(join(relDir, "codex"), "#!/bin/sh\necho hi\n");
+    assert.deepEqual(resolveCodexCommand({ PATH: relDir }, "/node", "linux"), {
+      file: join(relDir, "codex"),
+      args: [...CODEX_ARGS],
+    });
+  } finally {
+    process.chdir(savedCwd);
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("readCodexRpcUsage: the default lane with no codex on PATH degrades to null", async () => {
+  const base = mkdtempSync(join(tmpdir(), "subtrk-codex-nopath-"));
+  try {
+    const empty = join(base, "empty");
+    mkdirSync(empty);
+    assert.equal(await readCodexRpcUsage({ PATH: empty, Path: empty }), null);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("readCodexRpcUsage: the deadline cuts off a hanging app-server instead of stacking 8s calls", async () => {
+  const env = { ...process.env, SUBTRK_CODEX_BINARY: FAKE, FAKE_CODEX_MODE: "hang" };
+  const start = Date.now();
+  const r = await readCodexRpcUsage(env, { deadlineMs: start + 1_500 });
+  const elapsed = Date.now() - start;
+  assert.equal(r, null, "a hang past the deadline degrades to null");
+  assert.ok(elapsed < 5_000, `the deadline, not the per-call 8s default, cut the hang (took ${elapsed}ms)`);
+  // An already-expired deadline: immediate null, nothing spawned at all.
+  const argvOut = join(mkdtempSync(join(tmpdir(), "subtrk-codex-dl-")), "argv.json");
+  const t0 = Date.now();
+  const expired = await readCodexRpcUsage({ ...env, FAKE_CODEX_ARGV_OUT: argvOut }, { deadlineMs: t0 - 1 });
+  assert.equal(expired, null);
+  assert.ok(Date.now() - t0 < 1_000, "an expired deadline returns without waiting");
+  assert.ok(!existsSync(argvOut), "an expired deadline spawns nothing");
+  rmSync(join(argvOut, ".."), { recursive: true, force: true });
 });

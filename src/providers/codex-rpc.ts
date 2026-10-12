@@ -6,22 +6,54 @@
 
 import { spawn } from "node:child_process";
 import { statSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 const RPC_TIMEOUT_MS = 8_000;
 const MAX_STDOUT_CHARS = 1_000_000;
 export const CODEX_ARGS: readonly string[] = ["-s", "read-only", "-a", "never", "app-server"];
 
-// Pure-ish (stat only): the argv to spawn, or null when SUBTRK_CODEX_BINARY is
-// set but unusable – fail closed, never a shell. A .js/.mjs/.cjs override runs
-// under this node (npm's codex.js entry, test fixtures). Default: `codex` on
-// PATH, which on Windows finds codex.exe but not the npm .cmd shim.
+// Windows candidates for the bare name, in PATHEXT discipline with the shims
+// excluded: a real PE image (.exe) first, then an extensionless file. .cmd/
+// .bat/.ps1 shims need a shell and are skipped outright (the no-shell rule).
+const WIN_DEFAULT_CANDIDATES: readonly string[] = ["codex.exe", "codex"];
+
+// The DEFAULT binary resolves against the PATH DIRECTORIES ONLY, never the
+// current directory: on Windows libuv's spawn search checks the CWD before
+// PATH, so a bare "codex" would let a planted codex.exe in an untrusted CWD
+// execute when the fallback triggers. Not on PATH -> the fallback is
+// unavailable, the same clean degrade as a missing binary.
+function resolveCodexFromPath(
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): { file: string; args: string[] } | null {
+  const dirs = (env.PATH ?? env.Path ?? "").split(platform === "win32" ? ";" : ":").filter((d) => d.trim() !== "");
+  const names = platform === "win32" ? WIN_DEFAULT_CANDIDATES : (["codex"] as const);
+  for (const dir of dirs) {
+    for (const name of names) {
+      const candidate = join(dir, name);
+      try {
+        if (statSync(candidate).isFile()) return { file: candidate, args: [...CODEX_ARGS] };
+      } catch {
+        /* not here – keep scanning */
+      }
+    }
+  }
+  return null;
+}
+
+// Pure-ish (stat only): the argv to spawn, or null when the binary is
+// unavailable – fail closed, never a shell. A .js/.mjs/.cjs SUBTRK_CODEX_BINARY
+// override runs under this node (npm's codex.js entry, test fixtures); any
+// other override must be an absolute existing file. Default: `codex` resolved
+// from the PATH entries only (never the CWD – see resolveCodexFromPath), which
+// on Windows finds codex.exe but not the npm .cmd shim.
 export function resolveCodexCommand(
   env: NodeJS.ProcessEnv = process.env,
   execPath: string = process.execPath,
+  platform: NodeJS.Platform = process.platform,
 ): { file: string; args: string[] } | null {
   const override = env.SUBTRK_CODEX_BINARY;
-  if (override === undefined) return { file: "codex", args: [...CODEX_ARGS] };
+  if (override === undefined) return resolveCodexFromPath(env, platform);
   const path = override.trim();
   if (path === "" || !isAbsolute(path)) return null;
   try {
@@ -81,9 +113,20 @@ export function rpcToUsageBody(account: unknown, limits: unknown): Record<string
 // Spawn codex app-server, run initialize -> account/read + account/rateLimits/read,
 // return the usage-shaped body; null on any failure (missing binary, bad
 // override, timeout, RPC error, signed-out account). Never throws.
-export function readCodexRpcUsage(env: NodeJS.ProcessEnv = process.env): Promise<Record<string, unknown> | null> {
+// opts.deadlineMs caps the WHOLE lane: each RPC call's timeout shrinks to
+// whatever budget remains, so a caller can fit the fallback inside its own
+// probe budget instead of the per-call 8s default stacking past it.
+export interface CodexRpcOptions {
+  deadlineMs?: number;
+}
+
+export function readCodexRpcUsage(
+  env: NodeJS.ProcessEnv = process.env,
+  opts: CodexRpcOptions = {},
+): Promise<Record<string, unknown> | null> {
   const cmd = resolveCodexCommand(env);
   if (!cmd) return Promise.resolve(null);
+  if (opts.deadlineMs !== undefined && opts.deadlineMs - Date.now() <= 0) return Promise.resolve(null);
   return new Promise((resolve) => {
     let settled = false;
     const timers = new Set<NodeJS.Timeout>();
@@ -136,7 +179,12 @@ export function readCodexRpcUsage(env: NodeJS.ProcessEnv = process.env): Promise
     const call = (method: string, params: unknown = {}): Promise<unknown> =>
       new Promise((res) => {
         const id = nextId++;
-        const t = setTimeout(() => finish(null), RPC_TIMEOUT_MS);
+        const budget = opts.deadlineMs !== undefined ? opts.deadlineMs - Date.now() : RPC_TIMEOUT_MS;
+        if (!(budget > 0)) {
+          finish(null);
+          return;
+        }
+        const t = setTimeout(() => finish(null), budget);
         timers.add(t);
         waiters.set(id, (v) => {
           clearTimeout(t);

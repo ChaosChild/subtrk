@@ -188,13 +188,19 @@ function isHot(r: ProviderResult): boolean {
 
 // Compact per-window pace marker (schemaVersion 2): rides right after the
 // window's label on the text line. Unknown pace prints nothing – silence beats
-// noise when no cycle could be derived.
-function paceMarker(pace: WindowPace | undefined, nowMs: number): string {
+// noise when no cycle could be derived. A projection is only meaningful while
+// it lands inside the window's own cycle (before its reset): quota-axi
+// polarity makes the slow-burn `behind` window's projection cross its own
+// reset (meaningless – it prints bare), while the fast-burn `ahead` window is
+// the one that actually empties and carries the marker.
+function paceMarker(pace: WindowPace | undefined, nowMs: number, resetsAt: string): string {
   if (!pace || pace.status === "unknown") return "";
   if (pace.status === "on_pace") return " · on pace";
-  if (pace.status === "ahead") return " · ahead";
+  const bare = ` · ${pace.status}`;
   const at = pace.projectedExhaustedAt !== undefined ? Date.parse(pace.projectedExhaustedAt) : Number.NaN;
-  return Number.isFinite(at) && at > nowMs ? ` · behind – projected empty in ${relative(at - nowMs)}` : " · behind";
+  const reset = Date.parse(resetsAt);
+  if (!(Number.isFinite(at) && at > nowMs) || !Number.isFinite(reset) || at >= reset) return bare;
+  return ` · ${pace.status} – projected empty in ${relative(at - nowMs)}`;
 }
 
 // One runway segment per provider with a derivable verdict; unknown prints
@@ -248,7 +254,7 @@ function renderText(
     if (show("windows") && r.windows?.length) {
       const scopes = new Set(r.windows.map((w) => w.scope).filter(Boolean));
       const scoped = scopes.size > 1;
-      segs.push(r.windows.map((w) => windowLabel(w, scoped) + paceMarker(w.pace, nowMs)).join(" · "));
+      segs.push(r.windows.map((w) => windowLabel(w, scoped) + paceMarker(w.pace, nowMs, w.resetsAt)).join(" · "));
       const runway = runwayLabel(r, nowMs);
       if (runway) segs.push(runway);
     }

@@ -270,6 +270,14 @@ function fail(error: ProviderError, fetchedAt: string): ProviderResult {
   return { id: "claude", ok: false, stale: false, fetchedAt, error };
 }
 
+// A failed write-back colors EVERY result that follows it: the live store
+// keeps the SPENT refresh token regardless of how the usage read then ends,
+// so each subsequent result carries the note (fail results keep their error
+// kind and gain the note; ok results keep their windows).
+function withNote(result: ProviderResult, note: string | undefined): ProviderResult {
+  return note === undefined ? result : { ...result, note };
+}
+
 interface Refreshed {
   accessToken: string;
   refreshToken: string;
@@ -314,11 +322,12 @@ const WRITE_BACK_FAILED_NOTE =
 
 // Atomic merge into the SAME credentials file: temp+rename, ~2 attempts.
 // Returns undefined on success, else WRITE_BACK_FAILED_NOTE for the caller to
-// carry on an otherwise-ok ProviderResult (the reading itself was valid – this
-// is a warning surface, not an error). The merge is blind last-writer: it is
-// based on the file as read before the exchange and does not detect a store
-// Claude Code refreshed in the meantime (see the doctrine header – guarding
-// that is lock machinery, out of scope).
+// carry on EVERY ProviderResult that follows (ok results surface it as a
+// warning, fail results keep their error and gain the note – the operator
+// must learn the store holds a spent token either way). The merge is blind
+// last-writer: it is based on the file as read before the exchange and does
+// not detect a store Claude Code refreshed in the meantime (see the doctrine
+// header – guarding that is lock machinery, out of scope).
 function writeBackCredentials(credPath: string, fileObj: object, fresh: Refreshed): string | undefined {
   try {
     const merged = { ...(fileObj as Record<string, unknown>) };
@@ -468,16 +477,17 @@ async function probeInner(): Promise<ProviderResult> {
   const out = await usageRequest(accessToken);
   if (!out.ok) {
     if (out.status === 401) {
-      return fail(
-        { kind: "expired-token", message: "Claude rejected the access token (401)", hint: "run claude /login" },
-        fetchedAt,
+      return withNote(
+        fail(
+          { kind: "expired-token", message: "Claude rejected the access token (401)", hint: "run claude /login" },
+          fetchedAt,
+        ),
+        note,
       );
     }
-    return fail(out.error, fetchedAt);
+    return withNote(fail(out.error, fetchedAt), note);
   }
-  const result = usageResult(out.text, fetchedAt);
-  if (!result.ok) return result;
-  return note === undefined ? result : { ...result, note };
+  return withNote(usageResult(out.text, fetchedAt), note);
 }
 
 // probe = credential load + (expired -> self-refresh + write-back) + usage read.
@@ -500,13 +510,14 @@ const provider: ProviderModule = {
   tracesInputs: true, // probe traces the credential file AND the CLAUDE_* env values – cache entries carry an identity stamp
   refresh: async () => {
     const r = await probe();
+    const warning = r.note !== undefined ? ` – ${r.note}` : "";
     return {
       ok: r.ok,
       message: r.ok
         ? r.note !== undefined
           ? `claude token refreshed – ${r.note}`
           : "claude token refreshed"
-        : (r.error?.message ?? "claude refresh failed"),
+        : `${r.error?.message ?? "claude refresh failed"}${warning}`,
     };
   },
 };

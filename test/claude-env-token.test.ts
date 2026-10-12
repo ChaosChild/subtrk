@@ -335,6 +335,34 @@ describe("claude rotation write-back", () => {
     });
   });
 
+  // After a failed write-back the store holds a SPENT refresh token: every
+  // result that follows must say so, whatever the usage read then does. The
+  // error kind itself stays exactly as without the failed write-back.
+  for (const shape of [
+    { name: "401", routes: { [USAGE]: { status: 401, body: { error: "expired" } } }, kind: "expired-token" },
+    { name: "http error", routes: { [USAGE]: { status: 500, body: { error: "boom" } } }, kind: "http-error" },
+    {
+      name: "parse failure",
+      routes: { [USAGE]: { status: 200, body: { unexpected: true } } },
+      kind: "parse-failure",
+    },
+  ] as const) {
+    it(`failed write-back then a failed usage read (${shape.name}): error keeps its kind and carries the note`, async (t) => {
+      await withHome(async (h) => {
+        h.writeCreds("expired-file-token", PAST, { refreshToken: "file-refresh-token" });
+        const { calls } = stubFetch(t, { [REFRESH]: ROTATE_ROUTES[REFRESH], ...shape.routes });
+        const tmpDir = breakWriteBack(h);
+        t.after(() => rmSync(tmpDir, { recursive: true, force: true }));
+        const r = await claudeMod.probe();
+        assert.equal(r.ok, false);
+        assert.equal(r.error?.kind, shape.kind, "the error kind is unchanged by the failed write-back");
+        assert.match(r.note ?? "", /credential store could not be updated/, "the spent-token warning rides along");
+        assert.equal(usageCalls(calls)[0]?.authHeader, `Bearer ${REFRESHED_ACCESS}`, "the read used the fresh token");
+        assert.ok(r.windows === undefined, "a failed read never fabricates windows");
+      });
+    });
+  }
+
   it("the interactive refresh message carries the write-back warning too", async (t) => {
     await withHome(async (h) => {
       h.writeCreds("expired-file-token", PAST, { refreshToken: "file-refresh-token" });
@@ -346,6 +374,21 @@ describe("claude rotation write-back", () => {
       const rr = await refresh();
       assert.equal(rr.ok, true);
       assert.match(rr.message, /credential store could not be updated/);
+    });
+  });
+
+  it("refresh after a failed write-back AND a failed usage read still mentions the warning", async (t) => {
+    await withHome(async (h) => {
+      h.writeCreds("expired-file-token", PAST, { refreshToken: "file-refresh-token" });
+      stubFetch(t, { [REFRESH]: ROTATE_ROUTES[REFRESH], [USAGE]: { status: 401, body: { error: "expired" } } });
+      const tmpDir = breakWriteBack(h);
+      t.after(() => rmSync(tmpDir, { recursive: true, force: true }));
+      const refresh = claudeMod.refresh;
+      assert.ok(refresh);
+      const rr = await refresh();
+      assert.equal(rr.ok, false, "the usage read failed – the refresh reports failure");
+      assert.match(rr.message, /Claude rejected the access token/, "the failure reason stays in the message");
+      assert.match(rr.message, /credential store could not be updated/, "and so does the spent-token warning");
     });
   });
 });

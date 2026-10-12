@@ -271,11 +271,32 @@ describe("status --json pace/runway (schemaVersion 2, add-only)", () => {
 describe("status text pace markers", () => {
   it("known pace adds compact markers plus a runway segment", async () => {
     const text = await statusText([twoWindowModule()]);
+    // quota-axi polarity: the slow-burn `behind` 5h window projects empty ~16h
+    // out – after its own reset 2.5h away – so it prints a bare marker; the
+    // fast-burn `ahead` 7d window empties in ~14.8h, before its 2d reset, so
+    // IT carries the projection.
     assert.match(
       text,
-      /5h 13% \(reset \d\d:\d\d\) · behind – projected empty in \d+h \d+m · 7d 89% \(reset \d\d:\d\d\) · ahead/,
+      /5h 13% \(reset \d\d:\d\d\) · behind · 7d 89% \(reset \d\d:\d\d\) · ahead – projected empty in \d+h \d+m/,
     );
+    assert.ok(!text.includes("behind – projected empty"), "a behind projection past the reset prints bare");
     assert.match(text, /runway: projected empty in \d+h \d+m \(7d window\)/);
+  });
+
+  it("an ahead window whose projection lands before its reset shows the projection", async () => {
+    // 6 of 7 days gone, 95% used: 5% left over 14% of the clock (ahead), and
+    // the ~7h projection lands well inside the 1d that remains.
+    const windows: Window[] = [{ kind: "7d", usedPercent: 95, resetsAt: iso(86_400_000) }];
+    const text = await statusText([probeModule("claude", { ok: true, stale: false, windows })]);
+    assert.match(text, /7d 95% \(reset \d\d:\d\d\) · ahead – projected empty in \d+h \d+m/);
+  });
+
+  it("a behind window's projection past its own reset prints a bare marker", async () => {
+    // 13% used half through the 5h cycle: ~16h projection vs a reset 2.5h out.
+    const windows: Window[] = [{ kind: "5h", usedPercent: 13, resetsAt: iso(2.5 * 3600_000) }];
+    const text = await statusText([probeModule("claude", { ok: true, stale: false, windows })]);
+    assert.match(text, /5h 13% \(reset \d\d:\d\d\) · behind(?! –)/);
+    assert.ok(!text.includes("projected empty"), "the meaningless projection is not printed at all");
   });
 
   it("on-pace windows say so; unknown pace and unknown runway stay silent", async () => {

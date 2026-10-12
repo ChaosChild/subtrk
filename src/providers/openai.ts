@@ -7,7 +7,14 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Credits, ProviderError, ProviderModule, ProviderResult, Window } from "../core.ts";
+import {
+  type Credits,
+  PROBE_TIMEOUT_MS,
+  type ProviderError,
+  type ProviderModule,
+  type ProviderResult,
+  type Window,
+} from "../core.ts";
 import { traceInput } from "../lib/input-trace.ts";
 import { usableLiteralSecret } from "../lib/secret.ts";
 import { readCodexRpcUsage } from "./codex-rpc.ts";
@@ -16,6 +23,10 @@ const TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_CHARS = 1_000_000;
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const EXPIRED_HINT = "launch codex once so it refreshes its login, or run codex login";
+// The fallback spawn (app-server boot + RPC round-trips) is budgeted: at most
+// this much wall clock, and never more than the probe has left – otherwise it
+// stacks past core's probe timeout and the work is thrown away anyway.
+const FALLBACK_BUDGET_MS = 8_000;
 
 export interface OpenaiAuthOk {
   ok: true;
@@ -343,6 +354,7 @@ function usageHeaders(accessToken: string, accountId: string): Record<string, st
 
 async function probeInner(): Promise<ProviderResult> {
   const fetchedAt = new Date().toISOString();
+  const probeStartedMs = Date.parse(fetchedAt);
   const read = readAuthFile();
   const auth = parseOpenaiAuth(read?.fileObj);
   if (!auth?.ok) return fail(auth ? auth.error : NO_CREDENTIALS_ERROR, fetchedAt);
@@ -380,10 +392,14 @@ async function probeInner(): Promise<ProviderResult> {
       error = { kind: "parse-failure", message: "usage response was not JSON" };
     }
   }
-  if (error && FALLBACK_KINDS.has(error.kind)) {
+  if (error !== null && isDefinitiveFailure(error)) {
     // Definitive HTTP failure with a stored login -> read-only codex
-    // app-server lane; its failure keeps the original HTTP error.
-    const viaRpc = parseOpenaiUsage(await readCodexRpcUsage());
+    // app-server lane; its failure keeps the original error. The lane is
+    // deadline-capped to fit inside the probe budget: whatever is left of
+    // PROBE_TIMEOUT_MS, at most FALLBACK_BUDGET_MS.
+    const remainingMs = PROBE_TIMEOUT_MS - (Date.now() - probeStartedMs);
+    const deadlineMs = Date.now() + Math.max(0, Math.min(remainingMs, FALLBACK_BUDGET_MS));
+    const viaRpc = parseOpenaiUsage(await readCodexRpcUsage(process.env, { deadlineMs }));
     if (viaRpc) {
       parsed = viaRpc;
       error = null;
@@ -396,10 +412,18 @@ async function probeInner(): Promise<ProviderResult> {
   return result;
 }
 
-// timeout/rate-limited are transient – a fallback spawn there would outlive
-// core's 10s probe budget or hit the same throttled backend. A 401 returned
-// above already: codex would refresh (rewrite) its login, which subtrk never does.
-const FALLBACK_KINDS = new Set<ProviderError["kind"]>(["http-error", "parse-failure"]);
+// Only a DEFINITIVE failure justifies the expensive fallback spawn: the server
+// answered with a real HTTP status (>= 400) or sent a body that could not be
+// used (parse-failure). Network-level errors (offline, DNS, ECONNREFUSED)
+// carry no status and propagate with NO fallback – the RPC lane would only
+// hit the same dead network and outlast the probe budget. 401 is handled
+// above (codex would refresh – rewrite – its login, which subtrk never does);
+// timeout and rate-limited are transient (a fallback there would outlive the
+// probe budget or hit the same throttled backend).
+function isDefinitiveFailure(e: ProviderError): boolean {
+  if (e.kind === "parse-failure") return true;
+  return e.kind === "http-error" && typeof e.status === "number" && e.status >= 400;
+}
 
 const provider: ProviderModule = {
   id: "openai",
