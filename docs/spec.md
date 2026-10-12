@@ -30,7 +30,7 @@ shared cache so concurrent agents never hammer provider endpoints.
 | `subtrk track status` | Open markers (age, `stale?` past 6h) + records still pending their harvest retry |
 | `subtrk track list` | Recent records, newest first (`--days N`, 1-365, default 30) |
 | `subtrk track stats` | Usage distributions per provider × complexity (`--provider`, `--complexity`, `--model`, `--days`); done, leaf, uncontested records only; model-agnostic headline median with min/max/p90 |
-| `subtrk track estimate` | The go/no-go: history p50/p90 for a bucket (fallback chain shown) vs the provider's live window, percent-remaining calibrated into tokens (`--provider`, `--complexity`, `--model`) |
+| `subtrk track estimate` | The go/no-go: history p50/p90 for a bucket (fallback chain shown) vs the provider's live window, calibrated into tokens by the ladder in §Track store (`--provider`, `--complexity`, `--model`); `--suggest` flips it around — ranks every enabled provider × observed priced model by fit, each line labelled with its calibration confidence |
 | `subtrk track prune` | Close markers orphaned by crashed/hung harnesses: default ≥3 days, `--before <dur>` (`24h`, `60m`, `3d`), `--all`; closed as `stale` with the harvest still attempted |
 | `subtrk init` | One-time interactive setup (the only interactive command) |
 | `subtrk init --agent <harness>` | Non-interactive: write subtrk's instructions into a harness's global agent file (see §`subtrk init`) |
@@ -66,7 +66,7 @@ help: subtrk status --json | subtrk status --provider <id> | subtrk init
 
 ```jsonc
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "checkedAt": "2026-09-23T10:15:00Z",          // ISO-8601 UTC, always Z
   "recheckAfter": "2026-09-23T10:16:00Z",       // heartbeat: now + clamp(min TTL of ok providers, 60s, 300s)
   "providers": [ ProviderResult ],              // one per enabled provider, always present
@@ -81,6 +81,14 @@ help: subtrk status --json | subtrk status --provider <id> | subtrk init
 
 `nextEvent.at` means **the earliest time new information can exist** (a reset we can
 actually observe, given the cache), not the raw reset instant. Schedulers wake there.
+
+Schema 2 (0.1.21) is additive over 1: ok windows carry a `pace` object
+(`ahead | on_pace | behind | unknown` against the window's cycle, with
+`projectedExhaustedAt` where projection is possible) and ok providers a
+`runway` object (`through_reset | projected_exhaustion | exhausted_now | unknown`
+across their windows); a stale-served result carries `staleReason`. Nothing that
+existed in schema 1 changed shape, and the cache file keeps its own
+`schemaVersion: 1`.
 
 ### ProviderResult
 
@@ -133,8 +141,9 @@ interface ProviderResult {
   windows?: Window[];           // on error-fallback these are the cached values
   credits?: Credits;            // ditto
   note?: string;                // e.g. opencode's constant PAYG note
-  surfaces?: { key: string; name: string; percent: number }[]; // per-surface usage mix where a provider exposes one (claude's seven_day_breakdown); additive, schemaVersion stays 1
-  refreshable?: true;           // module supports interactive refresh (additive, schemaVersion stays 1)
+  staleReason?: string;         // why an error-less stale was served (SWR); error-fallback explains via error
+  surfaces?: { key: string; name: string; percent: number }[]; // per-surface usage mix where a provider exposes one (claude's seven_day_breakdown); additive
+  refreshable?: true;           // module supports interactive refresh (additive)
   error?: ProviderError;        // present iff ok === false
 }
 ```
@@ -165,8 +174,11 @@ File `~/.subtrk/cache.json` (via `os.homedir()` – never manual `~` expansion):
   "claude": { "data": <ProviderResult>, "fetchedAt": 1789500000, "ttlMs": 300000 } }
 ```
 
-- **Reads:** fresh (age < ttl) → serve. Expired < 2×ttl and the refresh lock is held by
-  another live process → serve with `stale: true` (stale-while-revalidate). Otherwise probe.
+- **Reads:** fresh (age < ttl) → serve. Expired < 2×ttl and **this provider's** fetch
+  lock (`locks/fetch-<id>.lock`) is held by another live process → serve with `stale: true`
+  and a `staleReason` (stale-while-revalidate). Otherwise probe. The global `cache.json.lock`
+  is never the SWR signal: a status run probes providers in parallel, so a sibling always
+  holds it, which pinned short-TTL neighbours' 1×–2×ttl windows on bare stale (vk-11).
 - **Lock:** existence-only file `cache.json.lock` containing `{pid, startedAt}`, created
   with exclusive create, fd closed immediately (existence is the lock), released in
   `finally`. **No stealing.** GC by any process when `process.kill(pid, 0)` says the
@@ -319,18 +331,36 @@ provider-wide → any-provider same complexity → global) and low-n flags
 under 3. Costs are computed at read
 time against the pricing table (the house repricing rule), priced at the
 dominant model's rates. `track estimate` turns percent-remaining into tokens
-by calibration: the provider's own tokens consumed inside the current window
-(from the usage store, this-machine sections included) divided by the used
-fraction gives the window capacity; capacity × remaining fraction is the
-budget the p50/p90 must fit. The estimate payload always shows the
-arithmetic it used; window kinds without a fixed duration (scoped bundles)
-degrade to history-only.
+by a calibration ladder — the first rung that holds wins, and every result
+labels the rung it used:
+
+1. `calibrated:current-window` – the provider's own tokens consumed inside the
+   current window (usage store, this-machine sections included) ÷ used, when the
+   window is at least 10% used (below that, used ÷ used is dominated by noise).
+2. `calibrated:history` – the median capacity of ≥ 3 prior generations of the
+   same window key, where a generation = the window samples grouped by resetsAt
+   rounded to the minute (vendors jitter it by milliseconds), ending ≥ 10% used
+   with tokens over `[reset − kind duration, reset)`.
+3. `calibrated:current-window` – today's 2% rule (used 2–10%) when no such
+   history exists.
+4. `estimated:history-sparse` – 1–2 qualifying generations, pooled
+   Σtokens / Σused.
+
+`estimate --suggest` runs the same ladder per provider and appends the
+confidence to every candidate line; a provider that reaches no rung is skipped
+with the reason naming what is missing (e.g. "window under 2% used – no prior
+5h window to calibrate from"). The estimate payload always shows the arithmetic
+it used; window kinds without a fixed duration (scoped bundles) degrade to
+history-only.
 
 **Track hooks (M4d, D19).** `subtrk track hook --event <session-start|stop>
 --harness <claude|zcode|codex>` is the half the harness runs: `init --agent
 --track` registers it as a lifecycle hook (claude/zcode SessionStart + Stop
-merged into their JSON hook configs; codex as a sentinel-marked
-`[[hooks.*]]` block in `config.toml`). The verb reads only `track.json` and
+merged into their JSON hook configs; codex as a sentinel-marked block in
+`config.toml` using Codex's own shape — `[[hooks.<Event>]]` groups, each
+holding its `[[hooks.<Event>.hooks]]` command entries; v0.1.19 wrote only the
+inner tables and Codex refused to load the file). The verb reads only
+`track.json` and
 `~/.subtrk/hooks-state.json` (per-session last-nudged state, GC'd after 7
 days), scopes markers to the session cwd (equal or ancestor directory), and
 throttles to the first fire per session plus open-marker-set changes. Output
@@ -404,7 +434,17 @@ where fetch is used).
 
 ### claude – Claude Pro (personal)
 
-- Credential: `~/.claude/.credentials.json` → `claudeAiOauth.accessToken`, `expiresAt`
+- Credential resolution: env `CLAUDE_CODE_OAUTH_TOKEN` first (mirrors Claude
+  Code's own order — blank falls through to the file lane, a non-literal value
+  is rejected before any request, an env token is never refreshed or
+  persisted, and its cache stamp is distinct from the file lane's); otherwise
+  `~/.claude/.credentials.json` (or `${CLAUDE_CONFIG_DIR}/.credentials.json`).
+- Rotation doctrine: refresh tokens are single-use — an out-of-band exchange
+  spends the old one — so subtrk only ever refreshes through Claude Code's
+  public client and writes the rotated pair back to the same store Claude Code
+  reads; a failed write-back is surfaced as a note on the result (the store
+  then holds a spent token — run `claude /login` to re-sync), never swallowed.
+- File credential: `~/.claude/.credentials.json` → `claudeAiOauth.accessToken`, `expiresAt`
   (ms), `refreshToken`, `refreshTokenExpiresAt`. Past expiry (60s skew) with a live
   refresh token → **subtrk self-refreshes** via `POST
   https://console.anthropic.com/v1/oauth/token` `{grant_type:"refresh_token",
@@ -442,6 +482,11 @@ where fetch is used).
   in the current window – appears after the first GLM query". Only a body that is
   not a JSON object at all stays a `parse-failure`.
 - 401 → `no-credentials` (hint `check ZCode login`).
+- zhipu / zhipuai credentials (`provider.zhipu` / `provider.zhipuai` config keys,
+  env `ZHIPUAI_API_KEY`) route to `https://open.bigmodel.cn` with the same
+  `/api/monitor/usage/quota/limit` path. A config-declared host is accepted only
+  when it is first-party (`api.z.ai` / `open.bigmodel.cn`); anything else is
+  refused, never followed.
 
 ### alibaba – Model Studio Token Plan (international, credits)
 
@@ -601,8 +646,17 @@ inference). Absent everywhere → `no-credentials`, hint `run subtrk init or ope
   label `ChatGPT <plan_type>`. Strict, claude-style: a missing/absent primary
   window (or missing `rate_limit`, or non-object body) is a parse-failure,
   never an empty state – every observed response carries a primary window.
-  credits, spend_control, promo, additional_rate_limits and
-  code_review_rate_limit are not surfaced in v1.
+  Also parsed when present: `code_review_rate_limit` (model-scoped 5h/weekly
+  windows, each its own window entry) and the `spend_control` workspace credit
+  cap → `credits`; other keys (promo, additional_rate_limits) stay unsurfaced.
+- Fallback lane: when the HTTP read fails definitively (parse-failure, or
+  http-error with a status ≥ 400 — never 401/429/timeout/network errors), the
+  local Codex CLI is asked for the same numbers: `codex -s read-only -a never
+  app-server`, JSON-RPC over stdio (argv array, no shell; ~8s of the probe's
+  remaining budget; binary via `SUBTRK_CODEX_BINARY`, an invalid override means
+  no fallback rather than a guess). Read-only: it never sends prompts and never
+  writes auth. On Windows point `SUBTRK_CODEX_BINARY` at `codex.exe` — the
+  no-shell rule cannot use npm's `.cmd` shim.
 - 401: codex owns its login (access tokens live ~10 days; codex refreshes them
   itself while it runs), so subtrk never refreshes – on 401 the credential file
   is re-read once and the call retried with a changed token; still 401 →
@@ -612,7 +666,11 @@ inference). Absent everywhere → `no-credentials`, hint `run subtrk init or ope
 
 ### kimi – Kimi coding plans (Kimi Desktop / Kimi Code CLI)
 
-Credential discovery, first match wins:
+Credential discovery, first match wins. Every credential-bearing request is
+host-pinned to the first-party set (`agent-gw.kimi.com`, `api.kimi.com`,
+`auth.kimi.com`, `auth.kimi.ai`) and a credential file that *declares* a
+non-first-party endpoint is refused outright — config cannot redirect the
+bearer:
 
 1. The Kimi Desktop app's scoped API key:
    `%APPDATA%\kimi-desktop\daimon-share\daimon\kimi-code-key.json` →
@@ -691,9 +749,29 @@ the `X-Device-Mid` header – a presence check the server does not validate
   balances yet → ok, note "bundle active but no balances reported yet".
 - No `refresh()` – the desktop owns the login, mirroring D12.
 
+### minimax – MiniMax coding plan / pay-as-you-go
+
+- Credential: `MINIMAX_API_KEY`, or the MiniMax CLI config `~/.mmx/config.json`
+  (`MMX_CONFIG_DIR` overrides the directory). The key's shape picks the
+  endpoint: bearer keys → `/v1/token_plan/remains`; `sk-api-` keys →
+  `/account/query_balance`. Hosts are pinned to `api.minimax.io` /
+  `api.minimaxi.com` — a config-declared foreign base URL is refused, never
+  followed.
+- Windows (bearer path): per-model `current_interval` (5h) and
+  `current_weekly` from `model_remains`; the `sk-api-` path reports the
+  account balance instead of time windows.
+
+### deepseek – pay-as-you-go balance (experimental)
+
+- Credential: `DEEPSEEK_API_KEY` → `GET https://api.deepseek.com/user/balance`
+  (host pinned to `api.deepseek.com`) → USD/CNY account balance as a
+  credits-style entry; DeepSeek exposes no time-window quota.
+- **Experimental:** shipped unverified — no live account was available to test
+  against, so results are best-effort until proven on a real key.
+
 ## `subtrk init` (one-time interactive setup)
 
-First, init asks which providers to track: a numbered listing of all nine,
+First, init asks which providers to track: a numbered listing of all eleven,
 answered with numbers and/or ids (`1 3 5`, `claude, google`); empty input keeps
 the current selection, invalid input re-prompts (bounded), and non-TTY stdin
 skips the question. The answer is stored as `~/.subtrk/config.json`

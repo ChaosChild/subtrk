@@ -96,7 +96,9 @@ test("parseProviderSelection: numbers, ids, keep-current, canonical order, inval
   assert.deepEqual(parseProviderSelection("7", []), ["openai"], "openai is the seventh listing entry");
   assert.deepEqual(parseProviderSelection("8", []), ["kimi"], "kimi is the eighth listing entry");
   assert.deepEqual(parseProviderSelection("9", []), ["zcode"], "zcode is the ninth listing entry");
-  assert.equal(parseProviderSelection("10", []), null, "past the end of the listing");
+  assert.deepEqual(parseProviderSelection("10", []), ["minimax"], "minimax is the tenth listing entry");
+  assert.deepEqual(parseProviderSelection("11", []), ["deepseek"], "deepseek is the eleventh listing entry");
+  assert.equal(parseProviderSelection("12", []), null, "past the end of the listing");
   assert.equal(parseProviderSelection("-1", []), null);
   assert.equal(parseProviderSelection("claude bogus", []), null, "invalid token -> re-prompt signal");
 });
@@ -120,7 +122,7 @@ test("askProviderSelection: valid answer returns ids, invalid re-prompts with th
   let picked: readonly string[] | null = null;
   try {
     const pending = askProviderSelection(["claude", "glm", "alibaba"], stdin);
-    stdin.write("10\r"); // past the end of the nine-entry listing
+    stdin.write("12\r"); // past the end of the eleven-entry listing
     await until(() => logs.some((line) => line.includes("invalid entry")));
     stdin.write("1 3\r");
     picked = await pending;

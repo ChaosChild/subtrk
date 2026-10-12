@@ -193,13 +193,39 @@ test("codex: sentinel block appends, replaces, and removes; foreign TOML survive
     installAgentHooks("codex", base); // replace, not duplicate
     text = readFileSync(path, "utf8");
     assert.equal(text.split("[[hooks.SessionStart.hooks]]").length - 1, 1, "idempotent");
-    assert.ok(text.includes("command_windows"), "windows override present");
 
     const r2 = removeAgentHooks("codex", base);
     assert.equal(r2.ok, true);
     text = readFileSync(path, "utf8");
     assert.ok(!text.includes("subtrk"), "our block fully removed");
     assert.ok(text.includes('matcher = "^compact$"'), "user table still there");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// Codex refuses to start unless hooks.<Event> is an array of matcher groups:
+// every [[hooks.X.hooks]] handler table must follow its own [[hooks.X]] group
+// header (v0.1.19 wrote bare [[hooks.X.hooks]] -> "expected a sequence").
+test("codex: block uses Codex's real schema; a v0.1.19 block is migrated on reinstall", () => {
+  const base = tmpBase();
+  try {
+    const path = join(base, ".codex", "config.toml");
+    put(
+      path,
+      'model = "m"\n\n# subtrk:hooks:begin – old\n[[hooks.SessionStart.hooks]]\ntype = "command"\n' +
+        "command = 'subtrk track hook --event session-start --harness codex'\n# subtrk:hooks:end\n",
+    );
+    installAgentHooks("codex", base);
+    const lines = readFileSync(path, "utf8").split("\n");
+    for (const ev of ["SessionStart", "Stop"]) {
+      const h = lines.indexOf(`[[hooks.${ev}.hooks]]`);
+      assert.ok(h > 0, `${ev} handler present`);
+      assert.equal(lines[h - 1], `[[hooks.${ev}]]`, `${ev} handler sits inside a matcher group`);
+      assert.equal(lines.filter((l) => l === `[[hooks.${ev}]]`).length, 1, `one ${ev} group`);
+    }
+    assert.ok(!lines.some((l) => l.startsWith("command_windows")), "no unverified fields");
+    assert.ok(lines[0] === 'model = "m"', "user head intact");
   } finally {
     cleanup(base);
   }

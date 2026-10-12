@@ -1,0 +1,33 @@
+{
+  "base_resp": { "status_code": 0, "status_msg": "success" },
+  "data": {
+    "plan": "pro",
+    "model_remains": [
+      {
+        "model_name": "MiniMax-M2",
+        "current_interval_status": 1,
+        "current_interval_total_count": 100,
+        "current_interval_usage_count": 25,
+        "start_time": 1792876800,
+        "end_time": 1792894800,
+        "current_weekly_status": 1,
+        "current_weekly_total_count": 2000,
+        "current_weekly_usage_count": 500,
+        "weekly_start_time": 1792243200,
+        "weekly_end_time": 1792848000
+      },
+      {
+        "model_name": "MiniMax-Text-01",
+        "current_interval_status": 2,
+        "current_interval_total_count": 80,
+        "current_interval_usage_count": 80,
+        "current_interval_remaining_percent": 0,
+        "start_time": 1792876800,
+        "end_time": 1792894800,
+        "current_weekly_status": 3,
+        "current_weekly_total_count": 0,
+        "current_weekly_usage_count": 0
+      }
+    ]
+  }
+}

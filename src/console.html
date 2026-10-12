@@ -592,6 +592,7 @@ function scopeGroups(p) {
 function cardBadge(p, ws) {
   if (p.error && p.stale) return `<span class="badge b-warn">stale · ${esc(p.error.kind)}</span>`;
   if (p.error) return `<span class="badge b-crit">${esc(p.error.kind)}</span>`;
+  if (p.stale) return `<span class="badge b-warn" title="${esc(p.staleReason || "cached past TTL")}">stale</span>`;
   if (!ws.length && !p.windows && !p.credits) return `<span class="badge b-muted">signals only</span>`;
   const worst = Math.max(0, ...ws.map(used));
   return worst >= 95 ? `<span class="badge b-crit">window exhausted</span>`
@@ -697,6 +698,7 @@ function providerCardHTML(p, g, multi) {
     const ctl = p.refreshable ? `<div class="rrow"><button type="button" class="btn-refresh" data-refresh="${esc(p.id)}">Refresh now</button><span class="rnote"></span></div>` : "";
     body += `<div class="err"><span class="k">${esc(p.error.kind)}</span> – ${esc(p.error.message)}${p.error.hint ? `<div class="h">${esc(p.error.hint)}</div>` : ""}${remedy}${ctl}</div>`;
   }
+  if (p.stale && !p.error) body += `<div class="note">stale – ${esc(p.staleReason || "cached past TTL, no reason reported")}</div>`;
   if (p.note) body += `<div class="note">${esc(p.note)}</div>`;
   const hideLabel = !drill ? "Hide the MCP quota card" : multi ? "Hide this model class card" : `Hide ${m.name}`;
   return `<article class="card prov ${worst >= 95 ? "crit" : ""}${drill ? "" : " nolink"}" draggable="true" data-key="${esc(g.key)}"${drill ? ` data-provider="${esc(p.id)}"` : ""}>

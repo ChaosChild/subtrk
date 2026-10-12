@@ -23,7 +23,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: npx biome ci .
+      - run: npx --no-install biome ci .
       - run: npm test
 
   # The published artifact must run from a real node_modules install – Node
@@ -42,5 +42,6 @@ jobs:
       - run: npm pack --pack-destination "${{ runner.temp }}"
       - run: npm install --prefix "${{ runner.temp }}/smoke" "${{ runner.temp }}"/subtrk-*.tgz --no-fund --no-audit
       - run: node "${{ runner.temp }}/smoke/node_modules/subtrk/dist/cli.js" --version
+      - run: test -f "${{ runner.temp }}/smoke/node_modules/subtrk/dist/console.html"
       - name: offline verb smoke (track hook)
         run: echo '{"session_id":"ci"}' | node "${{ runner.temp }}/smoke/node_modules/subtrk/dist/cli.js" track hook --event session-start --harness claude

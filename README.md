@@ -110,6 +110,19 @@ politely, and speaks both human and agent.
 - **Secrets stay put** – reads the credential files your CLIs already maintain
   (read-only), stores its own keys in `~/.subtrk/env` (never global env vars), and
   mechanically redacts every secret from every output. The cache contains no secrets.
+- **Ported ideas credit their source** – a borrowed check or structure names its
+  origin in-file (MIT attribution, e.g. quota-axi); the link between the idea and
+  its upstream lives next to the code that carries it.
+- **Output is add-only** – flags like `--fields`/`--json` may filter, and richer
+  modes add detail, but a field's meaning never changes between modes: demotion
+  happens in the renderer, never in the data.
+- **Absent data stays absent** – a missing window, reset time, or percentage is
+  never invented; if the wire carries `percentUsed`, `percentRemaining` is left
+  out rather than derived.
+- **Expiry is advisory** – a stored `expiresAt` only orders candidates; a
+  credential is retired by the vendor endpoint's rejection, never by a clock.
+- **Accounts don't mix** – identity is the vendor's `accountId`; windows from
+  different accounts are never summed.
 
 ## Install
 
@@ -239,14 +252,16 @@ The `--track` tier appends this section to the body above:
 | Provider | Plan | Reads | Windows | Status |
 |---|---|---|---|---|
 | Anthropic | Claude Pro (personal) | `api.anthropic.com/api/oauth/usage` via the OAuth token Claude Code already stores | 5h + 7d | reverse-engineered, de-facto standard |
-| Z.ai | GLM Coding Plan | the same monitor endpoint ZCode itself uses | 5h + weekly | unofficial, officially plugin-endorsed |
+| Z.ai | GLM Coding Plan | the same monitor endpoint ZCode itself uses; zhipu/`ZHIPUAI_API_KEY` credentials route to `open.bigmodel.cn` | 5h + weekly | unofficial, officially plugin-endorsed |
 | Alibaba Cloud | Model Studio Token Plan (intl) | official `bl` CLI raw gateway passthrough (`bl console call`) | 30-day credits pool (monthly-only since 2026-09-22) | official (via bl) |
 | Google | AI Pro (personal) | Antigravity desktop app's local language server (the dashboard's own view); remote Code Assist summary fallback with read-only self-refresh | per-family 5h/7d (gemini + claude-and-gpt families) | best-effort – without the app it briefly runs the app's own language server standalone; labeled remote fallback as last resort |
 | OpenCode | Zen pay-as-you-go | no usage/balance API exists for PAYG | – | signals only (honest note) |
 | OpenRouter | pay-as-you-go | `/api/v1/key` (+ `/api/v1/credits` and usage history via a management key) | – | official |
-| OpenAI | ChatGPT plan via Codex | the Codex CLI's own ChatGPT usage endpoint, read from its stored login | free: one 30-day window; paid: 5h + weekly | official client endpoint, not a documented public API |
+| OpenAI | ChatGPT plan via Codex | the Codex CLI's own ChatGPT usage endpoint, read from its stored login; model-scoped code-review windows and the `spend_control` credit cap parsed when present; on definitive failure a read-only `codex app-server` fallback (Windows: set `SUBTRK_CODEX_BINARY` to `codex.exe`) | free: one 30-day window; paid: 5h + weekly (+ code-review windows, spend cap) | official client endpoint, not a documented public API |
 | Kimi | Kimi Desktop / Kimi Code CLI coding plans | the Kimi Desktop app's key or the Kimi Code CLI's OAuth login against the coding usage endpoints | free: one quota window; CLI login: 5h + 7d + monthly | official client endpoints, not a documented public API |
 | ZCode | z.ai Start Plan bundles | the z.ai balance API via the local credential store (the ZCode desktop app's stored login) | one window per per-model token bucket, bucket expiry as reset | official client endpoint, undocumented |
+| MiniMax | MiniMax coding plan (bearer key) or pay-as-you-go (`sk-api-` account key) | the key's shape picks the endpoint: `/v1/token_plan/remains` for bearer keys, `/account/query_balance` for `sk-api-` keys (`MINIMAX_API_KEY` or the MiniMax CLI config, pinned to `api.minimax.io` / `api.minimaxi.com`) | per-model 5h + weekly (bearer) or account balance (`sk-api-`) | official client endpoints, not a documented public API |
+| DeepSeek | pay-as-you-go | `DEEPSEEK_API_KEY` against the documented `/user/balance` account endpoint | – | official, documented; experimental – not verified against a live account |
 
 None of these vendors officially supports third-party quota readers except Alibaba
 and OpenRouter; the others are the same calls their own CLIs make, and can change.
@@ -303,6 +318,18 @@ subtrk track estimate --provider glm --complexity m
 #   ≈ 1.29M tok remaining  (calibrated: 5.9M consumed at 82% → capacity 7.2M)
 # verdict   median fits · p90 does not — split the task or switch model
 # help: subtrk track estimate --json | subtrk track start --task <text>
+
+Calibration is a ladder, labelled in the output: a window ≥10% used calibrates
+from its own burn; a freshly reset window borrows the median capacity of your
+own prior windows (`calibrated:history`); only a provider with no usable
+history at all is skipped, with the reason shown.
+
+```bash
+subtrk track estimate --suggest --complexity m
+# suggest   advisory – ranked by fit, then headroom; nothing is routed
+#   glm/GLM-5.3-Flash        fits p90 · headroom 86% · reset 02:36Z · $0.28 / $0.60 · calibrated:history
+#   glm/GLM-5.3              fits p90 · headroom 86% · reset 02:36Z · $0.56 / $1.65 · calibrated:history
+#   claude/claude-sonnet-5   fits p90 · headroom 46% · reset 02:30Z · $0.65 / $2.13 · calibrated:current-window
 ```
 
 On the dashboard, open markers show as a **Tasks** strip (live so-far usage
@@ -373,9 +400,17 @@ subtrk status --json
 ```
 
 - `providers[].windows[].resetsAt` – ISO-8601 UTC reset instants.
+- `schemaVersion` – `2` as of 0.1.21 (additive only): ok windows carry a `pace`
+  object (`ahead | on_pace | behind | unknown` + `projectedExhaustedAt` where
+  projection is possible), ok providers a `runway` object
+  (`through_reset | projected_exhaustion | exhausted_now | unknown`), and a
+  stale-served result a `staleReason` string. Nothing from schema 1 changed.
 - `nextEvent.at` – the earliest time new information can exist
   (`max(resetsAt, fetchedAt + ttl)`); schedule the wake-up there.
 - `recheckAfter` – heartbeat when no `nextEvent` applies.
+- `subtrk track estimate --suggest` – rank enabled provider × model fits for a
+  calibrated task size; each candidate carries a `confidence`
+  (`calibrated:current-window | calibrated:history | estimated:history-sparse`).
 - `providers[].error.kind` – branch on it: `no-credentials`, `expired-token`,
   `tool-missing`, `rate-limited`, `forbidden`, `not-readable-remotely`,
   `parse-failure`, `subprocess-failed`, `timeout`, `http-error`.
@@ -419,11 +454,23 @@ meantime – no intervention needed.
 
 - [`docs/spec.md`](docs/spec.md) – full CLI specification (output contract, cache,
   provider integrations, `subtrk init`).
-- [`docs/decisions.md`](docs/decisions.md) – design decisions D1–D11 with rationale.
+- [`docs/decisions.md`](docs/decisions.md) – design decisions D1–D24 with rationale.
 - [`docs/implementation-plan.md`](docs/implementation-plan.md) – implementation
   guide: layout, coding rules, how to add a provider.
 - [`docs/phases.md`](docs/phases.md) – roadmap (CLI, web console and usage
   analytics done; parked).
+
+## Credits
+
+Parts of subtrk's design and implementation draw on
+[quota-axi](https://github.com/kunchenguid/quota-axi) (MIT, © Kun Chen) —
+the cache single-flight lock and identity-stamp approach, the pace/runway
+semantics, the codex window mapping and read-only CLI fallback, host pinning
+for the kimi/minimax adapters, and the bigmodel.cn endpoint mapping. Each
+ported module carries its in-file attribution (see the design principles
+above). quota-axi's own z.ai adapter credits
+[`opencode-glm-quota`](https://github.com/guyinwonder168/opencode-glm-quota)
+(MIT, © guyinwonder168) for endpoint knowledge.
 
 ## License
 

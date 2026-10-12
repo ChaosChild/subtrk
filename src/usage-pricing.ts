@@ -62,7 +62,12 @@ const FALLBACK_NORMALIZED: Record<string, Price1M> = Object.fromEntries(
 );
 
 export function fallbackPriceFor(model: string): Price1M | null {
-  return FALLBACK_NORMALIZED[normalizeModelKey(model)] ?? null;
+  const key = normalizeModelKey(model);
+  // Own entries only: inherited names that survive normalization unchanged
+  // ("constructor", "toString", …) must not resolve through the prototype
+  // chain into a truthy non-price – the store-key discipline of usage.ts's
+  // PROTO_KEYS/ensure(), applied to the lookup side.
+  return Object.hasOwn(FALLBACK_NORMALIZED, key) ? (FALLBACK_NORMALIZED[key] ?? null) : null;
 }
 
 // USD per 1M -> USD per token.

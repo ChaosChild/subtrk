@@ -63,10 +63,10 @@ function fixture(name: string): unknown {
 
 // ---- module contract -------------------------------------------------------
 
-test("allProviders exposes the nine modules in spec order with spec TTLs", () => {
+test("allProviders exposes the eleven modules in spec order with spec TTLs", () => {
   assert.deepEqual(
     allProviders.map((p) => p.id),
-    ["claude", "glm", "alibaba", "google", "opencode", "openrouter", "openai", "kimi", "zcode"],
+    ["claude", "glm", "alibaba", "google", "opencode", "openrouter", "openai", "kimi", "zcode", "minimax", "deepseek"],
   );
   const ttls: Record<string, number> = {};
   for (const p of allProviders) {
@@ -83,6 +83,8 @@ test("allProviders exposes the nine modules in spec order with spec TTLs", () =>
     openai: 60000,
     kimi: 300000,
     zcode: 60000,
+    minimax: 300000,
+    deepseek: 300000,
   });
 });
 

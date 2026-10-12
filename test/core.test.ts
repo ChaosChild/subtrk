@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
@@ -293,18 +293,66 @@ describe("cache: fresh / stale / probe math", () => {
     assert.equal(second.stale, false);
   });
 
-  it("serves stale-while-revalidate when expired < 2x ttl and a live peer holds the lock", async (t) => {
+  it("serves stale-while-revalidate, with a reason, when a live peer holds THIS provider's fetch lock", async (t) => {
     const dir = tempDir();
     t.after(cleanup(dir));
     const cachePath = join(dir, "cache.json");
-    const lockPath = `${cachePath}.lock`;
+    const fetchLock = join(dir, "locks", "fetch-glm.lock");
     seedCache(cachePath, "glm", hit("glm", true), 90_000); // 1.5x ttl
-    seedLock(lockPath, process.pid); // live process
+    mkdirSync(join(dir, "locks"), { recursive: true });
+    writeFileSync(fetchLock, JSON.stringify({ pid: process.pid, host: hostname(), token: "peer" })); // live peer
     const counter = { n: 0 };
     const result = await fetchProvider(countingModule("glm", hit("glm"), counter), { cachePath });
-    assert.equal(counter.n, 0, "must not probe while a live peer holds the lock");
+    assert.equal(counter.n, 0, "must not probe while a live peer refreshes this provider");
     assert.equal(result.stale, true);
-    assert.ok(existsSync(lockPath), "peer's lock must not be removed");
+    assert.match(result.staleReason ?? "", /refresh in progress/, "a bare stale is never unexplained");
+    assert.ok(existsSync(fetchLock), "peer's lock must not be removed");
+  });
+
+  it("vk-11: a sibling holding the global cache lock does not pin a 1x-2x ttl entry on bare stale", async (t) => {
+    const dir = tempDir();
+    t.after(cleanup(dir));
+    const cachePath = join(dir, "cache.json");
+    seedCache(cachePath, "kimi", hit("kimi", true), 450_000, 300_000); // 1.5x kimi's 300s ttl
+    seedLock(`${cachePath}.lock`, process.pid); // a sibling provider mid-probe
+    const counter = { n: 0 };
+    const kimi = { ...countingModule("kimi", hit("kimi", true), counter), ttlMs: 300_000 };
+    const result = await fetchProvider(kimi, { cachePath });
+    assert.equal(counter.n, 1, "kimi must revalidate itself – no peer is refreshing kimi");
+    assert.equal(result.stale, false);
+  });
+
+  it("vk-11: collectStatus with a probing short-ttl sibling still refreshes kimi in its 1x-2x window", async (t) => {
+    const dir = tempDir();
+    t.after(cleanup(dir));
+    const cachePath = join(dir, "cache.json");
+    const now = Date.now();
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        glm: { data: hit("glm", true), fetchedAt: now - 90_000, ttlMs: 60_000 },
+        kimi: { data: hit("kimi", true), fetchedAt: now - 450_000, ttlMs: 300_000 },
+      }),
+    );
+    const slow = (id: ProviderResult["id"], ttlMs: number, counter: { n: number }): ProviderModule => ({
+      id,
+      ttlMs,
+      probe: async () => {
+        counter.n += 1;
+        await new Promise((r) => setTimeout(r, 50)); // holds the global lock across an await
+        return hit(id, true);
+      },
+    });
+    const glmN = { n: 0 };
+    const kimiN = { n: 0 };
+    const out = await collectStatus({
+      subtrkDir: dir,
+      providers: [slow("glm", 60_000, glmN), slow("kimi", 300_000, kimiN)],
+    });
+    const kimi = out.out.providers.find((p) => p.id === "kimi");
+    assert.equal(kimiN.n, 1, "kimi probed despite glm holding the global lock");
+    assert.equal(kimi?.stale, false);
   });
 
   it("probes again once age >= 2x ttl", async (t) => {

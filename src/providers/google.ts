@@ -43,6 +43,8 @@ import { request as httpRequest } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProviderError, ProviderModule, ProviderResult, Window } from "../core.ts";
+import { traceEnv, traceInput } from "../lib/input-trace.ts";
+import { usableLiteralSecret } from "../lib/secret.ts";
 
 const TIMEOUT_MS = 10_000;
 const KEYRING_TIMEOUT_MS = 5_000; // Add-Type compile is slow on its first run
@@ -80,7 +82,9 @@ const REMOTE_VIEW_NOTE =
 async function envClientValue(name: string): Promise<string | undefined> {
   try {
     const core = (await import("../core.ts")) as { getSecret?: (n: string) => string | undefined };
-    return core.getSecret?.(name);
+    const value = core.getSecret?.(name);
+    traceEnv(name, value); // value digest only (cache stamp)
+    return value;
   } catch {
     return undefined;
   }
@@ -109,15 +113,22 @@ export interface AgyKeyringToken {
   expiresAtMs?: number;
 }
 
+// Secret firewall, all lineages: a stored token that is not a plain literal
+// (env/template/command indirection) is an INVALID credential – present-but-
+// unusable. The lineage degrades to null / the token is omitted, so the value
+// is never sent and never expanded; discovery simply moves on.
+
 // Pure: agy keyring blob { token: { access_token, refresh_token?, expiry? (RFC3339) } }.
 export function parseAgyKeyringBlob(obj: unknown): AgyKeyringToken | null {
   if (typeof obj !== "object" || obj === null) return null;
   const token = (obj as { token?: unknown }).token;
   if (typeof token !== "object" || token === null) return null;
   const t = token as { access_token?: unknown; refresh_token?: unknown; expiry?: unknown };
-  if (typeof t.access_token !== "string" || t.access_token === "") return null;
+  if (typeof t.access_token !== "string" || t.access_token === "" || !usableLiteralSecret(t.access_token)) return null;
   const out: AgyKeyringToken = { accessToken: t.access_token };
-  if (typeof t.refresh_token === "string" && t.refresh_token !== "") out.refreshToken = t.refresh_token;
+  if (typeof t.refresh_token === "string" && t.refresh_token !== "" && usableLiteralSecret(t.refresh_token)) {
+    out.refreshToken = t.refresh_token;
+  }
   if (typeof t.expiry === "string") {
     const ms = Date.parse(t.expiry);
     if (Number.isFinite(ms)) out.expiresAtMs = ms;
@@ -129,9 +140,11 @@ export function parseAgyKeyringBlob(obj: unknown): AgyKeyringToken | null {
 export function parseGeminiCreds(obj: unknown): GoogleCreds | null {
   if (typeof obj !== "object" || obj === null) return null;
   const o = obj as { access_token?: unknown; refresh_token?: unknown; expiry_date?: unknown };
-  if (typeof o.access_token !== "string" || o.access_token === "") return null;
+  if (typeof o.access_token !== "string" || o.access_token === "" || !usableLiteralSecret(o.access_token)) return null;
   const creds: GoogleCreds = { accessToken: o.access_token, lineage: "gemini", raw: o as Record<string, unknown> };
-  if (typeof o.refresh_token === "string" && o.refresh_token !== "") creds.refreshToken = o.refresh_token;
+  if (typeof o.refresh_token === "string" && o.refresh_token !== "" && usableLiteralSecret(o.refresh_token)) {
+    creds.refreshToken = o.refresh_token;
+  }
   if (typeof o.expiry_date === "number" && Number.isFinite(o.expiry_date)) creds.expiresAtMs = o.expiry_date;
   return creds;
 }
@@ -153,7 +166,8 @@ export function parseAntigravityTokenFile(text: string): GoogleCreds | null {
     }
     return null;
   } catch {
-    return { accessToken: trimmed, lineage: "antigravity" };
+    // bare token file – same firewall: an indirection-shaped token is not one
+    return usableLiteralSecret(trimmed) ? { accessToken: trimmed, lineage: "antigravity" } : null;
   }
 }
 
@@ -393,6 +407,7 @@ async function discoverCreds(): Promise<{ creds: GoogleCreds; path?: string } | 
   const keyring = await readKeyringCreds();
   if (keyring) return { creds: keyring };
   const geminiPath = join(homedir(), ".gemini", "oauth_creds.json");
+  traceInput(geminiPath); // identity stats only, BEFORE the read (cache stamp)
   const geminiText = readTextIfExists(geminiPath);
   if (geminiText !== null) {
     try {
@@ -403,6 +418,7 @@ async function discoverCreds(): Promise<{ creds: GoogleCreds; path?: string } | 
     }
   }
   const antiPath = join(homedir(), ".gemini", "antigravity-cli", "antigravity-oauth-token");
+  traceInput(antiPath); // identity stats only, BEFORE the read (cache stamp)
   const antiText = readTextIfExists(antiPath);
   if (antiText !== null) {
     const creds = parseAntigravityTokenFile(antiText);
@@ -1007,6 +1023,7 @@ function probe(): Promise<ProviderResult> {
 const provider: ProviderModule = {
   id: "google",
   ttlMs: 60_000,
+  tracesInputs: true, // probe traces the gemini/antigravity token files + client env values
   probe,
   refresh: async () => {
     const r = await probe();

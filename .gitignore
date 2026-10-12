@@ -6,3 +6,4 @@ Thumbs.db
 subtrk-tmp.json
 .lavish/
 dist/
+.local/

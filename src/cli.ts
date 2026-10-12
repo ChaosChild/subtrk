@@ -19,12 +19,14 @@ import {
   readCacheEntry,
   removeCachedProvider,
   type StatusOutput,
+  type StatusProviderResult,
   SUBTRK_DIR,
   scrub,
   scrubValue,
   type Window,
 } from "./core.ts";
 import { runInit } from "./init.ts";
+import type { WindowPace } from "./pace.ts";
 import { runServe } from "./serve.ts";
 import { trackCommand } from "./track.ts";
 import { HOOK_DIALECTS, HOOK_EVENTS, trackHookCommand } from "./track-hook.ts";
@@ -61,7 +63,7 @@ usage:
   subtrk --version        print the version
 
 status flags:
-  --json                machine-readable output (schemaVersion 1)
+  --json                machine-readable output (schemaVersion 2)
   --provider <id>       restrict to provider (repeatable)
   --fields a,b          text filter: windows,credits,errors,hints
   --fresh               bypass cache TTLs once (claude keeps its 300s floor)
@@ -99,6 +101,8 @@ track flags:
     [--provider <id>]   the window to compare against
     [--complexity <cx>] the bucket to estimate (fallback chain shown)
     [--model <name>]    substring filter on the history models
+    [--suggest]         also rank enabled provider x model positions by fit
+                        (advisory; positions it cannot evaluate are listed)
   track prune           close markers orphaned by crashes/hangs
     [--before 24h]      duration cutoff (d|h|m); default 3d
     [--all]             close every open marker
@@ -182,6 +186,44 @@ function isHot(r: ProviderResult): boolean {
   );
 }
 
+// Compact per-window pace marker (schemaVersion 2): rides right after the
+// window's label on the text line. Unknown pace prints nothing – silence beats
+// noise when no cycle could be derived. A projection is only meaningful while
+// it lands inside the window's own cycle (before its reset): quota-axi
+// polarity makes the slow-burn `behind` window's projection cross its own
+// reset (meaningless – it prints bare), while the fast-burn `ahead` window is
+// the one that actually empties and carries the marker.
+function paceMarker(pace: WindowPace | undefined, nowMs: number, resetsAt: string): string {
+  if (!pace || pace.status === "unknown") return "";
+  if (pace.status === "on_pace") return " · on pace";
+  const bare = ` · ${pace.status}`;
+  const at = pace.projectedExhaustedAt !== undefined ? Date.parse(pace.projectedExhaustedAt) : Number.NaN;
+  const reset = Date.parse(resetsAt);
+  if (!(Number.isFinite(at) && at > nowMs) || !Number.isFinite(reset) || at >= reset) return bare;
+  return ` · ${pace.status} – projected empty in ${relative(at - nowMs)}`;
+}
+
+// One runway segment per provider with a derivable verdict; unknown prints
+// nothing. through_reset names the earliest still-future reset among the
+// provider's windows (presentation only – the verdict itself is pace.ts's).
+function runwayLabel(r: StatusProviderResult, nowMs: number): string | undefined {
+  const rw = r.runway;
+  if (!rw || rw.status === "unknown") return undefined;
+  if (rw.status === "exhausted_now") return "runway: exhausted now";
+  if (rw.status === "projected_exhaustion") {
+    const id = rw.limitingWindowId ? ` (${rw.limitingWindowId} window)` : "";
+    return typeof rw.usableRunwaySeconds === "number"
+      ? `runway: projected empty in ${relative(rw.usableRunwaySeconds * 1000)}${id}`
+      : `runway: projected empty${id}`;
+  }
+  let best: number | undefined;
+  for (const w of r.windows ?? []) {
+    const t = Date.parse(w.resetsAt);
+    if (Number.isFinite(t) && t > nowMs && (best === undefined || t < best)) best = t;
+  }
+  return best !== undefined ? `runway: through reset ${clock(new Date(best).toISOString())}` : "runway: through reset";
+}
+
 function creditsLabel(c: Credits): string {
   const fmt = (n: number): string => n.toLocaleString("en-US");
   const main =
@@ -212,7 +254,9 @@ function renderText(
     if (show("windows") && r.windows?.length) {
       const scopes = new Set(r.windows.map((w) => w.scope).filter(Boolean));
       const scoped = scopes.size > 1;
-      segs.push(r.windows.map((w) => windowLabel(w, scoped)).join(" · "));
+      segs.push(r.windows.map((w) => windowLabel(w, scoped) + paceMarker(w.pace, nowMs, w.resetsAt)).join(" · "));
+      const runway = runwayLabel(r, nowMs);
+      if (runway) segs.push(runway);
     }
     if (show("credits") && r.credits) segs.push(creditsLabel(r.credits));
     if (r.note) segs.push(r.note);
@@ -224,7 +268,7 @@ function renderText(
       else if (show("errors")) line += ` · error: ${r.error.kind} – ${oneLine(r.error.message)}`;
     }
     if (show("hints") && r.error?.hint) line += ` – hint: ${oneLine(r.error.hint)}`;
-    if (r.stale) line += "  [stale]";
+    if (r.stale) line += r.error || !r.staleReason ? "  [stale]" : `  [stale] ${oneLine(r.staleReason)}`;
     if (isHot(r)) line += " !";
     lines.push(scrub(line.trimEnd()));
   }
@@ -275,6 +319,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
         id: { type: "string" },
         before: { type: "string" },
         all: { type: "boolean", default: false },
+        suggest: { type: "boolean", default: false },
         event: { type: "string" },
         harness: { type: "string" },
         port: { type: "string" },
@@ -345,6 +390,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     id,
     before,
     all,
+    suggest,
     event,
     harness,
     port,
@@ -373,6 +419,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     id?: string;
     before?: string;
     all?: boolean;
+    suggest?: boolean;
     event?: string;
     harness?: string;
     port?: string;
@@ -439,7 +486,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     );
   if (cmd === "track estimate")
     return estimateCommand(
-      { json: json === true, provider: provider[0], complexity, model },
+      { json: json === true, provider: provider[0], complexity, model, suggest: suggest === true },
       { subtrkDir: deps.dirs?.subtrk },
     );
   if (cmd === "track hook") {

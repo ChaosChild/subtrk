@@ -16,6 +16,18 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { type FetchTurn, fetchLockHeld, fetchLockPath, takeFetchTurn, withLockSync } from "./lib/fetch-lock.ts";
+import { envValueDigest, fileState, stampDigest, type TracedInputs, withInputTrace } from "./lib/input-trace.ts";
+// pace/runway enrichment of the status output (schemaVersion 2). pace.ts is
+// pure and imports only types from this module, so the edge is one-way at
+// runtime.
+import {
+  computeEffectiveRunway,
+  computeWindowPace,
+  type EffectiveRunway,
+  type PaceWindow,
+  type WindowPace,
+} from "./pace.ts";
 
 // ---------- shared contract (docs/spec.md §ProviderResult) ----------
 
@@ -28,7 +40,9 @@ export type ProviderId =
   | "openrouter"
   | "openai"
   | "kimi"
-  | "zcode";
+  | "zcode"
+  | "minimax"
+  | "deepseek";
 
 export type ErrorKind =
   | "no-credentials"
@@ -76,6 +90,10 @@ export interface ProviderResult {
   windows?: Window[];
   credits?: Credits;
   note?: string;
+  // Additive: why a stale result carries no error (stale-while-revalidate –
+  // a peer is refreshing this provider). Stale-on-error results explain
+  // themselves through `error` instead; `stale` is never unexplained.
+  staleReason?: string;
   // Additive (schemaVersion stays 1): per-surface usage mix where a provider
   // exposes one (claude's seven_day_breakdown: Claude Code / Chats / Cowork).
   surfaces?: { key: string; name: string; percent: number }[];
@@ -89,18 +107,41 @@ export interface RefreshResult {
   message: string;
 }
 
+// Status-output views of the provider contract (schemaVersion 2, add-only vs
+// v1): the status assembly (collectStatus) attaches per-window pace and the
+// provider-level effective runway, computed purely from the reported windows.
+// Providers never set these; a result without a derivable verdict simply
+// carries pace {status:"unknown"} or no runway at all.
+export interface StatusWindow extends Window {
+  pace?: WindowPace;
+}
+
+export interface StatusProviderResult extends ProviderResult {
+  windows?: StatusWindow[];
+  runway?: EffectiveRunway;
+}
+
 export interface ProviderModule {
   id: ProviderId;
   ttlMs: number;
   probe(): Promise<ProviderResult>; // NEVER throws
   refresh?: () => Promise<RefreshResult>; // interactive re-auth (browser/login flow)
+  // W1.3: the probe traces its credential inputs (src/lib/input-trace.ts) and
+  // this provider's cache entries carry an identity stamp; a stampless legacy
+  // entry is re-probed once and upgraded. Test stubs omit this and keep the
+  // pre-stamp trust model (TTL only).
+  tracesInputs?: boolean;
 }
 
 export interface StatusOutput {
-  schemaVersion: 1;
+  // v2 (the one agreed bump, quota-axi pace integration): windows gain an
+  // optional `pace`, provider results an optional `runway` – add-only vs v1,
+  // no existing field changes meaning or shape. Distinct from SCHEMA_VERSION
+  // (the cache-file format below), which stays 1.
+  schemaVersion: 2;
   checkedAt: string;
   recheckAfter: string;
-  providers: ProviderResult[];
+  providers: StatusProviderResult[];
   nextEvent: {
     providerId: string;
     type: "window-reset";
@@ -129,21 +170,26 @@ export const ALL_PROVIDER_IDS: readonly ProviderId[] = [
   "openai",
   "kimi",
   "zcode",
+  "minimax",
+  "deepseek",
 ];
 export const PROBE_TIMEOUT_MS = 10_000;
 // --fresh never bypasses these providers' TTL floors (claude's usage endpoint
 // has UA-keyed 429 buckets – spec §Cache TTL table).
 export const FRESH_FLOOR_IDS: readonly ProviderId[] = ["claude"];
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 1; // cache-file format (spec §Cache) – NOT the status --json version
+// status --json schema version. v2 adds optional per-window `pace` and
+// per-provider `runway` (quota-axi semantics) – add-only vs v1.
+const STATUS_SCHEMA_VERSION = 2;
 const LOCK_MAX_AGE_MS = 60_000;
 const STALE_ERROR_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-const CONTENDER_WAIT_MS = 750;
 
 export interface FetchOpts {
   cachePath?: string;
   fresh?: boolean; // bypass cache TTL reads once
-  contenderWaitMs?: number; // injectable for tests; default 750
+  contenderWaitMs?: number; // injectable for tests; legacy alias for fetchWaitMs
+  fetchWaitMs?: number; // per-provider fetch-lock wait budget; injectable for tests; default 30s
   probeTimeoutMs?: number; // injectable for tests; default PROBE_TIMEOUT_MS
   now?: number; // injectable clock for cache age math
 }
@@ -175,10 +221,6 @@ export class TimeoutError extends Error {
 
 export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ---------- config ----------
@@ -380,9 +422,42 @@ export function getSecret(name: string, envPath: string = join(SUBTRK_DIR, "env"
 
 // ---------- cache (spec §Cache) ----------
 
+// W1.3 identity stamp stored alongside a cache entry (additive field, schema
+// stays 1): the traced file paths and env NAMES (never values) plus the digest
+// that pins the entry to the credentials it was probed with.
+export interface CacheStamp {
+  paths: string[];
+  envNames: string[];
+  digest: string;
+}
+
 interface CacheHit {
   data: ProviderResult;
   fetchedAt: number; // epoch ms
+  stamp?: CacheStamp;
+}
+
+// A stamped entry stays reusable only while every traced input is unchanged:
+// each recorded file's identity stats and each traced env var's resolved value
+// digest must recompute to the recorded digest. Cheap – stat calls and hashes
+// only; secret values are never stored in, or compared against, the file.
+function stampMatches(id: string, stamp: CacheStamp | undefined): boolean {
+  if (!stamp) return false;
+  const states = stamp.paths.map(fileState);
+  const pairs = stamp.envNames.map((n) => [n, envValueDigest(getSecret(n))] as [string, string]);
+  return stampDigest(id, states, pairs) === stamp.digest;
+}
+
+function parseCacheStamp(raw: unknown): CacheStamp | undefined {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const r = raw as { paths?: unknown; envNames?: unknown; digest?: unknown };
+  if (typeof r.digest !== "string" || r.digest === "") return undefined;
+  const strings = (v: unknown): string[] | undefined =>
+    v === undefined ? [] : Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : undefined;
+  const paths = strings(r.paths);
+  const envNames = strings(r.envNames);
+  if (!paths || !envNames) return undefined;
+  return { paths, envNames, digest: r.digest };
 }
 
 interface LockInfo {
@@ -417,7 +492,7 @@ export function readCacheEntry(cachePath: string, id: string): CacheHit | null {
     }
     return null; // schema mismatch – discard the file
   }
-  const entry = file[id] as { data?: unknown; fetchedAt?: unknown } | undefined;
+  const entry = file[id] as { data?: unknown; fetchedAt?: unknown; stamp?: unknown } | undefined;
   if (
     !entry ||
     typeof entry !== "object" ||
@@ -427,67 +502,81 @@ export function readCacheEntry(cachePath: string, id: string): CacheHit | null {
   ) {
     return null;
   }
-  return { data: entry.data as ProviderResult, fetchedAt: entry.fetchedAt };
+  const stamp = parseCacheStamp(entry.stamp);
+  return { data: entry.data as ProviderResult, fetchedAt: entry.fetchedAt, ...(stamp ? { stamp } : {}) };
 }
 
-// Temp file + rename, up to 4 retries with 25–100ms backoff, then silent
-// give-up – a lost write costs one future re-probe, it is never an error.
+// Temp file + rename under a short write lock (W1.2: concurrent processes'
+// read-modify-writes merge instead of clobbering each other's entries), up to
+// 4 retries with 25–100ms backoff, then silent give-up – a lost write costs
+// one future re-probe, it is never an error.
 export async function writeCacheEntry(
   cachePath: string,
   id: string,
   data: ProviderResult,
   ttlMs: number,
+  stamp?: CacheStamp,
 ): Promise<void> {
   const backoffs = [25, 50, 75, 100];
   try {
-    let file: Record<string, unknown> = {};
-    try {
-      const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as Record<string, unknown>;
-      if (parsed && typeof parsed === "object" && parsed.schemaVersion === SCHEMA_VERSION) file = parsed;
-    } catch {
-      /* absent or corrupt – start a fresh file */
-    }
-    file[id] = { data, fetchedAt: Date.parse(data.fetchedAt) || Date.now(), ttlMs };
-    const payload = JSON.stringify({ ...file, schemaVersion: SCHEMA_VERSION });
-    const tmp = `${cachePath}.${process.pid}.tmp`;
-    for (let attempt = 0; ; attempt++) {
+    const record: Record<string, unknown> = { data, fetchedAt: Date.parse(data.fetchedAt) || Date.now(), ttlMs };
+    if (stamp) record.stamp = stamp;
+    withLockSync(`${cachePath}.write.lock`, () => {
+      let file: Record<string, unknown> = {};
       try {
-        mkdirSync(dirname(cachePath), { recursive: true });
-        writeFileSync(tmp, payload);
-        renameSync(tmp, cachePath);
-        return;
+        const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as Record<string, unknown>;
+        if (parsed && typeof parsed === "object" && parsed.schemaVersion === SCHEMA_VERSION) file = parsed;
       } catch {
-        if (attempt >= backoffs.length) return;
-        await sleep(backoffs[attempt]);
+        /* absent or corrupt – start a fresh file */
       }
-    }
+      file[id] = record;
+      const payload = JSON.stringify({ ...file, schemaVersion: SCHEMA_VERSION });
+      const tmp = `${cachePath}.${process.pid}.tmp`;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          mkdirSync(dirname(cachePath), { recursive: true });
+          writeFileSync(tmp, payload);
+          renameSync(tmp, cachePath);
+          return;
+        } catch {
+          if (attempt >= backoffs.length) return;
+          try {
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, backoffs[attempt]);
+          } catch {
+            /* not allowed on this thread – retry immediately */
+          }
+        }
+      }
+    });
   } catch {
     /* silent */
   }
 }
 
 // Best-effort removal of one provider's cache entry (after an interactive
-// refresh): same temp+rename discipline and silent give-up as writeCacheEntry –
-// a lost delete costs one stale read, never an error.
+// refresh): same write-lock + temp+rename discipline as writeCacheEntry and
+// silent give-up – a lost delete costs one stale read, never an error.
 export function removeCachedProvider(subtrkDir: string, id: string): void {
   const cachePath = join(subtrkDir, "cache.json");
   try {
-    const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as Record<string, unknown>;
-    if (!parsed || typeof parsed !== "object" || parsed.schemaVersion !== SCHEMA_VERSION) return;
-    if (!(id in parsed)) return;
-    delete parsed[id];
-    const payload = JSON.stringify({ ...parsed, schemaVersion: SCHEMA_VERSION });
-    const tmp = `${cachePath}.${process.pid}.tmp`;
-    try {
-      writeFileSync(tmp, payload);
-      renameSync(tmp, cachePath);
-    } catch {
+    withLockSync(`${cachePath}.write.lock`, () => {
+      const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as Record<string, unknown>;
+      if (!parsed || typeof parsed !== "object" || parsed.schemaVersion !== SCHEMA_VERSION) return;
+      if (!(id in parsed)) return;
+      delete parsed[id];
+      const payload = JSON.stringify({ ...parsed, schemaVersion: SCHEMA_VERSION });
+      const tmp = `${cachePath}.${process.pid}.tmp`;
       try {
-        rmSync(tmp, { force: true });
+        writeFileSync(tmp, payload);
+        renameSync(tmp, cachePath);
       } catch {
-        /* best effort */
+        try {
+          rmSync(tmp, { force: true });
+        } catch {
+          /* best effort */
+        }
       }
-    }
+    });
   } catch {
     /* absent or corrupt – nothing to remove */
   }
@@ -585,14 +674,27 @@ async function finishProbe(
   entry: CacheHit | null,
   cachePath: string,
   now: number,
+  inputs?: TracedInputs,
 ): Promise<ProviderResult> {
   if (result.ok) {
-    await writeCacheEntry(cachePath, p.id, result, p.ttlMs);
+    const stamp: CacheStamp | undefined = inputs
+      ? {
+          paths: inputs.paths,
+          envNames: inputs.envNames,
+          digest: stampDigest(p.id, inputs.fileStates, inputs.envPairs),
+        }
+      : undefined;
+    await writeCacheEntry(cachePath, p.id, result, p.ttlMs, stamp);
     return result;
   }
   // Stale-on-error: serve cached data < 24h old with stale:true AND the error.
+  // The CURRENT probe's note wins: `note: result.note` carries a note the live
+  // probe attached (e.g. claude's write-back-failed warning – dropping it made
+  // the common stale+error path silent about a spent refresh token), and when
+  // the live probe has none, undefined overrides the spread's stale note so a
+  // previous entry's note never masquerades as current.
   if (entry && now - entry.fetchedAt < STALE_ERROR_MAX_AGE_MS) {
-    return { ...entry.data, ok: false, stale: true, error: result.error };
+    return { ...entry.data, ok: false, stale: true, error: result.error, note: result.note };
   }
   return result;
 }
@@ -603,33 +705,60 @@ export async function fetchProvider(p: ProviderModule, opts: FetchOpts = {}): Pr
   const cachePath = opts.cachePath ?? join(SUBTRK_DIR, "cache.json");
   const lockPath = `${cachePath}.lock`;
   const now = opts.now ?? Date.now();
+  const startedAt = Date.now();
+  // W1.3: providers that trace their inputs only reuse stamped entries whose
+  // inputs still match; a stampless legacy entry re-probes once and upgrades.
+  const stampGate = p.tracesInputs === true;
   const entry = readCacheEntry(cachePath, p.id);
-  let held = false;
-  if (entry && !opts.fresh) {
+  const entryUsable = entry !== null && (!stampGate || stampMatches(p.id, entry.stamp));
+  if (entry && entryUsable && !opts.fresh) {
     const age = now - entry.fetchedAt;
     if (age < p.ttlMs) return { ...entry.data, stale: false };
-    if (age < 2 * p.ttlMs) {
-      // Stale-while-revalidate: a live peer is already refreshing.
-      if (!acquireLock(lockPath)) return { ...entry.data, stale: true };
-      held = true;
+    // Stale-while-revalidate: a live peer is already refreshing THIS provider.
+    // The signal is the per-provider fetch lock – the global cache lock is held
+    // by whichever sibling provider is probing in the same status run, which
+    // pinned a short-TTL neighbour's 1x-2x window on bare stale (vk-11).
+    if (age < 2 * p.ttlMs && fetchLockHeld(fetchLockPath(dirname(cachePath), p.id))) {
+      return {
+        ...entry.data,
+        stale: true,
+        staleReason: `refresh in progress in another subtrk process – serving data cached ${Math.round(age / 1000)}s ago`,
+      };
     }
   }
-  if (!held) held = acquireLock(lockPath);
+  const held = acquireLock(lockPath);
+  let turn: FetchTurn<ProviderResult> | null = null;
   try {
-    if (!held) {
-      // Contender: lock held by a live process. Wait ~750ms, re-check the
-      // cache once, then probe anyway – one bounded duplicate probe.
-      await sleep(opts.contenderWaitMs ?? CONTENDER_WAIT_MS);
-      const again = readCacheEntry(cachePath, p.id);
-      if (again && !opts.fresh && Date.now() - again.fetchedAt < p.ttlMs) {
-        return { ...again.data, stale: false };
-      }
-      const probed = await runProbe(p, opts);
-      return await finishProbe(p, probed, entry, cachePath, now);
-    }
-    const probed = await runProbe(p, opts);
-    return await finishProbe(p, probed, entry, cachePath, now);
+    // W1.2 per-provider single-flight: while another process probes this
+    // provider, poll the cache for its write (100ms cadence, bounded wait)
+    // instead of probing too. Timeout falls through to a probe – one bounded
+    // duplicate, never a deadlock. Under --fresh only a write that landed
+    // after this call started can answer; the leader itself still probes.
+    turn = await takeFetchTurn(
+      fetchLockPath(dirname(cachePath), p.id),
+      () => {
+        const again = readCacheEntry(cachePath, p.id);
+        if (!again || (stampGate && !stampMatches(p.id, again.stamp))) return undefined;
+        const freshWrite = opts.fresh === true && again.fetchedAt >= startedAt;
+        const withinTtl = opts.fresh !== true && Date.now() - again.fetchedAt < p.ttlMs;
+        return freshWrite || withinTtl ? ({ ...again.data, stale: false } as ProviderResult) : undefined;
+      },
+      { waitMs: opts.fetchWaitMs ?? opts.contenderWaitMs },
+    );
+    if (turn.kind === "answered") return turn.value;
+    // W1.3: trace the probe's credential inputs so the cache write is stamped
+    // with exactly the files/env the result was derived from.
+    const traced = await withInputTrace(() => runProbe(p, opts));
+    return await finishProbe(
+      p,
+      traced.value,
+      entryUsable ? entry : null,
+      cachePath,
+      now,
+      stampGate ? traced.inputs : undefined,
+    );
   } finally {
+    if (turn?.kind === "leader") turn.lock.release(); // released even on a failed probe
     if (held) releaseLock(lockPath);
   }
 }
@@ -769,6 +898,59 @@ export function pkgVersion(): string {
 
 // ---------- status collection (shared by `subtrk status` and `subtrk serve`) ----------
 
+// Inverse of the providers' seconds→kind naming (providers/openai.ts
+// windowKindFromSeconds and friends): duration-suffixed kinds parse back to
+// seconds generically, the fixed semantic names map to their canonical
+// lengths, and anything else (glm's "MCP", zcode's "bundle", model slugs) is
+// undefined – pace then reports an honest missing_cycle instead of a guessed
+// cycle. Never used to fabricate startsAt; it only backs out the cycle length
+// a kind already asserts.
+const KIND_UNIT_SECONDS: Record<string, number> = { s: 1, m: 60, h: 3_600, d: 86_400, w: 604_800 };
+const NAMED_KIND_SECONDS: Record<string, number> = {
+  session: 5 * 3_600, // claude OAuth five-hour session window
+  daily: 86_400,
+  weekly: 604_800,
+  monthly: 30 * 86_400,
+};
+
+export function windowSecondsFromKind(kind: string): number | undefined {
+  const k = kind.toLowerCase();
+  const named = NAMED_KIND_SECONDS[k];
+  if (named !== undefined) return named;
+  const m = /^(\d+)([smhdw])$/.exec(k);
+  if (m === null) return undefined;
+  const seconds = Number(m[1]) * KIND_UNIT_SECONDS[m[2]];
+  return seconds > 0 ? seconds : undefined;
+}
+
+// Status-only enrichment (schemaVersion 2, add-only): per-window pace plus the
+// provider-level effective runway, both derived purely from the reported
+// windows. Honest unknowns are correct output: a window whose cycle cannot be
+// derived (semantic kind, missing resetsAt) gets pace
+// {status:"unknown", reason:"missing_cycle"}; stale-while-revalidate results
+// get pace {status:"unknown", reason:"stale"} and no runway – old usage must
+// not present itself as a live projection. startsAt is never fabricated and
+// resetsAt is never synthesized.
+function annotatePace(r: ProviderResult, nowMs: number): StatusProviderResult {
+  if (!r.ok || !r.windows || r.windows.length === 0) return r;
+  const paceWindows: PaceWindow[] = r.windows.map((w) => ({
+    kind: w.kind,
+    ...(w.scope !== undefined ? { scope: w.scope } : {}),
+    usedPercent: w.usedPercent,
+    remainingFraction: w.remainingFraction,
+    resetsAt: w.resetsAt,
+    windowSeconds: windowSecondsFromKind(w.kind),
+  }));
+  return {
+    ...r,
+    windows: r.windows.map((w, i) => ({
+      ...w,
+      pace: computeWindowPace(paceWindows[i], nowMs, { stale: r.stale }),
+    })),
+    ...(r.stale ? {} : { runway: computeEffectiveRunway(paceWindows, nowMs) }),
+  };
+}
+
 export interface CollectStatusOpts {
   subtrkDir?: string; // override ~/.subtrk (tests)
   providers?: ProviderModule[]; // stub registry (tests); default: real registry, lazily imported
@@ -833,10 +1015,10 @@ export async function collectStatus(
   const okTtls = selected.filter((_, i) => results[i].ok).map((m) => m.ttlMs);
   return {
     out: {
-      schemaVersion: 1,
+      schemaVersion: STATUS_SCHEMA_VERSION,
       checkedAt: new Date(nowMs).toISOString(),
       recheckAfter: computeRecheckAfter(okTtls, nowMs),
-      providers: results,
+      providers: results.map((r) => annotatePace(r, nowMs)),
       nextEvent: computeNextEvent(
         results.map((r) => ({ result: r, ttlMs: ttlById.get(r.id) ?? 0 })),
         nowMs,

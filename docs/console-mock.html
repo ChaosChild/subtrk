@@ -409,7 +409,7 @@ function termHTML() {
     if (p.note) segs.push(esc(p.id === "opencode" ? "PAYG · no usage API (signals only)" : p.note));
     return `${p.id.padEnd(11)}${segs.join(" · ")}${p.stale ? '   <span class="s">[stale]</span>' : ""}`;
   };
-  return `<span class="p">$</span> subtrk\n${STATUS.providers.map(line).join("\n")}\n<span class="c">next: ${esc(STATUS.nextEvent.providerId)} 5h at ${hm(STATUS.nextEvent.at)}</span>\n\n<span class="p">$</span> curl -H "Authorization: Bearer ***" 127.0.0.1:52817/api/status\n<span class="c">{ "schemaVersion": 1, "nextEvent": { "providerId": "claude", … }, … }</span>`;
+  return `<span class="p">$</span> subtrk\n${STATUS.providers.map(line).join("\n")}\n<span class="c">next: ${esc(STATUS.nextEvent.providerId)} 5h at ${hm(STATUS.nextEvent.at)}</span>\n\n<span class="p">$</span> curl -H "Authorization: Bearer ***" 127.0.0.1:52817/api/status\n<span class="c">{ "schemaVersion": 2, "nextEvent": { "providerId": "claude", … }, … }</span>`;
 }
 
 function tick() {
