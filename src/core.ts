@@ -30,7 +30,9 @@ export type ProviderId =
   | "openrouter"
   | "openai"
   | "kimi"
-  | "zcode";
+  | "zcode"
+  | "minimax"
+  | "deepseek";
 
 export type ErrorKind =
   | "no-credentials"
@@ -136,6 +138,8 @@ export const ALL_PROVIDER_IDS: readonly ProviderId[] = [
   "openai",
   "kimi",
   "zcode",
+  "minimax",
+  "deepseek",
 ];
 export const PROBE_TIMEOUT_MS = 10_000;
 // --fresh never bypasses these providers' TTL floors (claude's usage endpoint

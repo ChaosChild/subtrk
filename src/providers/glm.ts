@@ -1,5 +1,10 @@
 // glm – GLM Coding Plan via the ZCode monitor route.
 // Credential: ~/.zcode/cli/config.json -> provider.zai.apiKey (fallback env ANTHROPIC_AUTH_TOKEN).
+// Zhipu aliases ride the same lane: a provider.zhipu/zhipuai config key or env
+// ZHIPUAI_API_KEY routes to open.bigmodel.cn, reusing the same host-relative
+// monitor path (mapping after quota-axi, MIT, src/providers/zai.ts). A
+// config-declared base URL is honored only when it targets a first-party host
+// (api.z.ai or open.bigmodel.cn) – anything else is refused, never followed.
 // Auth header is the RAW key – no Bearer prefix.
 
 import { readFileSync } from "node:fs";
@@ -7,38 +12,120 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProviderError, ProviderModule, ProviderResult, Window } from "../core.ts";
 import { traceEnv, traceInput } from "../lib/input-trace.ts";
-import { usableLiteralSecret } from "../lib/secret.ts";
+import { redactSecret, usableLiteralSecret } from "../lib/secret.ts";
 
 const TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_CHARS = 1_000_000;
 const DEFAULT_HOST = "https://api.z.ai";
+const BIGMODEL_HOST = "https://open.bigmodel.cn";
+
+// Deployment host pin: the ONLY hosts a GLM/Zhipu credential may be sent to –
+// exactly the first-party deployments this lane uses. A config-declared base
+// URL targeting anything else is a refusal, never a redirect.
+const GLM_ALLOWED_HOSTS: ReadonlySet<string> = new Set(["api.z.ai", "open.bigmodel.cn"]);
+
+// Pure: an origin is a credential target only when it is https on a pinned
+// first-party host (default port).
+export function glmHostAllowed(origin: string): boolean {
+  try {
+    const u = new URL(origin);
+    return u.protocol === "https:" && u.port === "" && GLM_ALLOWED_HOSTS.has(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+// Pure: a config-declared baseURL -> its pinned origin, or null when absent or
+// unparseable (an unparseable value is not an endpoint declaration – the
+// default host stands, as before).
+function pinnedOrigin(baseURL: unknown): string | null {
+  if (typeof baseURL !== "string" || baseURL === "") return null;
+  try {
+    const origin = new URL(baseURL).origin;
+    return glmHostAllowed(origin) ? origin : null;
+  } catch {
+    return null;
+  }
+}
+
+// Pure: the first parseable config-declared base URL that does NOT target a
+// pinned first-party host – a refusal the probe reports instead of a fetch.
+// Checked across both lanes: a poisoned declaration must not hide behind a
+// credential from the other lane.
+export function glmForeignDeclared(configObj: unknown): string | null {
+  if (typeof configObj !== "object" || configObj === null) return null;
+  const provider = (configObj as { provider?: unknown }).provider;
+  if (typeof provider !== "object" || provider === null) return null;
+  for (const lane of ["zai", "zhipu", "zhipuai"] as const) {
+    const entry = (provider as Record<string, unknown>)[lane];
+    if (typeof entry !== "object" || entry === null) continue;
+    const baseURL = (entry as { options?: { baseURL?: unknown } }).options?.baseURL;
+    if (typeof baseURL !== "string" || baseURL === "") continue;
+    let origin: string | null = null;
+    try {
+      origin = new URL(baseURL).origin;
+    } catch {
+      continue; // unparseable – not an endpoint declaration
+    }
+    if (!glmHostAllowed(origin)) return baseURL;
+  }
+  return null;
+}
+
+// One credential lane: the usable literal key found under its config names
+// (if any) plus the host its declaration implies. Secret firewall: an
+// indirection-shaped key is present-but-unusable (null), never sent.
+interface GlmLane {
+  key: string | null;
+  origin: string | null; // pinned origin from a declared baseURL
+}
+
+function laneOf(configObj: unknown, names: readonly string[]): GlmLane {
+  let key: string | null = null;
+  let origin: string | null = null;
+  if (typeof configObj === "object" && configObj !== null) {
+    const provider = (configObj as { provider?: unknown }).provider;
+    if (typeof provider === "object" && provider !== null) {
+      for (const name of names) {
+        const entry = (provider as Record<string, unknown>)[name];
+        if (typeof entry !== "object" || entry === null) continue;
+        const z = entry as { apiKey?: unknown; options?: { baseURL?: unknown } };
+        if (!key && typeof z.apiKey === "string" && z.apiKey !== "" && usableLiteralSecret(z.apiKey)) {
+          key = z.apiKey;
+        }
+        if (!origin) origin = pinnedOrigin(z.options?.baseURL);
+      }
+    }
+  }
+  return { key, origin };
+}
 
 // Secret firewall: a candidate that is not a plain literal (env/template/
 // command indirection) is an INVALID credential – present-but-unusable. It is
 // treated like an absent source (never sent, never expanded) and the other
 // source is still tried; null = no usable candidate at all. The shape is kept
 // backward-compatible for the usage harvester's glmAuth consumer.
-export function glmAuth(configObj: unknown, envToken: string | undefined): { apiKey: string; host: string } | null {
-  let apiKey: string | undefined;
-  let host = DEFAULT_HOST;
-  if (typeof configObj === "object" && configObj !== null) {
-    const zai = ((configObj as { provider?: unknown }).provider as { zai?: unknown } | undefined)?.zai;
-    if (typeof zai === "object" && zai !== null) {
-      const z = zai as { apiKey?: unknown; options?: { baseURL?: unknown } };
-      if (typeof z.apiKey === "string" && z.apiKey !== "" && usableLiteralSecret(z.apiKey)) apiKey = z.apiKey;
-      if (typeof z.options?.baseURL === "string" && z.options.baseURL !== "") {
-        try {
-          host = new URL(z.options.baseURL).origin;
-        } catch {
-          // unparseable baseURL – keep the default host
-        }
-      }
-    }
-  }
-  if (!apiKey && typeof envToken === "string" && envToken !== "" && usableLiteralSecret(envToken)) {
-    apiKey = envToken;
-  }
-  return apiKey ? { apiKey, host } : null;
+// Lanes, in priority order: config provider.zai (host api.z.ai by default),
+// config provider.zhipu/zhipuai (open.bigmodel.cn by default), env
+// ANTHROPIC_AUTH_TOKEN (z.ai lane), env ZHIPUAI_API_KEY (bigmodel lane). A
+// config-declared base URL moves its whole lane's host (declared zhipu host
+// + env key included) as long as it stays first-party; a foreign declaration
+// makes glmAuth report no usable credential (glmForeignDeclared names it).
+export function glmAuth(
+  configObj: unknown,
+  envToken: string | undefined,
+  zhipuEnvToken?: string,
+): { apiKey: string; host: string } | null {
+  const zai = laneOf(configObj, ["zai"]);
+  const zhipu = laneOf(configObj, ["zhipu", "zhipuai"]);
+  const literal = (v: string | undefined): v is string => typeof v === "string" && v !== "" && usableLiteralSecret(v);
+  const candidates: { apiKey: string; host: string }[] = [];
+  if (zai.key) candidates.push({ apiKey: zai.key, host: zai.origin ?? DEFAULT_HOST });
+  if (zhipu.key) candidates.push({ apiKey: zhipu.key, host: zhipu.origin ?? BIGMODEL_HOST });
+  if (literal(envToken)) candidates.push({ apiKey: envToken, host: zai.origin ?? DEFAULT_HOST });
+  if (literal(zhipuEnvToken)) candidates.push({ apiKey: zhipuEnvToken, host: zhipu.origin ?? BIGMODEL_HOST });
+  if (glmForeignDeclared(configObj) !== null) return null; // poisoned config – refuse, never follow
+  return candidates[0] ?? null;
 }
 
 interface GlmLimit {
@@ -207,14 +294,36 @@ async function probeInner(): Promise<ProviderResult> {
   }
   const envToken = await getSecret("ANTHROPIC_AUTH_TOKEN");
   traceEnv("ANTHROPIC_AUTH_TOKEN", envToken); // value digest only (cache stamp)
-  const auth = glmAuth(configObj, envToken);
+  const zhipuEnvToken = await getSecret("ZHIPUAI_API_KEY");
+  traceEnv("ZHIPUAI_API_KEY", zhipuEnvToken); // value digest only (cache stamp)
+  const auth = glmAuth(configObj, envToken, zhipuEnvToken);
   if (!auth) {
+    // A parseable config-declared base URL that is not first-party is a
+    // refusal, not a missing credential – named so the operator can fix the
+    // file. The declaration is file content, so key values are redacted from it.
+    const foreign = glmForeignDeclared(configObj);
+    if (foreign) {
+      const secrets = [envToken, zhipuEnvToken].filter(
+        (s): s is string => typeof s === "string" && s !== "" && usableLiteralSecret(s),
+      );
+      return fail(
+        {
+          kind: "forbidden",
+          message: redactSecret(
+            `~/.zcode/cli/config.json declares a non-first-party endpoint (${foreign}) – refusing to use this credential`,
+            secrets,
+          ),
+          hint: "remove the endpoint override from ~/.zcode/cli/config.json or point it at api.z.ai / open.bigmodel.cn",
+        },
+        fetchedAt,
+      );
+    }
     return fail(
       {
         kind: "no-credentials",
         message: configUnreadable
-          ? "~/.zcode/cli/config.json unreadable and no ANTHROPIC_AUTH_TOKEN set"
-          : "no provider.zai.apiKey in ~/.zcode/cli/config.json and no ANTHROPIC_AUTH_TOKEN set",
+          ? "~/.zcode/cli/config.json unreadable and no ANTHROPIC_AUTH_TOKEN/ZHIPUAI_API_KEY set"
+          : "no provider.zai/zhipu apiKey in ~/.zcode/cli/config.json and no ANTHROPIC_AUTH_TOKEN/ZHIPUAI_API_KEY set",
         hint: "check ZCode login",
         remedy: "subtrk init",
       },

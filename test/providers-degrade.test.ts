@@ -225,7 +225,9 @@ describe("glm probe degrade paths", () => {
       h.write([".zcode", "cli", "config.json"], JSON.stringify({ provider: { zai: { apiKey: "" } } }));
       const r = await glmMod.probe();
       assertCleanFailure(r, "glm");
-      assert.match(r.error.message, /no provider\.zai\.apiKey/);
+      // The message names both credential lanes (z.ai + zhipu) now that the
+      // bigmodel aliases ride the same provider.
+      assert.match(r.error.message, /no provider\.zai\/zhipu apiKey/);
     });
   });
 

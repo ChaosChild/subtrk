@@ -260,6 +260,8 @@ The `--track` tier appends this section to the body above:
 | OpenAI | ChatGPT plan via Codex | the Codex CLI's own ChatGPT usage endpoint, read from its stored login | free: one 30-day window; paid: 5h + weekly | official client endpoint, not a documented public API |
 | Kimi | Kimi Desktop / Kimi Code CLI coding plans | the Kimi Desktop app's key or the Kimi Code CLI's OAuth login against the coding usage endpoints | free: one quota window; CLI login: 5h + 7d + monthly | official client endpoints, not a documented public API |
 | ZCode | z.ai Start Plan bundles | the z.ai balance API via the local credential store (the ZCode desktop app's stored login) | one window per per-model token bucket, bucket expiry as reset | official client endpoint, undocumented |
+| MiniMax | MiniMax coding plan (bearer key) or pay-as-you-go (`sk-api-` account key) | the key's shape picks the endpoint: `/v1/token_plan/remains` for bearer keys, `/account/query_balance` for `sk-api-` keys (`MINIMAX_API_KEY` or the MiniMax CLI config, pinned to `api.minimax.io` / `api.minimaxi.com`) | per-model 5h + weekly (bearer) or account balance (`sk-api-`) | official client endpoints, not a documented public API |
+| DeepSeek | pay-as-you-go | `DEEPSEEK_API_KEY` against the documented `/user/balance` account endpoint | – | official, documented; experimental – not verified against a live account |
 
 None of these vendors officially supports third-party quota readers except Alibaba
 and OpenRouter; the others are the same calls their own CLIs make, and can change.
