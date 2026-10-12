@@ -462,3 +462,59 @@ stays zero-dependency, and the compiler joins typecheck and linter as a
 dev-only tool. A `tarball` CI job now packs, installs into a temp prefix and
 executes the bin the way a user would, so "the published artifact runs" is a
 checked fact instead of an assumption.
+
+## D21 · Window capacity is calibrated by a ladder, and history outranks a barely-used window
+
+`estimate`/`--suggest` turn percent-remaining into tokens via the first rung
+that holds: current-window burn at ≥10% used → the median capacity of ≥3 prior
+generations of the same window key → the old 2–10% current-window rule when no
+such history exists → pooled 1–2 generations → an honest skip naming what is
+missing. The order is empirical, not aesthetic: on the real store, glm at
+exactly 2% used self-calibrated to 2.15G tokens against a 190M history median —
+a barely-used window is the *noisy* estimator, and a freshly reset window is
+exactly when an agent asks the question, so refusing it while 30+ days of
+history exist was the wrong answer. Generations group window samples by
+resetsAt rounded to the minute (vendors jitter it by milliseconds; unrounded,
+claude's 35 days looked like 702 windows instead of 23), qualify at ≥10% final
+used with non-zero period tokens, and sum over the half-open period
+`[reset − duration, reset)` — the usage row sitting exactly at the reset
+instant belongs to the next window. Every result labels its rung
+(`calibrated:current-window | calibrated:history | estimated:history-sparse |
+unknown`); "daily rate × window length" was evaluated and rejected — it
+measures demand, not capacity (glm: 35M vs a real 190M).
+
+## D22 · Stale-while-revalidate is a per-provider decision, and stale is never unexplained
+
+The cache's SWR branch originally served cached data as bare `stale` whenever
+the single global `cache.json.lock` was held — but `status` probes every
+provider in parallel and each probe holds that lock, so a short-TTL provider
+queued behind longer-TTL siblings was pinned stale for its entire 1×–2×ttl
+window on practically every refresh (kimi, 300s TTL, stale for ~6 minutes
+across several dashboard refreshes). SWR now requires a live holder of *that
+provider's* fetch lock, and every error-less stale carries a `staleReason`
+that status text and the dashboard display — a stale flag without a reason is
+treated as a bug.
+
+## D23 · Harness hook configs are written in the harness's own schema — verified against the real binary, or not written at all
+
+v0.1.19 transplanted Claude Code's hooks shape into Codex's `config.toml`
+(`[[hooks.X.hooks]]` tables); Codex requires `hooks.<Event>` as an array of
+matcher groups and refused to load the file entirely — the operator's Codex
+would not start. The writer now emits Codex's real two-level schema
+(verified against the installed codex.exe), migrates previously written blocks
+in place, and the rule is: a hooks/config writer either targets a schema
+verified against the target harness's own parser, or writes nothing and says
+so. The same audit re-verified the claude and zcode writers against their
+documented shapes.
+
+## D24 · Everything the runtime reads from its own package must ship in it
+
+`serve` reads the console shell from next to the compiled module, but `tsc`
+never copies HTML files and `files: ["dist"]` never included one — every
+published install of `serve` answered "console shell missing" while every
+checkout worked, so the project's own testing never saw it (the same
+checkout-masking that D20 records, second verse). The build now copies the
+shell into `dist/`, and a built-CLI test boots the real `serve` and fetches
+the shell; a test also scans `src/` for every module-relative runtime read and
+asserts each target is present in `npm pack`'s output, so the class is closed
+rather than the instance.
