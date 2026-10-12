@@ -270,20 +270,23 @@ const CODEX_BEGIN = "# subtrk:hooks:begin";
 const CODEX_END = "# subtrk:hooks:end";
 
 function codexBlock(): string {
-  // TOML literal strings (single quotes) – the commands contain spaces but no
-  // quotes, so no escaping is ever needed. command_windows mirrors the command:
-  // subtrk resolves the same way under cmd through the .cmd shim.
+  // Codex's schema, verified against codex-cli 0.162 (a wrong shape stops
+  // Codex from starting at all): hooks.<Event> is an ARRAY of matcher groups,
+  // each holding an array of handlers – [[hooks.X]] then [[hooks.X.hooks]].
+  // v0.1.19 wrote only [[hooks.X.hooks]], making hooks.X a map. Re-running
+  // init replaces that block in place. TOML literal strings: the commands
+  // contain spaces but no quotes, so no escaping is ever needed.
   return `${CODEX_BEGIN} – subtrk track hooks (installed by \`subtrk init --agent codex --track\`)
+[[hooks.SessionStart]]
 [[hooks.SessionStart.hooks]]
 type = "command"
 command = '${hookCommand("session-start", "codex")}'
-command_windows = '${hookCommand("session-start", "codex")}'
 timeout = 10
 
+[[hooks.Stop]]
 [[hooks.Stop.hooks]]
 type = "command"
 command = '${hookCommand("stop", "codex")}'
-command_windows = '${hookCommand("stop", "codex")}'
 timeout = 10
 ${CODEX_END}`;
 }

@@ -7,10 +7,10 @@
 // nothing leaves the machine.
 
 import assert from "node:assert/strict";
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { type ChildProcessWithoutNullStreams, spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -187,7 +187,9 @@ describe("built dist/cli.js end-to-end (offline)", () => {
   // (tsc doesn't copy it), so `serve` answered every request with
   // "console shell missing". The build now copies the shell; this test boots
   // the real binary so the shell can never silently vanish from the package.
-  it("serve serves the console shell at / and guards the API (dist/console.html must ship)", { skip: skipBuild }, async () => {
+  it("serve serves the console shell at / and guards the API (dist/console.html must ship)", {
+    skip: skipBuild,
+  }, async () => {
     assert.ok(existsSync(join(repoRoot, "dist", "console.html")), "build must copy the console shell into dist/");
     const child = spawn(process.execPath, [cliPath, "serve"], {
       env: childEnv(),
@@ -220,5 +222,40 @@ describe("built dist/cli.js end-to-end (offline)", () => {
     } finally {
       child.kill();
     }
+  });
+
+  // The class behind the 0.1.20 serve breakage: a file read relative to the
+  // module (new URL("./x", import.meta.url) / join(dirname(fileURLToPath(
+  // import.meta.url)), ...)) exists in src/ and even dist/, but not in the
+  // tarball. Scan src/ for every such read and require its dist-relative
+  // target in `npm pack`'s real file list – a new asset can't ship missing.
+  it("every module-relative runtime read in src/ ships in the npm tarball", { skip: skipBuild }, () => {
+    const pack = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      timeout: 120_000,
+      shell: true,
+    });
+    assert.equal(pack.status, 0, pack.stderr);
+    const shipped = new Set((JSON.parse(pack.stdout) as { files: { path: string }[] }[])[0].files.map((f) => f.path));
+    const reads: string[] = [];
+    const srcRoot = join(repoRoot, "src");
+    for (const rel of readdirSync(srcRoot, { recursive: true, encoding: "utf8" })) {
+      if (!rel.endsWith(".ts")) continue;
+      const text = readFileSync(join(srcRoot, rel), "utf8");
+      const modDir = posix.join("dist", posix.dirname(rel.replaceAll("\\", "/")));
+      for (const m of text.matchAll(/new URL\(\s*"([^"]+)",\s*import\.meta\.url\s*\)/g)) {
+        reads.push(posix.normalize(posix.join(modDir, m[1])));
+      }
+      for (const m of text.matchAll(
+        /join\(\s*dirname\(fileURLToPath\(import\.meta\.url\)\),\s*((?:"[^"]+"\s*,?\s*)+)\)/g,
+      )) {
+        const parts = [...m[1].matchAll(/"([^"]+)"/g)].map((p) => p[1]);
+        reads.push(posix.normalize(posix.join(modDir, ...parts)));
+      }
+    }
+    // the scanner must keep seeing the two known reads, or it has rotted
+    assert.ok(reads.includes("dist/console.html") && reads.includes("package.json"), `scanner found: ${reads}`);
+    for (const r of reads) assert.ok(shipped.has(r), `${r} is read at runtime but missing from the tarball`);
   });
 });
