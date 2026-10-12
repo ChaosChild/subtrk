@@ -239,16 +239,24 @@ describe("built dist/cli.js end-to-end (offline)", () => {
       shell: true,
     });
     assert.equal(pack.status, 0, pack.stderr);
-    // npm's pack --json shape varies across versions (array of results vs one
-    // object, and notices can precede the JSON); the dry-run notice block
-    // ("npm notice 1.2kB dist/cli.js") lists the same members as a fallback.
+    // npm's pack --json shape varies across majors (verified against both):
+    // npm 10: [{ ...files }]; npm 12: { "<pkg>": { ...files } } with pure JSON
+    // on stdout (no notices). Normalize all shapes; assert loudly if none fit.
     const startCandidates = ["[", "{"].map((c) => pack.stdout.indexOf(c)).filter((i) => i >= 0);
     const parsed = startCandidates.length
       ? (JSON.parse(pack.stdout.slice(Math.min(...startCandidates))) as unknown)
       : undefined;
-    const packResult = (Array.isArray(parsed) ? parsed[0] : parsed) as { files?: { path: string }[] } | undefined;
+    const candidate = Array.isArray(parsed) ? parsed[0] : parsed;
+    const packResult = (
+      candidate && typeof candidate === "object" && "files" in (candidate as object)
+        ? candidate
+        : candidate && typeof candidate === "object"
+          ? Object.values(candidate as object)[0]
+          : undefined
+    ) as { files?: { path: string }[] } | undefined;
     let paths = packResult?.files?.map((f) => f.path);
     if (!paths || paths.length === 0) {
+      // Older nms print the dry-run notice block: "npm notice 1.2kB dist/cli.js".
       paths = [...pack.stdout.matchAll(/^npm notice\s+[\d.]+\s*[kMG]?B?\s+(\S+)\s*$/gm)].map((m) =>
         posix.normalize(m[1]),
       );
