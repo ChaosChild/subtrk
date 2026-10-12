@@ -4,7 +4,7 @@
 // reprices history); verdicts use done, leaf, uncontested records only –
 // aborted/failed tasks undercount effort and would skew "it fits" optimistic.
 import { join } from "node:path";
-import { readCacheEntry, SUBTRK_DIR, scrub, scrubValue } from "./core.ts";
+import { errorMessage, loadConfig, readCacheEntry, SUBTRK_DIR, scrub, scrubValue } from "./core.ts";
 import type { TrackRecord, TrackStore } from "./track.ts";
 import { aggregateUsage, priceForModel, readUsageStore, rowCost, type UsageStore } from "./usage.ts";
 
@@ -257,6 +257,53 @@ function pickBucket(
   };
 }
 
+// Window + calibration: percent-remaining becomes tokens via the operator's
+// own observed usage in the window's period (capacity ≈ consumed / used).
+// stale = the probe said so, or the window already reset (its percent now
+// describes a period that is over).
+function readWindow(
+  provider: string,
+  subtrkDir: string,
+  nowMs: number,
+): { window: EstimateWindow; stale: boolean } | null {
+  const cached = readCacheEntry(join(subtrkDir, "cache.json"), provider);
+  const win = (cached?.data.windows ?? []).find((w) => KIND_MS[w.kind] !== undefined);
+  if (!cached || !win || typeof win.usedPercent !== "number") return null;
+  const durationMs = KIND_MS[win.kind];
+  const resetMs = Date.parse(win.resetsAt);
+  const used = Math.min(100, Math.max(0, win.usedPercent)) / 100;
+  let consumedTok: number | null = null;
+  if (Number.isFinite(resetMs)) {
+    const agg = aggregateUsage(readUsageStore(subtrkDir), {
+      provider,
+      granularity: "hour",
+      fromMs: resetMs - durationMs,
+      toMs: nowMs,
+      local: "include",
+    });
+    const u = agg.providers[provider];
+    if (u) {
+      const consumed = u.splitless ? u.tot : u.in + u.cr + u.cw + u.out;
+      if (consumed > 0) consumedTok = consumed;
+    }
+  }
+  const capacityTok = consumedTok !== null && used >= 0.02 ? consumedTok / used : null;
+  const remainingTok = capacityTok !== null ? capacityTok * (1 - used) : null;
+  return {
+    window: {
+      provider,
+      kind: win.kind,
+      usedPercent: win.usedPercent,
+      resetsAt: win.resetsAt,
+      consumedTok,
+      capacityTok,
+      remainingTok,
+      calibrated: remainingTok !== null,
+    },
+    stale: cached.data.stale === true || !(resetMs > nowMs),
+  };
+}
+
 export function buildEstimate(
   records: EnrichedRecord[],
   opts: { provider: string | null; complexity: string | null; subtrkDir: string; nowMs: number },
@@ -309,45 +356,7 @@ export function buildEstimate(
     fellBack: picked.fellBack,
   };
 
-  // Window + calibration: percent-remaining becomes tokens via the operator's
-  // own observed usage in the window's period (capacity ≈ consumed / used).
-  let window: EstimateWindow | null = null;
-  if (opts.provider) {
-    const cached = readCacheEntry(join(opts.subtrkDir, "cache.json"), opts.provider);
-    const win = (cached?.data.windows ?? []).find((w) => KIND_MS[w.kind] !== undefined);
-    if (win && typeof win.usedPercent === "number") {
-      const durationMs = KIND_MS[win.kind];
-      const resetMs = Date.parse(win.resetsAt);
-      const used = Math.min(100, Math.max(0, win.usedPercent)) / 100;
-      let consumedTok: number | null = null;
-      if (Number.isFinite(resetMs)) {
-        const agg = aggregateUsage(readUsageStore(opts.subtrkDir), {
-          provider: opts.provider,
-          granularity: "hour",
-          fromMs: resetMs - durationMs,
-          toMs: opts.nowMs,
-          local: "include",
-        });
-        const u = agg.providers[opts.provider];
-        if (u) {
-          const consumed = u.splitless ? u.tot : u.in + u.cr + u.cw + u.out;
-          if (consumed > 0) consumedTok = consumed;
-        }
-      }
-      const capacityTok = consumedTok !== null && used >= 0.02 ? consumedTok / used : null;
-      const remainingTok = capacityTok !== null ? capacityTok * (1 - used) : null;
-      window = {
-        provider: opts.provider,
-        kind: win.kind,
-        usedPercent: win.usedPercent,
-        resetsAt: win.resetsAt,
-        consumedTok,
-        capacityTok,
-        remainingTok,
-        calibrated: remainingTok !== null,
-      };
-    }
-  }
+  const window = opts.provider ? (readWindow(opts.provider, opts.subtrkDir, opts.nowMs)?.window ?? null) : null;
 
   let verdict: EstimateOut["verdict"];
   let note: string | null = null;
@@ -369,6 +378,120 @@ export function buildEstimate(
     note = "even the median exceeds what is left – defer or split";
   }
   return { history, fallbacks, window, verdict, note };
+}
+
+// ---------- estimate --suggest (model as output) ----------
+
+// Advisory only: ranks every enabled provider × observed priced model by
+// whether that provider's own calibrated p50/p90 fits its live window.
+// Nothing here routes, picks or runs – it is evidence for the caller.
+// Positions that cannot be evaluated are disclosed in `excluded`, never dropped.
+export interface SuggestCandidate {
+  provider: string;
+  model: string;
+  fits: "p50+p90" | "p50" | "no";
+  headroomPct: number; // window capacity left after a p90-sized task (negative = overrun)
+  kind: string;
+  resetsAt: string;
+  remainingTok: number;
+  n: number;
+  lowN: boolean;
+  fellBack: boolean;
+  p50Tok: number;
+  p90Tok: number;
+  p50Usd: number | null;
+  p90Usd: number | null;
+}
+
+export interface SuggestOut {
+  candidates: SuggestCandidate[];
+  excluded: { provider: string; model: string | null; reason: string }[];
+}
+
+const FIT_RANK: Record<SuggestCandidate["fits"], number> = { "p50+p90": 0, p50: 1, no: 2 };
+
+// Models seen for a provider: track records (by their resolved provider)
+// plus every usage-store section keyed by that provider.
+function modelsFor(provider: string, records: EnrichedRecord[], ustore: UsageStore): string[] {
+  const set = new Set<string>();
+  for (const r of records) if (r.provider === provider) for (const m of Object.keys(r.models ?? {})) set.add(m);
+  for (const section of [ustore.hourly, ustore.daily, ustore.localHourly, ustore.localDaily]) {
+    for (const rows of Object.values(section?.[provider] ?? {})) for (const m of Object.keys(rows)) set.add(m);
+  }
+  return [...set].sort();
+}
+
+export function buildSuggest(
+  records: EnrichedRecord[],
+  opts: { providers: readonly string[]; complexity: string | null; subtrkDir: string; nowMs: number },
+): SuggestOut {
+  const ustore = readUsageStore(opts.subtrkDir);
+  const candidates: SuggestCandidate[] = [];
+  const excluded: SuggestOut["excluded"] = [];
+  for (const provider of opts.providers) {
+    const read = readWindow(provider, opts.subtrkDir, opts.nowMs);
+    let reason: string | null = null;
+    if (!read) reason = "no cached window with a fixed-duration kind (run subtrk status)";
+    else if (read.stale)
+      reason = `stale window data (${read.window.kind}, reset ${read.window.resetsAt}) – run subtrk status`;
+    else if ((read.window.usedPercent ?? 0) < 2) reason = "window under 2% used – too little to calibrate capacity";
+    else if (read.window.remainingTok === null || read.window.capacityTok === null)
+      reason = "no token history in the current window – cannot calibrate capacity";
+    const w = read?.window;
+    if (reason || !w || w.remainingTok === null || w.capacityTok === null) {
+      excluded.push({ provider, model: null, reason: reason ?? "uncalibrated window" });
+      continue;
+    }
+    const picked = pickBucket(records, provider, opts.complexity);
+    if (!picked) {
+      excluded.push({ provider, model: null, reason: "no done, uncontested leaf records yet" });
+      continue;
+    }
+    const tok = picked.list.map((r) => r.tokens);
+    const p50Tok = percentile(tok, 0.5) ?? 0;
+    const p90Tok = percentile(tok, 0.9) ?? 0;
+    const fits: SuggestCandidate["fits"] =
+      p90Tok <= w.remainingTok ? "p50+p90" : p50Tok <= w.remainingTok ? "p50" : "no";
+    const headroomPct = ((w.remainingTok - p90Tok) / w.capacityTok) * 100;
+    const models = modelsFor(provider, records, ustore);
+    if (models.length === 0) excluded.push({ provider, model: null, reason: "no model observed for this provider" });
+    for (const model of models) {
+      const resolved = priceForModel(ustore, model);
+      if (!resolved) {
+        excluded.push({ provider, model, reason: "no pricing for the model" });
+        continue;
+      }
+      // Reprice the bucket's own token splits at this model's rates.
+      const usd = picked.list
+        .map((r) => (r.usage ? rowCost(r.usage, resolved.price)?.usd : undefined))
+        .filter((v): v is number => typeof v === "number");
+      candidates.push({
+        provider,
+        model,
+        fits,
+        headroomPct,
+        kind: w.kind,
+        resetsAt: w.resetsAt,
+        remainingTok: w.remainingTok,
+        n: picked.list.length,
+        lowN: picked.lowN,
+        fellBack: picked.fellBack,
+        p50Tok,
+        p90Tok,
+        p50Usd: percentile(usd, 0.5),
+        p90Usd: percentile(usd, 0.9),
+      });
+    }
+  }
+  candidates.sort(
+    (a, b) =>
+      FIT_RANK[a.fits] - FIT_RANK[b.fits] ||
+      b.headroomPct - a.headroomPct ||
+      (a.p50Usd ?? Number.POSITIVE_INFINITY) - (b.p50Usd ?? Number.POSITIVE_INFINITY) ||
+      a.provider.localeCompare(b.provider) ||
+      a.model.localeCompare(b.model),
+  );
+  return { candidates, excluded };
 }
 
 // ---------- CLI rendering ----------
@@ -414,7 +537,25 @@ export function statsText(out: StatsOut): string[] {
   return lines.map((l) => scrub(l));
 }
 
-export function estimateText(out: EstimateOut): string[] {
+function suggestText(sg: SuggestOut): string[] {
+  const fitLabel: Record<SuggestCandidate["fits"], string> = {
+    "p50+p90": "fits p90",
+    p50: "median fits · p90 does not",
+    no: "does not fit",
+  };
+  const lines = ["suggest   advisory – ranked by fit, then headroom; nothing is routed"];
+  if (sg.candidates.length === 0) lines.push("  no evaluable provider × model");
+  for (const c of sg.candidates) {
+    const flags = [c.lowN ? "low-n" : "", c.fellBack ? "fallback bucket" : ""].filter(Boolean).join(", ");
+    lines.push(
+      `  ${`${c.provider}/${c.model}`.padEnd(28)} ${fitLabel[c.fits]} · headroom ${Math.round(c.headroomPct)}% · reset ${c.resetsAt.slice(11, 16)}Z · ${fmtUsd(c.p50Usd)} / ${fmtUsd(c.p90Usd)}${flags ? ` · ${flags}` : ""}`,
+    );
+  }
+  for (const x of sg.excluded) lines.push(`  skipped ${x.provider}${x.model ? `/${x.model}` : ""}: ${x.reason}`);
+  return lines;
+}
+
+export function estimateText(out: EstimateOut & { suggest?: SuggestOut }): string[] {
   const lines: string[] = [];
   const h = out.history;
   const scope = [h.provider ?? "any provider", h.complexity ?? "any complexity"].join(", ");
@@ -454,6 +595,7 @@ export function estimateText(out: EstimateOut): string[] {
   };
   lines.push(`verdict   ${verdictLabel[out.verdict]}`);
   if (out.note) lines.push(`  ${out.note}`);
+  if (out.suggest) lines.push(...suggestText(out.suggest));
   lines.push("help: subtrk track estimate --json | subtrk track start --task <text>");
   return lines.map((l) => scrub(l));
 }
@@ -502,6 +644,7 @@ export interface EstimateArgs {
   provider?: string;
   complexity?: string;
   model?: string;
+  suggest?: boolean;
 }
 
 export async function estimateCommand(
@@ -528,7 +671,22 @@ export async function estimateCommand(
     subtrkDir: dir,
     nowMs,
   });
-  if (args.json) console.log(JSON.stringify(scrubValue({ schemaVersion: 1, ...out })));
-  else for (const line of estimateText(out)) console.log(line);
+  let suggest: SuggestOut | undefined;
+  if (args.suggest) {
+    // Unfiltered pool: each provider's bucket ladder picks its own history;
+    // --provider/--model stay filters on the verdict above only.
+    let providers: readonly string[];
+    try {
+      providers = loadConfig(dir).enabled;
+    } catch (err) {
+      console.error(`subtrk: ${errorMessage(err)}`);
+      return 1;
+    }
+    const pool = statableRecords(store, nowMs, 30).map((r) => enrichRecord(r, ustore));
+    suggest = buildSuggest(pool, { providers, complexity: args.complexity ?? null, subtrkDir: dir, nowMs });
+  }
+  const full = suggest ? { ...out, suggest } : out;
+  if (args.json) console.log(JSON.stringify(scrubValue({ schemaVersion: 1, ...full })));
+  else for (const line of estimateText(full)) console.log(line);
   return 0;
 }

@@ -99,6 +99,8 @@ track flags:
     [--provider <id>]   the window to compare against
     [--complexity <cx>] the bucket to estimate (fallback chain shown)
     [--model <name>]    substring filter on the history models
+    [--suggest]         also rank enabled provider x model positions by fit
+                        (advisory; positions it cannot evaluate are listed)
   track prune           close markers orphaned by crashes/hangs
     [--before 24h]      duration cutoff (d|h|m); default 3d
     [--all]             close every open marker
@@ -275,6 +277,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
         id: { type: "string" },
         before: { type: "string" },
         all: { type: "boolean", default: false },
+        suggest: { type: "boolean", default: false },
         event: { type: "string" },
         harness: { type: "string" },
         port: { type: "string" },
@@ -345,6 +348,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     id,
     before,
     all,
+    suggest,
     event,
     harness,
     port,
@@ -373,6 +377,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     id?: string;
     before?: string;
     all?: boolean;
+    suggest?: boolean;
     event?: string;
     harness?: string;
     port?: string;
@@ -439,7 +444,7 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
     );
   if (cmd === "track estimate")
     return estimateCommand(
-      { json: json === true, provider: provider[0], complexity, model },
+      { json: json === true, provider: provider[0], complexity, model, suggest: suggest === true },
       { subtrkDir: deps.dirs?.subtrk },
     );
   if (cmd === "track hook") {
