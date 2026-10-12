@@ -10,7 +10,7 @@
 // Lock/stamp approach after quota-axi (MIT), github.com/kunchenguid/quota-axi.
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createHash } from "node:crypto";
+import { createHash, scryptSync } from "node:crypto";
 import { statSync } from "node:fs";
 
 interface TraceStore {
@@ -87,16 +87,16 @@ export function fileState(path: string): string {
   }
 }
 
-/** One-way digest of an env value – the value itself is never stored. */
+/**
+ * One-way digest of an env value – the value itself is never stored. Derived
+ * with scrypt (not a fast hash) because the digest persists on disk in
+ * cache.json: an offline attacker holding the file must brute-force through a
+ * slow KDF per guess, which matters if a traced value is ever low-entropy.
+ * Cost is ~45ms per derivation, worst-case ~0.75s per status across all
+ * providers' traced envs – acceptable for a network-bound CLI.
+ */
 export function envValueDigest(value: string | undefined): string {
-  // NOT password storage: this is a change-detection fingerprint so the cache
-  // stamp can notice "the credential value changed" without ever keeping the
-  // value. It is recomputed per read, never compared against user input, and
-  // conveys nothing an attacker could verify offline – a fast hash is the
-  // point. Suppressed for CodeQL, which flags getSecret-derived hashing.
-  return createHash("sha256") // codeql[js/insecure-password-hash]
-    .update(JSON.stringify(["subtrk-env-v1", value ?? null]))
-    .digest("hex");
+  return scryptSync(value ?? "", "subtrk-env-stamp-v1", 32, { N: 16384, r: 8, p: 1 }).toString("hex");
 }
 
 /** sha256 of the sorted file-state list and the sorted [name, valueDigest] pairs. */
