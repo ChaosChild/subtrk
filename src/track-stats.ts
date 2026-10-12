@@ -361,17 +361,9 @@ function readWindow(
       if (consumed > 0) consumedTok = consumed;
     }
   }
-  const hist =
-    Number.isFinite(resetMs)
-      ? historyCapacity(
-          provider,
-          ustore,
-          win.scope ? `${win.kind}·${win.scope}` : win.kind,
-          durationMs,
-          resetMs,
-          nowMs,
-        )
-      : null;
+  const hist = Number.isFinite(resetMs)
+    ? historyCapacity(provider, ustore, win.scope ? `${win.kind}·${win.scope}` : win.kind, durationMs, resetMs, nowMs)
+    : null;
   let capacityTok: number | null = null;
   let confidence: CalibrationConfidence = "unknown";
   let historyN = 0;
@@ -694,7 +686,10 @@ export function estimateText(out: EstimateOut & { suggest?: SuggestOut }): strin
     const left = pct === null ? "?" : String(100 - pct);
     lines.push(`window    ${w.provider} ${w.kind} · ${left}% left (reset ${w.resetsAt.slice(11, 16)}Z)`);
     if (w.calibrated && w.remainingTok !== null && w.capacityTok !== null) {
-      if ((w.confidence === "calibrated:history" || w.confidence === "estimated:history-sparse") && w.historyN !== undefined) {
+      if (
+        (w.confidence === "calibrated:history" || w.confidence === "estimated:history-sparse") &&
+        w.historyN !== undefined
+      ) {
         const verb = w.confidence === "calibrated:history" ? "median" : "pooled";
         lines.push(
           `  ≈ ${fmtTok(w.remainingTok)} tok remaining  (${w.confidence} – ${verb} capacity ${fmtTok(w.capacityTok)} over ${w.historyN} prior ${w.kind} windows)`,
