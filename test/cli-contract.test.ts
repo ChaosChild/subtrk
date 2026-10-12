@@ -124,7 +124,7 @@ function failingModule(
 }
 
 describe("status --json schema", () => {
-  it("schemaVersion 1, ISO stamps, recheckAfter not before checkedAt, well-formed windows", async () => {
+  it("schemaVersion 2, ISO stamps, recheckAfter not before checkedAt, well-formed windows", async () => {
     const cap = captureConsole();
     try {
       const code = await main(["status", "--json"], {
@@ -133,7 +133,7 @@ describe("status --json schema", () => {
       });
       assert.equal(code, 0);
       const parsed = JSON.parse(cap.out[0]);
-      assert.equal(parsed.schemaVersion, 1);
+      assert.equal(parsed.schemaVersion, 2);
       assert.match(parsed.checkedAt, /^\d{4}-\d{2}-\d{2}T/);
       assert.match(parsed.recheckAfter, /Z$/);
       assert.ok(Date.parse(parsed.recheckAfter) >= Date.parse(parsed.checkedAt));

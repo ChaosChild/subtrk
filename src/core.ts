@@ -18,6 +18,16 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type FetchTurn, fetchLockPath, takeFetchTurn, withLockSync } from "./lib/fetch-lock.ts";
 import { envValueDigest, fileState, stampDigest, type TracedInputs, withInputTrace } from "./lib/input-trace.ts";
+// pace/runway enrichment of the status output (schemaVersion 2). pace.ts is
+// pure and imports only types from this module, so the edge is one-way at
+// runtime.
+import {
+  computeEffectiveRunway,
+  computeWindowPace,
+  type EffectiveRunway,
+  type PaceWindow,
+  type WindowPace,
+} from "./pace.ts";
 
 // ---------- shared contract (docs/spec.md §ProviderResult) ----------
 
@@ -93,6 +103,20 @@ export interface RefreshResult {
   message: string;
 }
 
+// Status-output views of the provider contract (schemaVersion 2, add-only vs
+// v1): the status assembly (collectStatus) attaches per-window pace and the
+// provider-level effective runway, computed purely from the reported windows.
+// Providers never set these; a result without a derivable verdict simply
+// carries pace {status:"unknown"} or no runway at all.
+export interface StatusWindow extends Window {
+  pace?: WindowPace;
+}
+
+export interface StatusProviderResult extends ProviderResult {
+  windows?: StatusWindow[];
+  runway?: EffectiveRunway;
+}
+
 export interface ProviderModule {
   id: ProviderId;
   ttlMs: number;
@@ -106,10 +130,14 @@ export interface ProviderModule {
 }
 
 export interface StatusOutput {
-  schemaVersion: 1;
+  // v2 (the one agreed bump, quota-axi pace integration): windows gain an
+  // optional `pace`, provider results an optional `runway` – add-only vs v1,
+  // no existing field changes meaning or shape. Distinct from SCHEMA_VERSION
+  // (the cache-file format below), which stays 1.
+  schemaVersion: 2;
   checkedAt: string;
   recheckAfter: string;
-  providers: ProviderResult[];
+  providers: StatusProviderResult[];
   nextEvent: {
     providerId: string;
     type: "window-reset";
@@ -146,7 +174,10 @@ export const PROBE_TIMEOUT_MS = 10_000;
 // has UA-keyed 429 buckets – spec §Cache TTL table).
 export const FRESH_FLOOR_IDS: readonly ProviderId[] = ["claude"];
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 1; // cache-file format (spec §Cache) – NOT the status --json version
+// status --json schema version. v2 adds optional per-window `pace` and
+// per-provider `runway` (quota-axi semantics) – add-only vs v1.
+const STATUS_SCHEMA_VERSION = 2;
 const LOCK_MAX_AGE_MS = 60_000;
 const STALE_ERROR_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -853,6 +884,59 @@ export function pkgVersion(): string {
 
 // ---------- status collection (shared by `subtrk status` and `subtrk serve`) ----------
 
+// Inverse of the providers' seconds→kind naming (providers/openai.ts
+// windowKindFromSeconds and friends): duration-suffixed kinds parse back to
+// seconds generically, the fixed semantic names map to their canonical
+// lengths, and anything else (glm's "MCP", zcode's "bundle", model slugs) is
+// undefined – pace then reports an honest missing_cycle instead of a guessed
+// cycle. Never used to fabricate startsAt; it only backs out the cycle length
+// a kind already asserts.
+const KIND_UNIT_SECONDS: Record<string, number> = { s: 1, m: 60, h: 3_600, d: 86_400, w: 604_800 };
+const NAMED_KIND_SECONDS: Record<string, number> = {
+  session: 5 * 3_600, // claude OAuth five-hour session window
+  daily: 86_400,
+  weekly: 604_800,
+  monthly: 30 * 86_400,
+};
+
+export function windowSecondsFromKind(kind: string): number | undefined {
+  const k = kind.toLowerCase();
+  const named = NAMED_KIND_SECONDS[k];
+  if (named !== undefined) return named;
+  const m = /^(\d+)([smhdw])$/.exec(k);
+  if (m === null) return undefined;
+  const seconds = Number(m[1]) * KIND_UNIT_SECONDS[m[2]];
+  return seconds > 0 ? seconds : undefined;
+}
+
+// Status-only enrichment (schemaVersion 2, add-only): per-window pace plus the
+// provider-level effective runway, both derived purely from the reported
+// windows. Honest unknowns are correct output: a window whose cycle cannot be
+// derived (semantic kind, missing resetsAt) gets pace
+// {status:"unknown", reason:"missing_cycle"}; stale-while-revalidate results
+// get pace {status:"unknown", reason:"stale"} and no runway – old usage must
+// not present itself as a live projection. startsAt is never fabricated and
+// resetsAt is never synthesized.
+function annotatePace(r: ProviderResult, nowMs: number): StatusProviderResult {
+  if (!r.ok || !r.windows || r.windows.length === 0) return r;
+  const paceWindows: PaceWindow[] = r.windows.map((w) => ({
+    kind: w.kind,
+    ...(w.scope !== undefined ? { scope: w.scope } : {}),
+    usedPercent: w.usedPercent,
+    remainingFraction: w.remainingFraction,
+    resetsAt: w.resetsAt,
+    windowSeconds: windowSecondsFromKind(w.kind),
+  }));
+  return {
+    ...r,
+    windows: r.windows.map((w, i) => ({
+      ...w,
+      pace: computeWindowPace(paceWindows[i], nowMs, { stale: r.stale }),
+    })),
+    ...(r.stale ? {} : { runway: computeEffectiveRunway(paceWindows, nowMs) }),
+  };
+}
+
 export interface CollectStatusOpts {
   subtrkDir?: string; // override ~/.subtrk (tests)
   providers?: ProviderModule[]; // stub registry (tests); default: real registry, lazily imported
@@ -917,10 +1001,10 @@ export async function collectStatus(
   const okTtls = selected.filter((_, i) => results[i].ok).map((m) => m.ttlMs);
   return {
     out: {
-      schemaVersion: 1,
+      schemaVersion: STATUS_SCHEMA_VERSION,
       checkedAt: new Date(nowMs).toISOString(),
       recheckAfter: computeRecheckAfter(okTtls, nowMs),
-      providers: results,
+      providers: results.map((r) => annotatePace(r, nowMs)),
       nextEvent: computeNextEvent(
         results.map((r) => ({ result: r, ttlMs: ttlById.get(r.id) ?? 0 })),
         nowMs,

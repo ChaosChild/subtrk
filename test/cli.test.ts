@@ -240,7 +240,7 @@ describe("status with a stubbed registry (exit 0)", () => {
     }
   });
 
-  it("--json emits schemaVersion 1 with recheckAfter and providers", async () => {
+  it("--json emits schemaVersion 2 with recheckAfter and providers", async () => {
     const cap = captureConsole();
     try {
       const code = await main(["status", "--json"], {
@@ -249,7 +249,7 @@ describe("status with a stubbed registry (exit 0)", () => {
       });
       assert.equal(code, 0);
       const parsed = JSON.parse(cap.out[0]);
-      assert.equal(parsed.schemaVersion, 1);
+      assert.equal(parsed.schemaVersion, 2);
       assert.match(parsed.checkedAt, /Z$/);
       assert.match(parsed.recheckAfter, /Z$/);
       assert.equal(parsed.providers.length, 1);

@@ -107,7 +107,7 @@ describe("subtrk serve", () => {
       assert.equal(r.status, 200);
       assert.match(r.headers["content-type"] ?? "", /^application\/json/);
       const out = JSON.parse(r.body);
-      assert.equal(out.schemaVersion, 1);
+      assert.equal(out.schemaVersion, 2);
       assert.match(out.checkedAt, /Z$/);
       assert.match(out.recheckAfter, /Z$/);
       assert.equal(out.providers.length, 2);

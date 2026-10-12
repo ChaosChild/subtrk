@@ -124,7 +124,7 @@ describe("built dist/cli.js end-to-end (offline)", () => {
       }[];
       nextEvent: unknown;
     };
-    assert.equal(parsed.schemaVersion, 1);
+    assert.equal(parsed.schemaVersion, 2);
     assert.match(parsed.checkedAt, /Z$/);
     assert.match(parsed.recheckAfter, /Z$/);
     const expected = WIN ? ALL_PROVIDER_BUT_GOOGLE : [...ALL_PROVIDER_BUT_GOOGLE, "google"];

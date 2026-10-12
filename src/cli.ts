@@ -19,12 +19,14 @@ import {
   readCacheEntry,
   removeCachedProvider,
   type StatusOutput,
+  type StatusProviderResult,
   SUBTRK_DIR,
   scrub,
   scrubValue,
   type Window,
 } from "./core.ts";
 import { runInit } from "./init.ts";
+import type { WindowPace } from "./pace.ts";
 import { runServe } from "./serve.ts";
 import { trackCommand } from "./track.ts";
 import { HOOK_DIALECTS, HOOK_EVENTS, trackHookCommand } from "./track-hook.ts";
@@ -61,7 +63,7 @@ usage:
   subtrk --version        print the version
 
 status flags:
-  --json                machine-readable output (schemaVersion 1)
+  --json                machine-readable output (schemaVersion 2)
   --provider <id>       restrict to provider (repeatable)
   --fields a,b          text filter: windows,credits,errors,hints
   --fresh               bypass cache TTLs once (claude keeps its 300s floor)
@@ -184,6 +186,38 @@ function isHot(r: ProviderResult): boolean {
   );
 }
 
+// Compact per-window pace marker (schemaVersion 2): rides right after the
+// window's label on the text line. Unknown pace prints nothing – silence beats
+// noise when no cycle could be derived.
+function paceMarker(pace: WindowPace | undefined, nowMs: number): string {
+  if (!pace || pace.status === "unknown") return "";
+  if (pace.status === "on_pace") return " · on pace";
+  if (pace.status === "ahead") return " · ahead";
+  const at = pace.projectedExhaustedAt !== undefined ? Date.parse(pace.projectedExhaustedAt) : Number.NaN;
+  return Number.isFinite(at) && at > nowMs ? ` · behind – projected empty in ${relative(at - nowMs)}` : " · behind";
+}
+
+// One runway segment per provider with a derivable verdict; unknown prints
+// nothing. through_reset names the earliest still-future reset among the
+// provider's windows (presentation only – the verdict itself is pace.ts's).
+function runwayLabel(r: StatusProviderResult, nowMs: number): string | undefined {
+  const rw = r.runway;
+  if (!rw || rw.status === "unknown") return undefined;
+  if (rw.status === "exhausted_now") return "runway: exhausted now";
+  if (rw.status === "projected_exhaustion") {
+    const id = rw.limitingWindowId ? ` (${rw.limitingWindowId} window)` : "";
+    return typeof rw.usableRunwaySeconds === "number"
+      ? `runway: projected empty in ${relative(rw.usableRunwaySeconds * 1000)}${id}`
+      : `runway: projected empty${id}`;
+  }
+  let best: number | undefined;
+  for (const w of r.windows ?? []) {
+    const t = Date.parse(w.resetsAt);
+    if (Number.isFinite(t) && t > nowMs && (best === undefined || t < best)) best = t;
+  }
+  return best !== undefined ? `runway: through reset ${clock(new Date(best).toISOString())}` : "runway: through reset";
+}
+
 function creditsLabel(c: Credits): string {
   const fmt = (n: number): string => n.toLocaleString("en-US");
   const main =
@@ -214,7 +248,9 @@ function renderText(
     if (show("windows") && r.windows?.length) {
       const scopes = new Set(r.windows.map((w) => w.scope).filter(Boolean));
       const scoped = scopes.size > 1;
-      segs.push(r.windows.map((w) => windowLabel(w, scoped)).join(" · "));
+      segs.push(r.windows.map((w) => windowLabel(w, scoped) + paceMarker(w.pace, nowMs)).join(" · "));
+      const runway = runwayLabel(r, nowMs);
+      if (runway) segs.push(runway);
     }
     if (show("credits") && r.credits) segs.push(creditsLabel(r.credits));
     if (r.note) segs.push(r.note);
