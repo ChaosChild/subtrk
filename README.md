@@ -454,11 +454,23 @@ meantime – no intervention needed.
 
 - [`docs/spec.md`](docs/spec.md) – full CLI specification (output contract, cache,
   provider integrations, `subtrk init`).
-- [`docs/decisions.md`](docs/decisions.md) – design decisions D1–D11 with rationale.
+- [`docs/decisions.md`](docs/decisions.md) – design decisions D1–D24 with rationale.
 - [`docs/implementation-plan.md`](docs/implementation-plan.md) – implementation
   guide: layout, coding rules, how to add a provider.
 - [`docs/phases.md`](docs/phases.md) – roadmap (CLI, web console and usage
   analytics done; parked).
+
+## Credits
+
+Parts of subtrk's design and implementation draw on
+[quota-axi](https://github.com/kunchenguid/quota-axi) (MIT, © Kun Chen) —
+the cache single-flight lock and identity-stamp approach, the pace/runway
+semantics, the codex window mapping and read-only CLI fallback, host pinning
+for the kimi/minimax adapters, and the bigmodel.cn endpoint mapping. Each
+ported module carries its in-file attribution (see the design principles
+above). quota-axi's own z.ai adapter credits
+[`opencode-glm-quota`](https://github.com/guyinwonder168/opencode-glm-quota)
+(MIT, © guyinwonder168) for endpoint knowledge.
 
 ## License
 
