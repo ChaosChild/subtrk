@@ -2,6 +2,8 @@
 // management key (never the inference key – that is a guaranteed 403).
 
 import type { Credits, ProviderError, ProviderModule, ProviderResult } from "../core.ts";
+import { traceEnv } from "../lib/input-trace.ts";
+import { usableLiteralSecret } from "../lib/secret.ts";
 
 const TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_CHARS = 1_000_000;
@@ -120,10 +122,25 @@ function fail(error: ProviderError, fetchedAt: string): ProviderResult {
 
 async function probeInner(): Promise<ProviderResult> {
   const fetchedAt = new Date().toISOString();
+  // Secret firewall: a key that is not a plain literal (env/template/command
+  // indirection) is an INVALID credential – present-but-unusable, never sent,
+  // never expanded.
   const key = await getSecret("OPENROUTER_API_KEY");
+  traceEnv("OPENROUTER_API_KEY", key); // value digest only (cache stamp)
   if (!key) {
     return fail(
       { kind: "no-credentials", message: "OPENROUTER_API_KEY not set", hint: "run subtrk init", remedy: "subtrk init" },
+      fetchedAt,
+    );
+  }
+  if (!usableLiteralSecret(key)) {
+    return fail(
+      {
+        kind: "parse-failure",
+        message: "OPENROUTER_API_KEY is set but not a literal secret (indirection) – refusing to use it",
+        hint: "set a literal key in ~/.subtrk/env (run subtrk init)",
+        remedy: "subtrk init",
+      },
       fetchedAt,
     );
   }
@@ -152,7 +169,8 @@ async function probeInner(): Promise<ProviderResult> {
   if (parsed.note) result.note = parsed.note;
 
   const mgmt = await getSecret("OPENROUTER_MANAGEMENT_KEY");
-  if (mgmt) {
+  traceEnv("OPENROUTER_MANAGEMENT_KEY", mgmt); // value digest only (cache stamp)
+  if (mgmt && usableLiteralSecret(mgmt)) {
     void registerSecret(mgmt);
     const cr = await fetchText(CREDITS_URL, { headers: { Authorization: `Bearer ${mgmt}` } });
     if (cr.ok) {
@@ -170,6 +188,7 @@ async function probeInner(): Promise<ProviderResult> {
 const provider: ProviderModule = {
   id: "openrouter",
   ttlMs: 60_000,
+  tracesInputs: true, // probe traces OPENROUTER_API_KEY / OPENROUTER_MANAGEMENT_KEY values
   probe(): Promise<ProviderResult> {
     return probeInner().catch(
       (e: unknown): ProviderResult =>

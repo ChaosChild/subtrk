@@ -67,7 +67,7 @@ const {
   needsRefresh,
   spawnLsAndProbe,
 } = await import("../src/providers/google.ts");
-const { extractJson, parseSubscription, parseTokenPlanUsage } = await import("../src/providers/alibaba.ts");
+const { extractJson, mapError, parseSubscription, parseTokenPlanUsage } = await import("../src/providers/alibaba.ts");
 const { glmAuth, parseGlmQuota } = await import("../src/providers/glm.ts");
 const { claudeAuth } = await import("../src/providers/claude.ts");
 const { extractOpencodeKey } = await import("../src/providers/opencode.ts");
@@ -274,6 +274,31 @@ describe("alibaba probe degrade paths", () => {
     }
     // extractJson null (no braces at all) flows through the same empty state.
     assert.deepEqual(parseTokenPlanUsage(null), []);
+  });
+
+  it("mapError: a failed bl spawn (toolMissing, empty stderr) reports tool-missing, not subprocess-failed", () => {
+    // ENOENT on POSIX / cmd.exe 9009: the shell prints NOTHING to stderr, so
+    // only the flag runBl set can classify it (regression: misreported as
+    // 'subprocess-failed: bl exited non-zero (stderr withheld)').
+    const fetchedAt = "2026-10-12T00:00:00.000Z";
+    const r = mapError({ ok: false, stdout: "", stderr: "", toolMissing: true, timedOut: false }, fetchedAt);
+    assert.ok(r);
+    assert.equal(r.ok, false);
+    assert.equal(r.fetchedAt, fetchedAt);
+    assert.ok(r.error);
+    assert.equal(r.error.kind, "tool-missing");
+    assert.equal(r.error.message, "'bl' not found on PATH");
+    assert.ok(r.error.hint?.includes("bailian-cli"));
+  });
+
+  it("mapError: empty stderr WITHOUT the toolMissing flag stays subprocess-failed (withheld, never invented)", () => {
+    const r = mapError(
+      { ok: false, stdout: "", stderr: "", toolMissing: false, timedOut: false },
+      new Date().toISOString(),
+    );
+    assert.ok(r?.error);
+    assert.equal(r.error.kind, "subprocess-failed");
+    assert.equal(r.error.message, "bl exited non-zero (stderr withheld)");
   });
 });
 

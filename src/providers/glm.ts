@@ -6,13 +6,18 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProviderError, ProviderModule, ProviderResult, Window } from "../core.ts";
+import { traceEnv, traceInput } from "../lib/input-trace.ts";
+import { usableLiteralSecret } from "../lib/secret.ts";
 
 const TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_CHARS = 1_000_000;
 const DEFAULT_HOST = "https://api.z.ai";
 
-// Pure: extract the API key and monitor host from the ZCode config (env token as fallback).
-// host is scheme+host only. Returns null when no key is available from either source.
+// Secret firewall: a candidate that is not a plain literal (env/template/
+// command indirection) is an INVALID credential – present-but-unusable. It is
+// treated like an absent source (never sent, never expanded) and the other
+// source is still tried; null = no usable candidate at all. The shape is kept
+// backward-compatible for the usage harvester's glmAuth consumer.
 export function glmAuth(configObj: unknown, envToken: string | undefined): { apiKey: string; host: string } | null {
   let apiKey: string | undefined;
   let host = DEFAULT_HOST;
@@ -20,7 +25,7 @@ export function glmAuth(configObj: unknown, envToken: string | undefined): { api
     const zai = ((configObj as { provider?: unknown }).provider as { zai?: unknown } | undefined)?.zai;
     if (typeof zai === "object" && zai !== null) {
       const z = zai as { apiKey?: unknown; options?: { baseURL?: unknown } };
-      if (typeof z.apiKey === "string" && z.apiKey !== "") apiKey = z.apiKey;
+      if (typeof z.apiKey === "string" && z.apiKey !== "" && usableLiteralSecret(z.apiKey)) apiKey = z.apiKey;
       if (typeof z.options?.baseURL === "string" && z.options.baseURL !== "") {
         try {
           host = new URL(z.options.baseURL).origin;
@@ -30,7 +35,9 @@ export function glmAuth(configObj: unknown, envToken: string | undefined): { api
       }
     }
   }
-  if (!apiKey && typeof envToken === "string" && envToken !== "") apiKey = envToken;
+  if (!apiKey && typeof envToken === "string" && envToken !== "" && usableLiteralSecret(envToken)) {
+    apiKey = envToken;
+  }
   return apiKey ? { apiKey, host } : null;
 }
 
@@ -191,12 +198,16 @@ async function probeInner(): Promise<ProviderResult> {
   const fetchedAt = new Date().toISOString();
   let configObj: unknown = null;
   let configUnreadable = false;
+  const configPath = join(homedir(), ".zcode", "cli", "config.json");
+  traceInput(configPath); // identity stats only, BEFORE the read (cache stamp)
   try {
-    configObj = JSON.parse(readFileSync(join(homedir(), ".zcode", "cli", "config.json"), "utf8"));
+    configObj = JSON.parse(readFileSync(configPath, "utf8"));
   } catch {
     configUnreadable = true;
   }
-  const auth = glmAuth(configObj, await getSecret("ANTHROPIC_AUTH_TOKEN"));
+  const envToken = await getSecret("ANTHROPIC_AUTH_TOKEN");
+  traceEnv("ANTHROPIC_AUTH_TOKEN", envToken); // value digest only (cache stamp)
+  const auth = glmAuth(configObj, envToken);
   if (!auth) {
     return fail(
       {
@@ -250,6 +261,7 @@ async function probeInner(): Promise<ProviderResult> {
 const provider: ProviderModule = {
   id: "glm",
   ttlMs: 60_000,
+  tracesInputs: true, // probe traces the ZCode config + ANTHROPIC_AUTH_TOKEN – cache entries carry an identity stamp
   probe(): Promise<ProviderResult> {
     return probeInner().catch(
       (e: unknown): ProviderResult =>

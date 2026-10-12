@@ -6,6 +6,8 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProviderModule, ProviderResult } from "../core.ts";
+import { traceEnv, traceInput } from "../lib/input-trace.ts";
+import { usableLiteralSecret } from "../lib/secret.ts";
 
 export const OPENCODE_NOTE = "PAYG – no usage/balance API; inference errors are the only signal";
 
@@ -42,13 +44,18 @@ async function registerSecret(secret: string): Promise<void> {
 
 async function probeInner(): Promise<ProviderResult> {
   const fetchedAt = new Date().toISOString();
+  // Secret firewall: a candidate that is not a plain literal (env/template/
+  // command indirection) is an INVALID credential – present-but-unusable. The
+  // source is skipped like an absent one, the value never sent, never expanded.
   let key = await getSecret("OPENCODE_API_KEY");
+  traceEnv("OPENCODE_API_KEY", key); // value digest only (cache stamp; ttl 0 never caches, tracing is inert)
+  if (key !== undefined && !usableLiteralSecret(key)) key = undefined;
   if (!key) {
+    const authPath = join(homedir(), ".local", "share", "opencode", "auth.json");
+    traceInput(authPath); // identity stats only, BEFORE the read (cache stamp; ttl 0 never caches)
     try {
-      key =
-        extractOpencodeKey(
-          JSON.parse(readFileSync(join(homedir(), ".local", "share", "opencode", "auth.json"), "utf8")),
-        ) ?? undefined;
+      const fromFile = extractOpencodeKey(JSON.parse(readFileSync(authPath, "utf8"))) ?? undefined;
+      if (fromFile !== undefined && usableLiteralSecret(fromFile)) key = fromFile;
     } catch {
       // absent or unreadable – treated as no key
     }
@@ -74,6 +81,7 @@ async function probeInner(): Promise<ProviderResult> {
 const provider: ProviderModule = {
   id: "opencode",
   ttlMs: 0,
+  tracesInputs: true, // inputs traced for uniformity; ttlMs 0 bypasses the cache, so no stamp is ever written
   probe(): Promise<ProviderResult> {
     return probeInner().catch(
       (e: unknown): ProviderResult => ({

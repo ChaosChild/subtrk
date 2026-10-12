@@ -110,6 +110,19 @@ politely, and speaks both human and agent.
 - **Secrets stay put** – reads the credential files your CLIs already maintain
   (read-only), stores its own keys in `~/.subtrk/env` (never global env vars), and
   mechanically redacts every secret from every output. The cache contains no secrets.
+- **Ported ideas credit their source** – a borrowed check or structure names its
+  origin in-file (MIT attribution, e.g. quota-axi); the link between the idea and
+  its upstream lives next to the code that carries it.
+- **Output is add-only** – flags like `--fields`/`--json` may filter, and richer
+  modes add detail, but a field's meaning never changes between modes: demotion
+  happens in the renderer, never in the data.
+- **Absent data stays absent** – a missing window, reset time, or percentage is
+  never invented; if the wire carries `percentUsed`, `percentRemaining` is left
+  out rather than derived.
+- **Expiry is advisory** – a stored `expiresAt` only orders candidates; a
+  credential is retired by the vendor endpoint's rejection, never by a clock.
+- **Accounts don't mix** – identity is the vendor's `accountId`; windows from
+  different accounts are never summed.
 
 ## Install
 

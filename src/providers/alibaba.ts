@@ -170,34 +170,46 @@ function fail(error: ProviderError, fetchedAt: string): ProviderResult {
   return { id: "alibaba", ok: false, stale: false, fetchedAt, error };
 }
 
+// Pure: spawn outcome -> probe failure. toolMissing is checked FIRST: when the
+// bl spawn itself fails (ENOENT on POSIX, cmd.exe's 9009 "not recognized") the
+// shell prints nothing to stderr, so the text sniffing below can never fire and
+// the failure would misreport as subprocess-failed. The flag runBl sets from
+// the spawn error code is the only reliable signal.
+export function mapError(run: BlRun, fetchedAt: string, redact?: (s: string) => string): ProviderResult | null {
+  if (run.ok) return null;
+  if (run.toolMissing) {
+    return fail(
+      { kind: "tool-missing", message: "'bl' not found on PATH", hint: "npm i -g bailian-cli, then subtrk init" },
+      fetchedAt,
+    );
+  }
+  const s = (run.stderr ?? "").toLowerCase();
+  if (s.includes("is not recognized") || s.includes("command not found") || s.includes("not found")) {
+    return fail(
+      { kind: "tool-missing", message: "'bl' not found on PATH", hint: "npm i -g bailian-cli, then subtrk init" },
+      fetchedAt,
+    );
+  }
+  if (s.includes("no console access token") || s.includes("not logged in or has expired")) {
+    return fail(
+      {
+        kind: "no-credentials",
+        message: "bl console session missing or expired",
+        hint: "run subtrk init (bl auth login --console)",
+        remedy: "subtrk auth refresh --provider alibaba",
+      },
+      fetchedAt,
+    );
+  }
+  if (run.timedOut) {
+    return fail({ kind: "timeout", message: `bl timed out after ${BL_TIMEOUT_MS / 1000}s` }, fetchedAt);
+  }
+  return fail({ kind: "subprocess-failed", message: stderrMessage(run.stderr, redact) }, fetchedAt);
+}
+
 async function probeInner(): Promise<ProviderResult> {
   const fetchedAt = new Date().toISOString();
   const redact = await coreRedact();
-  const mapError = (run: BlRun): ProviderResult | null => {
-    if (run.ok) return null;
-    const s = (run.stderr ?? "").toLowerCase();
-    if (s.includes("is not recognized") || s.includes("command not found") || s.includes("not found")) {
-      return fail(
-        { kind: "tool-missing", message: "'bl' not found on PATH", hint: "npm i -g bailian-cli, then subtrk init" },
-        fetchedAt,
-      );
-    }
-    if (s.includes("no console access token") || s.includes("not logged in or has expired")) {
-      return fail(
-        {
-          kind: "no-credentials",
-          message: "bl console session missing or expired",
-          hint: "run subtrk init (bl auth login --console)",
-          remedy: "subtrk auth refresh --provider alibaba",
-        },
-        fetchedAt,
-      );
-    }
-    if (run.timedOut) {
-      return fail({ kind: "timeout", message: `bl timed out after ${BL_TIMEOUT_MS / 1000}s` }, fetchedAt);
-    }
-    return fail({ kind: "subprocess-failed", message: stderrMessage(run.stderr, redact) }, fetchedAt);
-  };
 
   // Secondary calls run in parallel with usage – each bl spawn costs seconds.
   const sub = callArgs(API_SUBSCRIPTION);
@@ -211,7 +223,7 @@ async function probeInner(): Promise<ProviderResult> {
   for (let i = 0; i < 2 && usageRun.ok && parseTokenPlanUsage(extractJson(usageRun.stdout)).length === 0; i++) {
     usageRun = await runBl(usage.literal, usage.args);
   }
-  const usageErr = mapError(usageRun);
+  const usageErr = mapError(usageRun, fetchedAt, redact);
   if (usageErr) return usageErr;
   const windows = parseTokenPlanUsage(extractJson(usageRun.stdout));
 

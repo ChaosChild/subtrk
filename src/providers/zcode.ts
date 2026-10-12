@@ -11,6 +11,8 @@ import { readFileSync } from "node:fs";
 import { homedir, platform, userInfo } from "node:os";
 import { join } from "node:path";
 import type { ProviderError, ProviderModule, ProviderResult, Window } from "../core.ts";
+import { traceEnv, traceInput } from "../lib/input-trace.ts";
+import { usableLiteralSecret } from "../lib/secret.ts";
 import { slugify } from "./google.ts";
 
 const TIMEOUT_MS = 10_000;
@@ -55,13 +57,15 @@ export function decryptZcodeValue(value: string, key: Buffer): string | null {
 }
 
 // Pure: the store object -> its decrypted JWT. null when the key is missing,
-// not a string, or undecryptable.
+// not a string, undecryptable, or not a plain literal (secret firewall: an
+// indirection-shaped plaintext is present-but-unusable too – the probe reports
+// the store as undecryptable, the value is never sent, never expanded).
 export function parseZcodeCredentials(obj: unknown, key: Buffer): { jwt: string } | null {
   if (typeof obj !== "object" || obj === null) return null;
   const raw = (obj as { zcodejwttoken?: unknown }).zcodejwttoken;
   if (typeof raw !== "string") return null;
   const jwt = decryptZcodeValue(raw, key);
-  return jwt ? { jwt } : null;
+  return jwt && usableLiteralSecret(jwt) ? { jwt } : null;
 }
 
 // Pure: telemetry-state.json -> deviceMid; null when absent or not a string
@@ -325,8 +329,10 @@ export interface ZcodeBalanceFailure {
 export async function fetchZcodeBalance(): Promise<ZcodeBalanceResult | ZcodeBalanceFailure> {
   let storeObj: unknown = null;
   let storeUnreadable = false;
+  const storePath = join(homedir(), ".zcode", "v2", "credentials.json");
+  traceInput(storePath); // identity stats only, BEFORE the read (cache stamp)
   try {
-    storeObj = JSON.parse(readFileSync(join(homedir(), ".zcode", "v2", "credentials.json"), "utf8"));
+    storeObj = JSON.parse(readFileSync(storePath, "utf8"));
   } catch {
     storeUnreadable = true;
   }
@@ -346,7 +352,9 @@ export async function fetchZcodeBalance(): Promise<ZcodeBalanceResult | ZcodeBal
   } catch {
     // desktop parity – the fallback template uses "unknown" there too
   }
-  const secret = deriveCredentialSecret(await getSecret("ZCODE_CREDENTIAL_SECRET"), platform(), homedir(), user);
+  const secretEnv = await getSecret("ZCODE_CREDENTIAL_SECRET");
+  traceEnv("ZCODE_CREDENTIAL_SECRET", secretEnv); // value digest only (cache stamp)
+  const secret = deriveCredentialSecret(secretEnv, platform(), homedir(), user);
   const key = createHash("sha256").update(secret).digest();
   const creds = parseZcodeCredentials(storeObj, key);
   if (!creds) {
@@ -363,9 +371,9 @@ export async function fetchZcodeBalance(): Promise<ZcodeBalanceResult | ZcodeBal
 
   let deviceMid = FALLBACK_DEVICE_MID;
   try {
-    deviceMid =
-      readDeviceMid(JSON.parse(readFileSync(join(homedir(), ".zcode", "v2", "telemetry-state.json"), "utf8"))) ??
-      deviceMid;
+    const telemetryPath = join(homedir(), ".zcode", "v2", "telemetry-state.json");
+    traceInput(telemetryPath); // identity stats only, BEFORE the read (cache stamp)
+    deviceMid = readDeviceMid(JSON.parse(readFileSync(telemetryPath, "utf8"))) ?? deviceMid;
   } catch {
     // presence check – the server accepts any value
   }
@@ -434,6 +442,7 @@ async function probeInner(): Promise<ProviderResult> {
 const provider: ProviderModule = {
   id: "zcode",
   ttlMs: 60_000,
+  tracesInputs: true, // probe traces the credential store/telemetry files + ZCODE_CREDENTIAL_SECRET
   probe(): Promise<ProviderResult> {
     return probeInner().catch(
       (e: unknown): ProviderResult =>

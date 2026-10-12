@@ -159,6 +159,40 @@ describe("harvestWindow: claude transcript robustness", () => {
     }
   });
 
+  it("a dir holding ONLY a session's subagents/ transcript is usable – no silent null (regression: the *.jsonl guard skipped session dirs)", async () => {
+    const home = tempHome();
+    const dir = join(home, ".claude", "projects", "C--work-subonly");
+    const sub = join(dir, "sess1", "subagents");
+    mkdirSync(sub, { recursive: true });
+    try {
+      // no top-level *.jsonl at all – the only in-window activity is the sidechain
+      writeFileSync(join(sub, "agent-1.jsonl"), claudeLine(T0 + 60_000, "a1", 100, 0, 10));
+      const res = await harvestWindow({ project: "C:\\work\\subonly", t0: T0, t1: T1 }, { homeDir: home });
+      assert.ok(res, "subagent-only activity must harvest, never return null");
+      assert.equal(res.attribution, "session-scan");
+      assert.deepEqual(res.usage, { in: 100, cr: 0, cw: 0, out: 10, reqs: 1 });
+      assert.deepEqual(res.sessions, ["sess1"]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("a subagents/ transcript untouched during the window still keeps the dir unusable", async () => {
+    const home = tempHome();
+    const dir = join(home, ".claude", "projects", "C--work-substale");
+    const sub = join(dir, "sess1", "subagents");
+    mkdirSync(sub, { recursive: true });
+    try {
+      const stale = join(sub, "agent-1.jsonl");
+      writeFileSync(stale, claudeLine(T0 + 60_000, "a1", 100, 0, 10));
+      utimesSync(stale, new Date(T0 - DAY), new Date(T0 - DAY)); // untouched during the window
+      const res = await harvestWindow({ project: "C:\\work\\substale", t0: T0, t1: T1 }, { homeDir: home });
+      assert.equal(res, null, "descending into session dirs must not drop the mtime gate");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("preserves the 1h cache-write split on bySource and the aggregate", async () => {
     const home = tempHome();
     const dir = join(home, ".claude", "projects", "C--work-split");

@@ -4,6 +4,7 @@
 // the USD-per-1M -> per-token conversion. Pure module – no fs, no clock.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { priceForModel } from "../src/usage.ts";
 import {
   fallbackPriceFor,
   normalizeModelKey,
@@ -49,6 +50,48 @@ test("fallbackPriceFor: unknown models are null – never invented pricing", () 
   assert.equal(fallbackPriceFor("totally-made-up-model"), null);
   assert.equal(fallbackPriceFor("weird-9"), null);
   assert.equal(fallbackPriceFor(""), null);
+});
+
+test("fallbackPriceFor: prototype-chain names never resolve into a truthy non-price (regression)", () => {
+  // Before the own-property check, "constructor"/"toString" resolved through
+  // the prototype chain to functions – truthy, so priceForModel returned a
+  // price object of NaNs instead of an honest null.
+  for (const hostile of [
+    "__proto__",
+    "constructor",
+    "toString",
+    "valueOf",
+    "hasOwnProperty",
+    "isPrototypeOf",
+    "propertyIsEnumerable",
+    "toLocaleString",
+  ]) {
+    assert.equal(fallbackPriceFor(hostile), null, `${hostile} must stay unpriced`);
+  }
+  // spellings that survive normalization unchanged are the dangerous ones
+  assert.equal(fallbackPriceFor("CONSTRUCTOR"), null);
+  assert.equal(fallbackPriceFor("  toString  "), null);
+  assert.equal(fallbackPriceFor("valueOf"), null);
+  // "__proto__" normalizes to "-proto-" – still not a table entry either way
+  assert.equal(fallbackPriceFor("__proto__"), null);
+});
+
+test("priceForModel: hostile names stay null on a pre-refresh store (empty OpenRouter list)", () => {
+  const store = {
+    schemaVersion: 1 as const,
+    hourly: {},
+    daily: {},
+    localHourly: {},
+    localDaily: {},
+    samples: {},
+    state: {},
+    pricing: {}, // never refreshed – the fallback table is the only source
+  };
+  assert.equal(priceForModel(store, "__proto__"), null);
+  assert.equal(priceForModel(store, "constructor"), null);
+  assert.equal(priceForModel(store, "toString"), null);
+  // sanity: the fallback tier still works through the same store
+  assert.equal(priceForModel(store, "glm-5.3")?.source, "fallback");
 });
 
 test("perToken: USD per 1M converts to per token; cr/cw kept only when present", () => {

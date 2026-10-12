@@ -8,6 +8,8 @@ import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProviderError, ProviderModule, ProviderResult, Window } from "../core.ts";
+import { traceInput } from "../lib/input-trace.ts";
+import { usableLiteralSecret } from "../lib/secret.ts";
 
 const TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_CHARS = 1_000_000;
@@ -34,6 +36,9 @@ export type ClaudeAuth = ClaudeAuthOk | ClaudeAuthFail;
 // Pure: given the parsed credentials file and the current time, either hand back the
 // access token (probe keeps it in a local variable only) or the failure it represents.
 // The expired-but-refreshable state is the failure plus `refreshToken`.
+// Secret firewall: a stored token that is not a plain literal (env/template/command
+// indirection) is an INVALID credential – present-but-unusable, never sent, never
+// expanded; the refresh token is attached only when it too is a plain literal.
 export function claudeAuth(fileObj: unknown, nowMs: number): ClaudeAuth {
   const oauth = (fileObj as { claudeAiOauth?: unknown } | null)?.claudeAiOauth;
   if (typeof oauth !== "object" || oauth === null) {
@@ -58,6 +63,16 @@ export function claudeAuth(fileObj: unknown, nowMs: number): ClaudeAuth {
       error: { kind: "no-credentials", message: "claudeAiOauth.accessToken missing", hint: "run claude /login" },
     };
   }
+  if (!usableLiteralSecret(o.accessToken)) {
+    return {
+      ok: false,
+      error: {
+        kind: "parse-failure",
+        message: "claudeAiOauth.accessToken is not a literal secret (indirection) – refusing to use it",
+        hint: "run claude /login",
+      },
+    };
+  }
   if (typeof o.expiresAt !== "number" || !Number.isFinite(o.expiresAt)) {
     return {
       ok: false,
@@ -75,7 +90,11 @@ export function claudeAuth(fileObj: unknown, nowMs: number): ClaudeAuth {
     };
     const rt = o.refreshToken;
     const rte = o.refreshTokenExpiresAt;
-    if (typeof rt === "string" && rt !== "" && (typeof rte !== "number" || !Number.isFinite(rte) || rte > nowMs)) {
+    if (
+      typeof rt === "string" &&
+      usableLiteralSecret(rt) &&
+      (typeof rte !== "number" || !Number.isFinite(rte) || rte > nowMs)
+    ) {
       expired.refreshToken = rt;
     }
     return expired;
@@ -280,6 +299,7 @@ function writeBackCredentials(credPath: string, fileObj: object, fresh: Refreshe
 async function probeInner(): Promise<ProviderResult> {
   const fetchedAt = new Date().toISOString();
   const credPath = join(homedir(), ".claude", ".credentials.json");
+  traceInput(credPath); // identity stats only, BEFORE the read (cache stamp)
   let text: string;
   try {
     text = readFileSync(credPath, "utf8");
@@ -378,6 +398,7 @@ const provider: ProviderModule = {
   id: "claude",
   ttlMs: 300_000,
   probe,
+  tracesInputs: true, // probe traces ~/.claude/.credentials.json – cache entries carry an identity stamp
   refresh: async () => {
     const r = await probe();
     return {

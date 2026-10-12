@@ -12,11 +12,16 @@
 // Both files belong to their owning apps; subtrk never runs an interactive login –
 // on a dead refresh grant it points at the owning tool, which is why this module
 // has no refresh().
+// Deployment pinning: a stored Kimi credential is only ever sent to the pinned
+// first-party hosts below; a local file that declares any other endpoint is
+// refused with a clear error, never followed.
 
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProviderError, ProviderModule, ProviderResult, Window } from "../core.ts";
+import { traceEnv, traceInput } from "../lib/input-trace.ts";
+import { redactSecret, usableLiteralSecret } from "../lib/secret.ts";
 import { windowKindFromSeconds } from "./openai.ts";
 
 const TIMEOUT_MS = 10_000;
@@ -28,6 +33,76 @@ const TOKEN_URL_FALLBACK = "https://auth.kimi.ai/api/oauth/token";
 const SKEW_MS = 60_000;
 const EXPIRED_HINT = "launch the Kimi Code CLI (or Kimi Desktop) once to re-login";
 
+// Deployment host pin: the ONLY hosts a stored Kimi credential may be sent to
+// – exactly the first-party endpoints this provider uses (desktop key -> agent
+// gateway, CLI OAuth login -> api.kimi.com, refreshes -> auth.kimi.com with
+// auth.kimi.ai as the fallback). A tampered local file can therefore never
+// redirect the bearer. Check structure adapted from quota-axi (MIT),
+// src/providers/kimi-code-config.ts.
+const KIMI_ALLOWED_HOSTS: ReadonlySet<string> = new Set([
+  "agent-gw.kimi.com", // desktop API key – coding usage gateway
+  "api.kimi.com", // CLI OAuth usage read
+  "auth.kimi.com", // primary token refresh
+  "auth.kimi.ai", // fallback token refresh
+]);
+
+// Pure: a target is credential-bearing only when it is https on a pinned
+// first-party host (default port). Anything else is refused before the
+// credential leaves the process.
+export function kimiTargetAllowed(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" && u.port === "" && KIMI_ALLOWED_HOSTS.has(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+// Field names a Kimi local file could use to declare an endpoint (matched
+// case-insensitively; snake/camel spellings both covered). subtrk follows no
+// declared base URL – the endpoints above are fixed – so a value in one of
+// these fields can only be a redirection attempt: it is checked, never honored.
+const KIMI_URL_FIELDS: ReadonlySet<string> = new Set([
+  "baseurl",
+  "base_url",
+  "apibase",
+  "api_base",
+  "apiurl",
+  "api_url",
+  "endpoint",
+  "host",
+  "server",
+  "serverurl",
+  "server_url",
+]);
+
+// Pure: scan a credential file (top level, plus keys[0] of the desktop key
+// shape) for a declared base URL/host. Returns the offending declared URL when
+// it does not target a pinned first-party host over https, else null.
+export function kimiForeignBaseHost(fileObj: unknown): string | null {
+  if (typeof fileObj !== "object" || fileObj === null) return null;
+  const scan = (o: Record<string, unknown>): string | null => {
+    for (const [k, v] of Object.entries(o)) {
+      if (typeof v !== "string" || v === "" || !KIMI_URL_FIELDS.has(k.toLowerCase())) continue;
+      try {
+        const u = new URL(v);
+        if (u.protocol === "https:" && u.port === "" && KIMI_ALLOWED_HOSTS.has(u.hostname)) continue;
+        return v;
+      } catch {
+        // not a URL – not an endpoint declaration
+      }
+    }
+    return null;
+  };
+  const top = scan(fileObj as Record<string, unknown>);
+  if (top) return top;
+  const keys = (fileObj as { keys?: unknown }).keys;
+  if (Array.isArray(keys) && keys.length > 0 && typeof keys[0] === "object" && keys[0] !== null) {
+    return scan(keys[0] as Record<string, unknown>);
+  }
+  return null;
+}
+
 // The Kimi Desktop app is a Windows product and its key file lives under the
 // Windows app-data dir – elsewhere only the CLI OAuth source applies.
 export function desktopKeyPath(): string | null {
@@ -37,6 +112,9 @@ export function desktopKeyPath(): string | null {
 
 // Pure: the parsed key file -> keys[0].apiKey, or null (shape unusable – the
 // caller owns the "no credential" error for the missing/unparseable file).
+// Secret firewall: a key that is not a plain literal (env/template/command
+// indirection) is an INVALID credential – this source is skipped and the value
+// is never sent, never expanded.
 export function parseDesktopKeyFile(fileObj: unknown): string | null {
   if (typeof fileObj !== "object" || fileObj === null) return null;
   const keys = (fileObj as { keys?: unknown }).keys;
@@ -44,7 +122,7 @@ export function parseDesktopKeyFile(fileObj: unknown): string | null {
   const first = keys[0];
   if (typeof first !== "object" || first === null) return null;
   const apiKey = (first as { apiKey?: unknown }).apiKey;
-  return typeof apiKey === "string" && apiKey !== "" ? apiKey : null;
+  return typeof apiKey === "string" && apiKey !== "" && usableLiteralSecret(apiKey) ? apiKey : null;
 }
 
 // Pure: "LEVEL_FREE" -> "Kimi Free"; unknown levels keep their title-cased raw
@@ -182,13 +260,19 @@ export interface KimiCliCredentials {
   raw: Record<string, unknown>; // original JSON object, for the refresh write-back
 }
 
-// Pure: ~/.kimi-code/credentials/kimi-code.json shape.
+// Pure: ~/.kimi-code/credentials/kimi-code.json shape. Secret firewall: a
+// token that is not a plain literal (env/template/command indirection) is an
+// INVALID credential – present-but-unusable (access_token degrades the source
+// to unusable, a bad refresh_token is simply omitted), never sent, never
+// expanded.
 export function parseKimiCliCredentials(fileObj: unknown): KimiCliCredentials | null {
   if (typeof fileObj !== "object" || fileObj === null) return null;
   const o = fileObj as Record<string, unknown>;
-  if (typeof o.access_token !== "string" || o.access_token === "") return null;
+  if (typeof o.access_token !== "string" || o.access_token === "" || !usableLiteralSecret(o.access_token)) return null;
   const creds: KimiCliCredentials = { accessToken: o.access_token, raw: o };
-  if (typeof o.refresh_token === "string" && o.refresh_token !== "") creds.refreshToken = o.refresh_token;
+  if (typeof o.refresh_token === "string" && o.refresh_token !== "" && usableLiteralSecret(o.refresh_token)) {
+    creds.refreshToken = o.refresh_token;
+  }
   if (typeof o.expires_at === "number" && Number.isFinite(o.expires_at)) creds.expiresAtSec = o.expires_at;
   return creds;
 }
@@ -324,6 +408,23 @@ async function fetchText(url: string, init: RequestInit): Promise<FetchOutcome> 
   }
 }
 
+// Every credential-bearing request goes through the deployment pin: a target
+// that is not a pinned first-party host is refused client-side (clear error,
+// no fetch) instead of followed, whatever the caller passed in.
+function credFetch(url: string, init: RequestInit): Promise<FetchOutcome> {
+  if (!kimiTargetAllowed(url)) {
+    return Promise.resolve({
+      ok: false,
+      error: {
+        kind: "forbidden",
+        message: `refusing to send the Kimi credential to a non-first-party target (${url})`,
+        hint: "the Kimi endpoints are fixed first-party hosts – no local setting may redirect them",
+      },
+    });
+  }
+  return fetchText(url, init);
+}
+
 // Best-effort: register the loaded secrets with core's redaction layer when it
 // exists; otherwise they simply stay in local variables and never enter a result.
 async function registerSecret(secret: string): Promise<void> {
@@ -341,7 +442,9 @@ async function registerSecret(secret: string): Promise<void> {
 async function envClientValue(name: string): Promise<string | undefined> {
   try {
     const core = (await import("../core.ts")) as { getSecret?: (n: string) => string | undefined };
-    return core.getSecret?.(name);
+    const value = core.getSecret?.(name);
+    traceEnv(name, value); // value digest only (cache stamp)
+    return value;
   } catch {
     return undefined;
   }
@@ -354,6 +457,7 @@ function fail(error: ProviderError, fetchedAt: string): ProviderResult {
 // Read + parse a JSON file; null when absent or not JSON – the caller owns that
 // outcome (the parsers never touch the filesystem).
 function readJsonFile(path: string): unknown {
+  traceInput(path); // identity stats only, BEFORE the read (cache stamp)
   try {
     return JSON.parse(readFileSync(path, "utf8"));
   } catch {
@@ -406,13 +510,13 @@ async function refreshCliToken(
     };
   }
   const form = buildKimiRefreshForm(refreshToken, clientId);
-  let out = await fetchText(TOKEN_URL, {
+  let out = await credFetch(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: form,
   });
   if (!out.ok && shouldTryFallbackTokenHost(out.status, errorCodeFromBody(out.text))) {
-    out = await fetchText(TOKEN_URL_FALLBACK, {
+    out = await credFetch(TOKEN_URL_FALLBACK, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: form,
@@ -438,14 +542,33 @@ function writeBackCliCredentials(path: string, merged: Record<string, unknown>):
   }
 }
 
-// The CLI OAuth path: read the credential file, refresh the 15-minute access
-// token when stale (writing the rotated bundle back, best-effort), then GET the
-// coding usage endpoint. Null when the file is absent/unparseable – the caller
-// owns that outcome.
+// The CLI OAuth path: read the credential file, refuse a file that declares a
+// non-first-party endpoint, refresh the 15-minute access token when stale
+// (writing the rotated bundle back, best-effort), then GET the coding usage
+// endpoint. Null when the file is absent/unparseable – the caller owns that
+// outcome.
 async function probeCliPath(fetchedAt: string): Promise<ProviderResult | null> {
   const credPath = join(homedir(), ".kimi-code", "credentials", "kimi-code.json");
-  const creds = parseKimiCliCredentials(readJsonFile(credPath));
+  const fileObj = readJsonFile(credPath);
+  const creds = parseKimiCliCredentials(fileObj);
   if (!creds) return null;
+  // Deployment pin: a declared non-first-party endpoint is refused outright –
+  // never followed. The declared URL is file content, so the credential values
+  // are redacted from it before it reaches a message.
+  const foreign = kimiForeignBaseHost(fileObj);
+  if (foreign) {
+    return fail(
+      {
+        kind: "forbidden",
+        message: redactSecret(
+          `kimi-code.json declares a non-first-party endpoint (${foreign}) – refusing to use this credential`,
+          [creds.accessToken, ...(creds.refreshToken ? [creds.refreshToken] : [])],
+        ),
+        hint: "remove the endpoint override from ~/.kimi-code/credentials/kimi-code.json or re-login with the Kimi Code CLI",
+      },
+      fetchedAt,
+    );
+  }
   await registerSecret(creds.accessToken);
   if (creds.refreshToken) await registerSecret(creds.refreshToken);
 
@@ -470,7 +593,7 @@ async function probeCliPath(fetchedAt: string): Promise<ProviderResult | null> {
     writeBackCliCredentials(credPath, mergeKimiCredentials(creds.raw, refreshed.token));
   }
 
-  const out = await fetchText(API_USAGE_URL, { headers: usageHeaders(token) });
+  const out = await credFetch(API_USAGE_URL, { headers: usageHeaders(token) });
   if (!out.ok) {
     if (out.status === 401 || out.status === 403) {
       return fail(
@@ -494,12 +617,31 @@ async function probeCliPath(fetchedAt: string): Promise<ProviderResult | null> {
 async function probeInner(): Promise<ProviderResult> {
   const fetchedAt = new Date().toISOString();
 
-  // Source 1: the Kimi Desktop app's scoped API key.
+  // Source 1: the Kimi Desktop app's scoped API key. A file that declares a
+  // non-first-party endpoint is refused outright (not followed, and the CLI
+  // source is not consulted either – the poisoned store must not hide behind a
+  // fallback); an indirection-shaped key is an INVALID credential – the source
+  // is skipped, the value never sent.
   const keyPath = desktopKeyPath();
-  const desktopKey = keyPath ? parseDesktopKeyFile(readJsonFile(keyPath)) : null;
+  const keyFileObj = keyPath ? readJsonFile(keyPath) : null;
+  const desktopKey = keyFileObj ? parseDesktopKeyFile(keyFileObj) : null;
+  const desktopForeign = keyFileObj ? kimiForeignBaseHost(keyFileObj) : null;
+  if (desktopForeign) {
+    return fail(
+      {
+        kind: "forbidden",
+        message: redactSecret(
+          `kimi-code-key.json declares a non-first-party endpoint (${desktopForeign}) – refusing to use it`,
+          desktopKey ? [desktopKey] : [],
+        ),
+        hint: "remove the endpoint override from the Kimi Desktop key file or relaunch Kimi Desktop",
+      },
+      fetchedAt,
+    );
+  }
   if (desktopKey) {
     void registerSecret(desktopKey);
-    const out = await fetchText(AGENT_GW_USAGE_URL, { headers: usageHeaders(desktopKey) });
+    const out = await credFetch(AGENT_GW_USAGE_URL, { headers: usageHeaders(desktopKey) });
     if (!out.ok && (out.status === 401 || out.status === 403)) {
       // Auth-rejected: try the CLI OAuth source once before erroring.
       const cli = await probeCliPath(fetchedAt);
@@ -548,6 +690,7 @@ async function probeInner(): Promise<ProviderResult> {
 const provider: ProviderModule = {
   id: "kimi",
   ttlMs: 300_000,
+  tracesInputs: true, // probe traces the desktop/CLI credential files + KIMI_CLIENT_ID
   probe(): Promise<ProviderResult> {
     return probeInner().catch(
       (e: unknown): ProviderResult =>

@@ -229,8 +229,11 @@ async function dirUsable(dir: string, w: HarvestWindow, pin: string | null): Pro
   try {
     const entries = await readdir(dir, { withFileTypes: true });
     for (const e of entries) {
-      if (!e.name.endsWith(".jsonl")) continue;
       if (e.isFile()) {
+        // Session dirs are named by session id (never *.jsonl), so the name
+        // filter must apply to files only – else the subagents recursion
+        // below is dead code and a subagent-only window harvests to null.
+        if (!e.name.endsWith(".jsonl")) continue;
         const st = await stat(join(dir, e.name)).catch(() => null);
         if (st && st.mtimeMs >= w.t0) return true;
         continue;

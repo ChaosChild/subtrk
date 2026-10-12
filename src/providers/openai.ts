@@ -8,6 +8,8 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProviderError, ProviderModule, ProviderResult, Window } from "../core.ts";
+import { traceInput } from "../lib/input-trace.ts";
+import { usableLiteralSecret } from "../lib/secret.ts";
 
 const TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_CHARS = 1_000_000;
@@ -46,12 +48,24 @@ function chatgptAccountIdFromIdToken(idToken: unknown): string | null {
 
 // Pure: the parsed auth.json -> the credential, the distinct API-key-only
 // failure, or null (shape unusable – the caller owns the "no Codex credentials"
-// error for the missing/unparseable file).
+// error for the missing/unparseable file). Secret firewall: a stored token that
+// is not a plain literal (env/template/command indirection) is an INVALID
+// credential – present-but-unusable, never sent, never expanded.
 export function parseOpenaiAuth(fileObj: unknown): OpenaiAuth | null {
   if (typeof fileObj !== "object" || fileObj === null) return null;
   const o = fileObj as { auth_mode?: unknown; OPENAI_API_KEY?: unknown; tokens?: unknown };
   const tokens = typeof o.tokens === "object" && o.tokens !== null ? (o.tokens as Record<string, unknown>) : null;
   if (o.auth_mode === "chatgpt" && typeof tokens?.access_token === "string" && tokens.access_token !== "") {
+    if (!usableLiteralSecret(tokens.access_token)) {
+      return {
+        ok: false,
+        error: {
+          kind: "parse-failure",
+          message: "tokens.access_token is not a literal secret (indirection) – refusing to use it",
+          hint: "run codex login",
+        },
+      };
+    }
     const accountId =
       typeof tokens.account_id === "string" && tokens.account_id !== ""
         ? tokens.account_id
@@ -226,8 +240,10 @@ function fail(error: ProviderError, fetchedAt: string): ProviderResult {
 // Read + parse ~/.codex/auth.json; null when the file is absent or not JSON –
 // the caller owns that error (the parser never touches the filesystem).
 function readAuthFile(): { fileObj: unknown } | null {
+  const authPath = join(homedir(), ".codex", "auth.json");
+  traceInput(authPath); // identity stats only, BEFORE the read (cache stamp)
   try {
-    return { fileObj: JSON.parse(readFileSync(join(homedir(), ".codex", "auth.json"), "utf8")) };
+    return { fileObj: JSON.parse(readFileSync(authPath, "utf8")) };
   } catch {
     return null;
   }
@@ -290,6 +306,7 @@ async function probeInner(): Promise<ProviderResult> {
 const provider: ProviderModule = {
   id: "openai",
   ttlMs: 60_000,
+  tracesInputs: true, // probe traces ~/.codex/auth.json – cache entries carry an identity stamp
   probe(): Promise<ProviderResult> {
     return probeInner().catch(
       (e: unknown): ProviderResult =>

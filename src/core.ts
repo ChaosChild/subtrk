@@ -16,6 +16,8 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { type FetchTurn, fetchLockPath, takeFetchTurn, withLockSync } from "./lib/fetch-lock.ts";
+import { envValueDigest, fileState, stampDigest, type TracedInputs, withInputTrace } from "./lib/input-trace.ts";
 
 // ---------- shared contract (docs/spec.md §ProviderResult) ----------
 
@@ -94,6 +96,11 @@ export interface ProviderModule {
   ttlMs: number;
   probe(): Promise<ProviderResult>; // NEVER throws
   refresh?: () => Promise<RefreshResult>; // interactive re-auth (browser/login flow)
+  // W1.3: the probe traces its credential inputs (src/lib/input-trace.ts) and
+  // this provider's cache entries carry an identity stamp; a stampless legacy
+  // entry is re-probed once and upgraded. Test stubs omit this and keep the
+  // pre-stamp trust model (TTL only).
+  tracesInputs?: boolean;
 }
 
 export interface StatusOutput {
@@ -138,12 +145,12 @@ export const FRESH_FLOOR_IDS: readonly ProviderId[] = ["claude"];
 const SCHEMA_VERSION = 1;
 const LOCK_MAX_AGE_MS = 60_000;
 const STALE_ERROR_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-const CONTENDER_WAIT_MS = 750;
 
 export interface FetchOpts {
   cachePath?: string;
   fresh?: boolean; // bypass cache TTL reads once
-  contenderWaitMs?: number; // injectable for tests; default 750
+  contenderWaitMs?: number; // injectable for tests; legacy alias for fetchWaitMs
+  fetchWaitMs?: number; // per-provider fetch-lock wait budget; injectable for tests; default 30s
   probeTimeoutMs?: number; // injectable for tests; default PROBE_TIMEOUT_MS
   now?: number; // injectable clock for cache age math
 }
@@ -175,10 +182,6 @@ export class TimeoutError extends Error {
 
 export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ---------- config ----------
@@ -380,9 +383,42 @@ export function getSecret(name: string, envPath: string = join(SUBTRK_DIR, "env"
 
 // ---------- cache (spec §Cache) ----------
 
+// W1.3 identity stamp stored alongside a cache entry (additive field, schema
+// stays 1): the traced file paths and env NAMES (never values) plus the digest
+// that pins the entry to the credentials it was probed with.
+export interface CacheStamp {
+  paths: string[];
+  envNames: string[];
+  digest: string;
+}
+
 interface CacheHit {
   data: ProviderResult;
   fetchedAt: number; // epoch ms
+  stamp?: CacheStamp;
+}
+
+// A stamped entry stays reusable only while every traced input is unchanged:
+// each recorded file's identity stats and each traced env var's resolved value
+// digest must recompute to the recorded digest. Cheap – stat calls and hashes
+// only; secret values are never stored in, or compared against, the file.
+function stampMatches(id: string, stamp: CacheStamp | undefined): boolean {
+  if (!stamp) return false;
+  const states = stamp.paths.map(fileState);
+  const pairs = stamp.envNames.map((n) => [n, envValueDigest(getSecret(n))] as [string, string]);
+  return stampDigest(id, states, pairs) === stamp.digest;
+}
+
+function parseCacheStamp(raw: unknown): CacheStamp | undefined {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const r = raw as { paths?: unknown; envNames?: unknown; digest?: unknown };
+  if (typeof r.digest !== "string" || r.digest === "") return undefined;
+  const strings = (v: unknown): string[] | undefined =>
+    v === undefined ? [] : Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : undefined;
+  const paths = strings(r.paths);
+  const envNames = strings(r.envNames);
+  if (!paths || !envNames) return undefined;
+  return { paths, envNames, digest: r.digest };
 }
 
 interface LockInfo {
@@ -417,7 +453,7 @@ export function readCacheEntry(cachePath: string, id: string): CacheHit | null {
     }
     return null; // schema mismatch – discard the file
   }
-  const entry = file[id] as { data?: unknown; fetchedAt?: unknown } | undefined;
+  const entry = file[id] as { data?: unknown; fetchedAt?: unknown; stamp?: unknown } | undefined;
   if (
     !entry ||
     typeof entry !== "object" ||
@@ -427,67 +463,81 @@ export function readCacheEntry(cachePath: string, id: string): CacheHit | null {
   ) {
     return null;
   }
-  return { data: entry.data as ProviderResult, fetchedAt: entry.fetchedAt };
+  const stamp = parseCacheStamp(entry.stamp);
+  return { data: entry.data as ProviderResult, fetchedAt: entry.fetchedAt, ...(stamp ? { stamp } : {}) };
 }
 
-// Temp file + rename, up to 4 retries with 25–100ms backoff, then silent
-// give-up – a lost write costs one future re-probe, it is never an error.
+// Temp file + rename under a short write lock (W1.2: concurrent processes'
+// read-modify-writes merge instead of clobbering each other's entries), up to
+// 4 retries with 25–100ms backoff, then silent give-up – a lost write costs
+// one future re-probe, it is never an error.
 export async function writeCacheEntry(
   cachePath: string,
   id: string,
   data: ProviderResult,
   ttlMs: number,
+  stamp?: CacheStamp,
 ): Promise<void> {
   const backoffs = [25, 50, 75, 100];
   try {
-    let file: Record<string, unknown> = {};
-    try {
-      const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as Record<string, unknown>;
-      if (parsed && typeof parsed === "object" && parsed.schemaVersion === SCHEMA_VERSION) file = parsed;
-    } catch {
-      /* absent or corrupt – start a fresh file */
-    }
-    file[id] = { data, fetchedAt: Date.parse(data.fetchedAt) || Date.now(), ttlMs };
-    const payload = JSON.stringify({ ...file, schemaVersion: SCHEMA_VERSION });
-    const tmp = `${cachePath}.${process.pid}.tmp`;
-    for (let attempt = 0; ; attempt++) {
+    const record: Record<string, unknown> = { data, fetchedAt: Date.parse(data.fetchedAt) || Date.now(), ttlMs };
+    if (stamp) record.stamp = stamp;
+    withLockSync(`${cachePath}.write.lock`, () => {
+      let file: Record<string, unknown> = {};
       try {
-        mkdirSync(dirname(cachePath), { recursive: true });
-        writeFileSync(tmp, payload);
-        renameSync(tmp, cachePath);
-        return;
+        const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as Record<string, unknown>;
+        if (parsed && typeof parsed === "object" && parsed.schemaVersion === SCHEMA_VERSION) file = parsed;
       } catch {
-        if (attempt >= backoffs.length) return;
-        await sleep(backoffs[attempt]);
+        /* absent or corrupt – start a fresh file */
       }
-    }
+      file[id] = record;
+      const payload = JSON.stringify({ ...file, schemaVersion: SCHEMA_VERSION });
+      const tmp = `${cachePath}.${process.pid}.tmp`;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          mkdirSync(dirname(cachePath), { recursive: true });
+          writeFileSync(tmp, payload);
+          renameSync(tmp, cachePath);
+          return;
+        } catch {
+          if (attempt >= backoffs.length) return;
+          try {
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, backoffs[attempt]);
+          } catch {
+            /* not allowed on this thread – retry immediately */
+          }
+        }
+      }
+    });
   } catch {
     /* silent */
   }
 }
 
 // Best-effort removal of one provider's cache entry (after an interactive
-// refresh): same temp+rename discipline and silent give-up as writeCacheEntry –
-// a lost delete costs one stale read, never an error.
+// refresh): same write-lock + temp+rename discipline as writeCacheEntry and
+// silent give-up – a lost delete costs one stale read, never an error.
 export function removeCachedProvider(subtrkDir: string, id: string): void {
   const cachePath = join(subtrkDir, "cache.json");
   try {
-    const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as Record<string, unknown>;
-    if (!parsed || typeof parsed !== "object" || parsed.schemaVersion !== SCHEMA_VERSION) return;
-    if (!(id in parsed)) return;
-    delete parsed[id];
-    const payload = JSON.stringify({ ...parsed, schemaVersion: SCHEMA_VERSION });
-    const tmp = `${cachePath}.${process.pid}.tmp`;
-    try {
-      writeFileSync(tmp, payload);
-      renameSync(tmp, cachePath);
-    } catch {
+    withLockSync(`${cachePath}.write.lock`, () => {
+      const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as Record<string, unknown>;
+      if (!parsed || typeof parsed !== "object" || parsed.schemaVersion !== SCHEMA_VERSION) return;
+      if (!(id in parsed)) return;
+      delete parsed[id];
+      const payload = JSON.stringify({ ...parsed, schemaVersion: SCHEMA_VERSION });
+      const tmp = `${cachePath}.${process.pid}.tmp`;
       try {
-        rmSync(tmp, { force: true });
+        writeFileSync(tmp, payload);
+        renameSync(tmp, cachePath);
       } catch {
-        /* best effort */
+        try {
+          rmSync(tmp, { force: true });
+        } catch {
+          /* best effort */
+        }
       }
-    }
+    });
   } catch {
     /* absent or corrupt – nothing to remove */
   }
@@ -585,9 +635,17 @@ async function finishProbe(
   entry: CacheHit | null,
   cachePath: string,
   now: number,
+  inputs?: TracedInputs,
 ): Promise<ProviderResult> {
   if (result.ok) {
-    await writeCacheEntry(cachePath, p.id, result, p.ttlMs);
+    const stamp: CacheStamp | undefined = inputs
+      ? {
+          paths: inputs.paths,
+          envNames: inputs.envNames,
+          digest: stampDigest(p.id, inputs.fileStates, inputs.envPairs),
+        }
+      : undefined;
+    await writeCacheEntry(cachePath, p.id, result, p.ttlMs, stamp);
     return result;
   }
   // Stale-on-error: serve cached data < 24h old with stale:true AND the error.
@@ -603,9 +661,14 @@ export async function fetchProvider(p: ProviderModule, opts: FetchOpts = {}): Pr
   const cachePath = opts.cachePath ?? join(SUBTRK_DIR, "cache.json");
   const lockPath = `${cachePath}.lock`;
   const now = opts.now ?? Date.now();
+  const startedAt = Date.now();
+  // W1.3: providers that trace their inputs only reuse stamped entries whose
+  // inputs still match; a stampless legacy entry re-probes once and upgrades.
+  const stampGate = p.tracesInputs === true;
   const entry = readCacheEntry(cachePath, p.id);
+  const entryUsable = entry !== null && (!stampGate || stampMatches(p.id, entry.stamp));
   let held = false;
-  if (entry && !opts.fresh) {
+  if (entry && entryUsable && !opts.fresh) {
     const age = now - entry.fetchedAt;
     if (age < p.ttlMs) return { ...entry.data, stale: false };
     if (age < 2 * p.ttlMs) {
@@ -615,21 +678,38 @@ export async function fetchProvider(p: ProviderModule, opts: FetchOpts = {}): Pr
     }
   }
   if (!held) held = acquireLock(lockPath);
+  let turn: FetchTurn<ProviderResult> | null = null;
   try {
-    if (!held) {
-      // Contender: lock held by a live process. Wait ~750ms, re-check the
-      // cache once, then probe anyway – one bounded duplicate probe.
-      await sleep(opts.contenderWaitMs ?? CONTENDER_WAIT_MS);
-      const again = readCacheEntry(cachePath, p.id);
-      if (again && !opts.fresh && Date.now() - again.fetchedAt < p.ttlMs) {
-        return { ...again.data, stale: false };
-      }
-      const probed = await runProbe(p, opts);
-      return await finishProbe(p, probed, entry, cachePath, now);
-    }
-    const probed = await runProbe(p, opts);
-    return await finishProbe(p, probed, entry, cachePath, now);
+    // W1.2 per-provider single-flight: while another process probes this
+    // provider, poll the cache for its write (100ms cadence, bounded wait)
+    // instead of probing too. Timeout falls through to a probe – one bounded
+    // duplicate, never a deadlock. Under --fresh only a write that landed
+    // after this call started can answer; the leader itself still probes.
+    turn = await takeFetchTurn(
+      fetchLockPath(dirname(cachePath), p.id),
+      () => {
+        const again = readCacheEntry(cachePath, p.id);
+        if (!again || (stampGate && !stampMatches(p.id, again.stamp))) return undefined;
+        const freshWrite = opts.fresh === true && again.fetchedAt >= startedAt;
+        const withinTtl = opts.fresh !== true && Date.now() - again.fetchedAt < p.ttlMs;
+        return freshWrite || withinTtl ? ({ ...again.data, stale: false } as ProviderResult) : undefined;
+      },
+      { waitMs: opts.fetchWaitMs ?? opts.contenderWaitMs },
+    );
+    if (turn.kind === "answered") return turn.value;
+    // W1.3: trace the probe's credential inputs so the cache write is stamped
+    // with exactly the files/env the result was derived from.
+    const traced = await withInputTrace(() => runProbe(p, opts));
+    return await finishProbe(
+      p,
+      traced.value,
+      entryUsable ? entry : null,
+      cachePath,
+      now,
+      stampGate ? traced.inputs : undefined,
+    );
   } finally {
+    if (turn?.kind === "leader") turn.lock.release(); // released even on a failed probe
     if (held) releaseLock(lockPath);
   }
 }
