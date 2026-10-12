@@ -684,8 +684,13 @@ async function finishProbe(
     return result;
   }
   // Stale-on-error: serve cached data < 24h old with stale:true AND the error.
+  // The CURRENT probe's note wins: `note: result.note` carries a note the live
+  // probe attached (e.g. claude's write-back-failed warning – dropping it made
+  // the common stale+error path silent about a spent refresh token), and when
+  // the live probe has none, undefined overrides the spread's stale note so a
+  // previous entry's note never masquerades as current.
   if (entry && now - entry.fetchedAt < STALE_ERROR_MAX_AGE_MS) {
-    return { ...entry.data, ok: false, stale: true, error: result.error };
+    return { ...entry.data, ok: false, stale: true, error: result.error, note: result.note };
   }
   return result;
 }

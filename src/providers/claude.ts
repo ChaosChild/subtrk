@@ -25,11 +25,31 @@
 import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ProviderError, ProviderModule, ProviderResult, Window } from "../core.ts";
+import {
+  PROBE_TIMEOUT_MS,
+  type ProviderError,
+  type ProviderModule,
+  type ProviderResult,
+  type Window,
+} from "../core.ts";
 import { traceEnv, traceInput } from "../lib/input-trace.ts";
 import { usableLiteralSecret } from "../lib/secret.ts";
 
 const TIMEOUT_MS = 10_000;
+// core budgets each probe PROBE_TIMEOUT_MS in total (src/core.ts runProbe).
+// The rotation exchange may legitimately eat a big slice of that, so the usage
+// read is deadline-aware: its timeout shrinks to what remains of the probe
+// budget minus this margin (result assembly, timer slop), and when nothing is
+// left the read is SKIPPED outright – surfacing the rotated-token result (with
+// its write-back note) beats letting core time the whole probe out and
+// discard both.
+const USAGE_READ_MARGIN_MS = 250;
+
+// Remaining budget for the usage read, measured from the probe's start. Pure
+// (clock injected) so tests can pin the boundary: <= 0 means skip the read.
+export function usageReadTimeoutMs(startedAt: number, now: number = Date.now()): number {
+  return PROBE_TIMEOUT_MS - (now - startedAt) - USAGE_READ_MARGIN_MS;
+}
 const MAX_RESPONSE_CHARS = 1_000_000;
 const SKEW_MS = 60_000;
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
@@ -183,9 +203,9 @@ function retryAfterMs(v: string | null): number | undefined {
   return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
 }
 
-async function fetchText(url: string, init: RequestInit): Promise<FetchOutcome> {
+async function fetchText(url: string, init: RequestInit, timeoutMs: number = TIMEOUT_MS): Promise<FetchOutcome> {
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
     const res = await fetch(url, { ...init, signal: ac.signal });
     const len = Number(res.headers.get("content-length") ?? "0");
@@ -219,7 +239,10 @@ async function fetchText(url: string, init: RequestInit): Promise<FetchOutcome> 
     return { ok: true, status: res.status, text };
   } catch (e) {
     if (e instanceof Error && e.name === "AbortError") {
-      return { ok: false, error: { kind: "timeout", message: `request timed out after ${TIMEOUT_MS / 1000}s` } };
+      return {
+        ok: false,
+        error: { kind: "timeout", message: `request timed out after ${Math.round(timeoutMs / 1000)}s` },
+      };
     }
     return {
       ok: false,
@@ -358,15 +381,19 @@ function writeBackCredentials(credPath: string, fileObj: object, fresh: Refreshe
   return WRITE_BACK_FAILED_NOTE;
 }
 
-function usageRequest(token: string): Promise<FetchOutcome> {
-  return fetchText(USAGE_URL, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "anthropic-beta": "oauth-2025-04-20",
-      "anthropic-version": "2023-06-01",
-      "User-Agent": "claude-code/2.1.11",
+function usageRequest(token: string, timeoutMs: number = TIMEOUT_MS): Promise<FetchOutcome> {
+  return fetchText(
+    USAGE_URL,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "anthropic-beta": "oauth-2025-04-20",
+        "anthropic-version": "2023-06-01",
+        "User-Agent": "claude-code/2.1.11",
+      },
     },
-  });
+    timeoutMs,
+  );
 }
 
 // Shared tail of both lanes: parse the usage body into the ok result.
@@ -390,8 +417,19 @@ function usageResult(text: string, fetchedAt: string): ProviderResult {
   };
 }
 
+// The usage read runs on whatever budget the probe has left (see
+// usageReadTimeoutMs): below the budget it is skipped and the caller returns
+// what it already holds rather than waiting for core's whole-probe timeout.
+function usageBudgetExhaustedError(): ProviderError {
+  return {
+    kind: "timeout",
+    message: "usage read skipped: probe budget exhausted before the usage read",
+  };
+}
+
 async function probeInner(): Promise<ProviderResult> {
-  const fetchedAt = new Date().toISOString();
+  const startedAt = Date.now();
+  const fetchedAt = new Date(startedAt).toISOString();
   const credPath = await credentialsPath(); // traces CLAUDE_CONFIG_DIR (identity stamp)
 
   // Lane 1 – CLAUDE_CODE_OAUTH_TOKEN, Claude Code's own precedence: env before
@@ -413,7 +451,9 @@ async function probeInner(): Promise<ProviderResult> {
     void registerSecret(envToken);
     // Env tokens have no refresh token: this lane never rotates and never
     // persists – an expired response is terminal advice here, not a trigger.
-    const out = await usageRequest(envToken);
+    const envReadBudget = usageReadTimeoutMs(startedAt);
+    if (envReadBudget <= 0) return fail(usageBudgetExhaustedError(), fetchedAt);
+    const out = await usageRequest(envToken, Math.min(TIMEOUT_MS, envReadBudget));
     if (!out.ok) {
       if (out.status === 401) {
         return fail(
@@ -474,7 +514,15 @@ async function probeInner(): Promise<ProviderResult> {
     return fail(auth.error, fetchedAt);
   }
 
-  const out = await usageRequest(accessToken);
+  // Deadline-aware read (rotation lane): the exchange above may have consumed
+  // most of core's whole-probe budget, so shrink the read's timeout to what
+  // remains; with nothing left, skip it and return the rotated result with its
+  // write-back note instead of letting core time the probe out and lose both.
+  const readBudget = usageReadTimeoutMs(startedAt);
+  if (readBudget <= 0) {
+    return withNote(fail(usageBudgetExhaustedError(), fetchedAt), note);
+  }
+  const out = await usageRequest(accessToken, Math.min(TIMEOUT_MS, readBudget));
   if (!out.ok) {
     if (out.status === 401) {
       return withNote(

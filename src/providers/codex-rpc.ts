@@ -20,13 +20,18 @@ const WIN_DEFAULT_CANDIDATES: readonly string[] = ["codex.exe", "codex"];
 // The DEFAULT binary resolves against the PATH DIRECTORIES ONLY, never the
 // current directory: on Windows libuv's spawn search checks the CWD before
 // PATH, so a bare "codex" would let a planted codex.exe in an untrusted CWD
-// execute when the fallback triggers. Not on PATH -> the fallback is
-// unavailable, the same clean degrade as a missing binary.
+// execute when the fallback triggers. RELATIVE PATH entries ("." or "bin")
+// resolve against the CWD too – the same vector – so they are skipped
+// outright; a PATH holding only relative entries means unavailable. Not on
+// PATH -> the fallback is unavailable, the same clean degrade as a missing
+// binary.
 function resolveCodexFromPath(
   env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
 ): { file: string; args: string[] } | null {
-  const dirs = (env.PATH ?? env.Path ?? "").split(platform === "win32" ? ";" : ":").filter((d) => d.trim() !== "");
+  const dirs = (env.PATH ?? env.Path ?? "")
+    .split(platform === "win32" ? ";" : ":")
+    .filter((d) => d.trim() !== "" && isAbsolute(d));
   const names = platform === "win32" ? WIN_DEFAULT_CANDIDATES : (["codex"] as const);
   for (const dir of dirs) {
     for (const name of names) {

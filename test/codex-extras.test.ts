@@ -240,14 +240,26 @@ test("resolveCodexCommand: default binary resolves from PATH directories only, n
     mkdirSync(shimOnly);
     writeFileSync(join(shimOnly, "codex.cmd"), "@echo shim");
     assert.equal(resolveCodexCommand({ PATH: shimOnly, Path: shimOnly }, "/node", "win32"), null);
-    // POSIX discipline: the extensionless `codex` file is the candidate.
+    // RELATIVE PATH entries resolve against the CWD – the same planted-CWD
+    // vector the PATH-only scan exists to close – so they are skipped
+    // outright. This PATH entry holds a real codex relative to the CWD and
+    // must still come back unavailable; a PATH of only relative entries is
+    // likewise unavailable.
     const relDir = "codex-posix";
     mkdirSync(relDir);
     writeFileSync(join(relDir, "codex"), "#!/bin/sh\necho hi\n");
-    assert.deepEqual(resolveCodexCommand({ PATH: relDir }, "/node", "linux"), {
-      file: join(relDir, "codex"),
-      args: [...CODEX_ARGS],
-    });
+    assert.equal(resolveCodexCommand({ PATH: relDir }, "/node", "linux"), null);
+    assert.equal(resolveCodexCommand({ PATH: ".:bin", Path: ".:bin" }, "/node", "linux"), null);
+    assert.equal(resolveCodexCommand({ PATH: ".;bin", Path: ".;bin" }, "/node", "win32"), null);
+    // Skipping is per-entry: relative entries around an absolute one do not
+    // break its resolution.
+    assert.deepEqual(
+      resolveCodexCommand({ PATH: `${planted};relative-dir`, Path: `${planted};relative-dir` }, "/node", "win32"),
+      {
+        file: join(planted, "codex.exe"),
+        args: [...CODEX_ARGS],
+      },
+    );
   } finally {
     process.chdir(savedCwd);
     rmSync(base, { recursive: true, force: true });
