@@ -1,14 +1,32 @@
 // claude – Claude Pro personal subscription via the OAuth usage endpoint.
-// Credential: ~/.claude/.credentials.json. Claude Code only refreshes the token
-// while it runs, so when the access token is expired but the refresh token is
-// still live, subtrk refreshes it against Claude Code's public OAuth client and
-// writes the rotated pair back best-effort.
+//
+// Credential doctrine (read before touching the auth paths):
+//  - Rotation-on-use. Claude Code's OAuth refresh tokens are SINGLE-USE: every
+//    successful token exchange – ours or Claude Code's own – spends the old
+//    refresh token and mints a rotated pair; the previous pair is dead the
+//    moment the exchange returns.
+//  - Shared store. subtrk's self-refresh writes the rotated pair back to the
+//    SAME credentials store Claude Code reads (~/.claude/.credentials.json, or
+//    $CLAUDE_CONFIG_DIR/.credentials.json when set). A concurrent refresh by
+//    Claude Code can make subtrk's exchange fail benignly (its grant was
+//    already spent) – that degrades to the plain expired-token advice. The
+//    write-back itself is a blind last-writer merge off the file as subtrk
+//    read it, so it CAN clobber a store Claude Code refreshed in the
+//    meantime; a fresher-state guard would be lock machinery and is
+//    deliberately out of scope here.
+//  - Advice first. Doing nothing is the zero-risk alternative: the
+//    expired-token hint (EXPIRED_HINT) tells the operator to start Claude Code
+//    so it refreshes on its own – that path never touches the store from this
+//    side.
+//  - Env lane. CLAUDE_CODE_OAUTH_TOKEN (Claude Code's own precedence: env
+//    before the file) is used for the usage read only – never refreshed,
+//    never persisted, never logged.
 
 import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProviderError, ProviderModule, ProviderResult, Window } from "../core.ts";
-import { traceInput } from "../lib/input-trace.ts";
+import { traceEnv, traceInput } from "../lib/input-trace.ts";
 import { usableLiteralSecret } from "../lib/secret.ts";
 
 const TIMEOUT_MS = 10_000;
@@ -223,6 +241,31 @@ async function registerSecret(secret: string): Promise<void> {
   }
 }
 
+// Resolve a credential env var via core's getSecret (process.env first, then
+// ~/.subtrk/env) and trace the resolved value for the cache stamp – one-way
+// digest only, the value itself never leaves this lane. getSecret already
+// registers non-empty values with the redaction layer; the core-less fallback
+// leaves the value in a local variable.
+async function tracedEnv(name: string): Promise<string | undefined> {
+  let value: string | undefined;
+  try {
+    const core = (await import("../core.ts")) as { getSecret?: (n: string) => string | undefined };
+    value = core.getSecret?.(name);
+  } catch {
+    value = process.env[name];
+  }
+  traceEnv(name, value); // value digest only (cache stamp)
+  return value;
+}
+
+// The credential store: $CLAUDE_CONFIG_DIR when set (traced – it selects which
+// store is consulted), else ~/.claude. Keeps self-refresh from rotating a
+// stale sibling store when Claude Code runs with a non-default config dir.
+async function credentialsPath(): Promise<string> {
+  const dir = await tracedEnv("CLAUDE_CONFIG_DIR");
+  return join(dir !== undefined && dir.trim() !== "" ? dir : join(homedir(), ".claude"), ".credentials.json");
+}
+
 function fail(error: ProviderError, fetchedAt: string): ProviderResult {
   return { id: "claude", ok: false, stale: false, fetchedAt, error };
 }
@@ -263,11 +306,20 @@ async function refreshOAuthToken(refreshToken: string): Promise<Refreshed | null
   return { accessToken: b.access_token, refreshToken: b.refresh_token, expiresAtMs: Date.now() + b.expires_in * 1000 };
 }
 
-// Best-effort atomic merge into the SAME credentials file: temp+rename, ~2
-// attempts, silent give-up – Claude Code rewrites this file too, so races are
-// expected. The rotated refresh token MUST be persisted or the file becomes
-// unusable; the caller keeps using the new pair in memory regardless.
-function writeBackCredentials(credPath: string, fileObj: object, fresh: Refreshed): void {
+// What a failed write-back means: the live store keeps the SPENT refresh
+// token, so Claude Code signs out at its next refresh. This is surfaced on the
+// ProviderResult, never silent.
+const WRITE_BACK_FAILED_NOTE =
+  "token refreshed but the credential store could not be updated — Claude Code may sign out; run claude /login to re-sync";
+
+// Atomic merge into the SAME credentials file: temp+rename, ~2 attempts.
+// Returns undefined on success, else WRITE_BACK_FAILED_NOTE for the caller to
+// carry on an otherwise-ok ProviderResult (the reading itself was valid – this
+// is a warning surface, not an error). The merge is blind last-writer: it is
+// based on the file as read before the exchange and does not detect a store
+// Claude Code refreshed in the meantime (see the doctrine header – guarding
+// that is lock machinery, out of scope).
+function writeBackCredentials(credPath: string, fileObj: object, fresh: Refreshed): string | undefined {
   try {
     const merged = { ...(fileObj as Record<string, unknown>) };
     merged.claudeAiOauth = {
@@ -282,7 +334,7 @@ function writeBackCredentials(credPath: string, fileObj: object, fresh: Refreshe
       try {
         writeFileSync(tmp, payload);
         renameSync(tmp, credPath);
-        return;
+        return undefined;
       } catch {
         try {
           rmSync(tmp, { force: true });
@@ -292,24 +344,91 @@ function writeBackCredentials(credPath: string, fileObj: object, fresh: Refreshe
       }
     }
   } catch {
-    /* silent – a lost write-back costs one re-refresh next run */
+    /* fall through to the note */
   }
+  return WRITE_BACK_FAILED_NOTE;
+}
+
+function usageRequest(token: string): Promise<FetchOutcome> {
+  return fetchText(USAGE_URL, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "anthropic-beta": "oauth-2025-04-20",
+      "anthropic-version": "2023-06-01",
+      "User-Agent": "claude-code/2.1.11",
+    },
+  });
+}
+
+// Shared tail of both lanes: parse the usage body into the ok result.
+function usageResult(text: string, fetchedAt: string): ProviderResult {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return fail({ kind: "parse-failure", message: "usage response was not JSON" }, fetchedAt);
+  }
+  const parsed = parseClaudeUsage(body);
+  if (!parsed)
+    return fail({ kind: "parse-failure", message: "usage response missing five_hour/seven_day keys" }, fetchedAt);
+  return {
+    id: "claude",
+    ok: true,
+    stale: false,
+    fetchedAt,
+    windows: parsed.windows,
+    ...(parsed.surfaces ? { surfaces: parsed.surfaces } : {}),
+  };
 }
 
 async function probeInner(): Promise<ProviderResult> {
   const fetchedAt = new Date().toISOString();
-  const credPath = join(homedir(), ".claude", ".credentials.json");
+  const credPath = await credentialsPath(); // traces CLAUDE_CONFIG_DIR (identity stamp)
+
+  // Lane 1 – CLAUDE_CODE_OAUTH_TOKEN, Claude Code's own precedence: env before
+  // the file. Blank/whitespace-only counts as nothing selected (fall through
+  // to the file lane, not an error); a non-literal value is an INVALID
+  // credential – present-but-unusable, never sent, never expanded.
+  const envToken = await tracedEnv("CLAUDE_CODE_OAUTH_TOKEN");
+  if (envToken !== undefined && envToken.trim() !== "") {
+    if (!usableLiteralSecret(envToken)) {
+      return fail(
+        {
+          kind: "parse-failure",
+          message: "CLAUDE_CODE_OAUTH_TOKEN is not a literal secret (indirection) – refusing to use it",
+          hint: "set a plain literal token, or unset the variable to use the credential file",
+        },
+        fetchedAt,
+      );
+    }
+    void registerSecret(envToken);
+    // Env tokens have no refresh token: this lane never rotates and never
+    // persists – an expired response is terminal advice here, not a trigger.
+    const out = await usageRequest(envToken);
+    if (!out.ok) {
+      if (out.status === 401) {
+        return fail(
+          {
+            kind: "expired-token",
+            message: "Claude rejected the CLAUDE_CODE_OAUTH_TOKEN access token (401)",
+            hint: "replace CLAUDE_CODE_OAUTH_TOKEN with a fresh token, or unset it to fall back to the credential file – env tokens are never refreshed",
+          },
+          fetchedAt,
+        );
+      }
+      return fail(out.error, fetchedAt);
+    }
+    return usageResult(out.text, fetchedAt);
+  }
+
+  // Lane 2 – the credential file (with rotation-on-use self-refresh).
   traceInput(credPath); // identity stats only, BEFORE the read (cache stamp)
   let text: string;
   try {
     text = readFileSync(credPath, "utf8");
   } catch {
     return fail(
-      {
-        kind: "no-credentials",
-        message: "no Claude credentials at ~/.claude/.credentials.json",
-        hint: "run claude /login",
-      },
+      { kind: "no-credentials", message: `no Claude credentials at ${credPath}`, hint: "run claude /login" },
       fetchedAt,
     );
   }
@@ -324,6 +443,7 @@ async function probeInner(): Promise<ProviderResult> {
   }
   const auth = claudeAuth(fileObj, Date.now());
   let accessToken: string;
+  let note: string | undefined;
   if (auth.ok) {
     accessToken = auth.accessToken;
     void registerSecret(accessToken);
@@ -339,20 +459,13 @@ async function probeInner(): Promise<ProviderResult> {
     }
     void registerSecret(fresh.accessToken);
     void registerSecret(fresh.refreshToken);
-    writeBackCredentials(credPath, fileObj as object, fresh);
+    note = writeBackCredentials(credPath, fileObj as object, fresh);
     accessToken = fresh.accessToken;
   } else {
     return fail(auth.error, fetchedAt);
   }
 
-  const out = await fetchText(USAGE_URL, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "anthropic-beta": "oauth-2025-04-20",
-      "anthropic-version": "2023-06-01",
-      "User-Agent": "claude-code/2.1.11",
-    },
-  });
+  const out = await usageRequest(accessToken);
   if (!out.ok) {
     if (out.status === 401) {
       return fail(
@@ -362,23 +475,9 @@ async function probeInner(): Promise<ProviderResult> {
     }
     return fail(out.error, fetchedAt);
   }
-  let body: unknown;
-  try {
-    body = JSON.parse(out.text);
-  } catch {
-    return fail({ kind: "parse-failure", message: "usage response was not JSON" }, fetchedAt);
-  }
-  const parsed = parseClaudeUsage(body);
-  if (!parsed)
-    return fail({ kind: "parse-failure", message: "usage response missing five_hour/seven_day keys" }, fetchedAt);
-  return {
-    id: "claude",
-    ok: true,
-    stale: false,
-    fetchedAt,
-    windows: parsed.windows,
-    ...(parsed.surfaces ? { surfaces: parsed.surfaces } : {}),
-  };
+  const result = usageResult(out.text, fetchedAt);
+  if (!result.ok) return result;
+  return note === undefined ? result : { ...result, note };
 }
 
 // probe = credential load + (expired -> self-refresh + write-back) + usage read.
@@ -398,12 +497,16 @@ const provider: ProviderModule = {
   id: "claude",
   ttlMs: 300_000,
   probe,
-  tracesInputs: true, // probe traces ~/.claude/.credentials.json – cache entries carry an identity stamp
+  tracesInputs: true, // probe traces the credential file AND the CLAUDE_* env values – cache entries carry an identity stamp
   refresh: async () => {
     const r = await probe();
     return {
       ok: r.ok,
-      message: r.ok ? "claude token refreshed" : (r.error?.message ?? "claude refresh failed"),
+      message: r.ok
+        ? r.note !== undefined
+          ? `claude token refreshed – ${r.note}`
+          : "claude token refreshed"
+        : (r.error?.message ?? "claude refresh failed"),
     };
   },
 };

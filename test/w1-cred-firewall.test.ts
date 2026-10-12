@@ -23,6 +23,8 @@ import { after, describe, it } from "node:test";
 const SAVED_ENV = new Map<string, string | undefined>();
 const SECRET_KEYS = [
   "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN", // claude's env lane would win over the temp-HOME file store
+  "CLAUDE_CONFIG_DIR", // claude's store-path override would leave the temp HOME
   "OPENCODE_API_KEY",
   "OPENROUTER_API_KEY",
   "OPENROUTER_MANAGEMENT_KEY",
