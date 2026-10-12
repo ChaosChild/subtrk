@@ -296,7 +296,9 @@ describe("kimi deployment host pinning", () => {
 // ---- redaction on error paths ----------------------------------------------
 
 describe("credential values are redacted from credential-file error content", () => {
-  it("a key embedded in a refused endpoint declaration comes out as [redacted]", async () => {
+  it("a key embedded in a refused endpoint declaration comes out as [redacted]", {
+    skip: process.platform !== "win32" && "the desktop-key lane is Windows-only (%APPDATA% path)",
+  }, async () => {
     await withHome(async (h) => {
       const key = "SK-FAKE-w1-embed-9f2c";
       h.write(
