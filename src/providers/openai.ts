@@ -7,7 +7,8 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ProviderError, ProviderModule, ProviderResult, Window } from "../core.ts";
+import type { Credits, ProviderError, ProviderModule, ProviderResult, Window } from "../core.ts";
+import { readCodexRpcUsage } from "./codex-rpc.ts";
 
 const TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_CHARS = 1_000_000;
@@ -107,11 +108,17 @@ interface OpenaiLimitWindow {
 
 // Pure: one rate-limit window object -> Window; null when unusable.
 // reset_at is epoch SECONDS; without it, now + reset_after_seconds; neither -> null.
-function parseOpenaiWindow(w: unknown, nowMs: number): Window | null {
+// defaultSeconds stands in for a missing limit_window_seconds (extras only –
+// code-review/model windows omit it; the base windows stay strict).
+function parseOpenaiWindow(w: unknown, nowMs: number, defaultSeconds?: number): Window | null {
   if (typeof w !== "object" || w === null) return null;
   const o = w as OpenaiLimitWindow;
   if (typeof o.used_percent !== "number" || !Number.isFinite(o.used_percent)) return null;
-  if (typeof o.limit_window_seconds !== "number" || !Number.isFinite(o.limit_window_seconds)) return null;
+  const seconds =
+    typeof o.limit_window_seconds === "number" && Number.isFinite(o.limit_window_seconds)
+      ? o.limit_window_seconds
+      : defaultSeconds;
+  if (seconds === undefined) return null;
   let resetsAt: string | null = null;
   if (typeof o.reset_at === "number" && Number.isFinite(o.reset_at)) {
     resetsAt = new Date(o.reset_at * 1000).toISOString();
@@ -119,34 +126,105 @@ function parseOpenaiWindow(w: unknown, nowMs: number): Window | null {
     resetsAt = new Date(nowMs + o.reset_after_seconds * 1000).toISOString();
   }
   if (!resetsAt) return null;
-  return { kind: windowKindFromSeconds(o.limit_window_seconds), usedPercent: o.used_percent, resetsAt };
+  return { kind: windowKindFromSeconds(seconds), usedPercent: o.used_percent, resetsAt };
 }
 
-// Pure: wham/usage body -> windows + plan label; null when the shape is
-// unrecognized. Strict, claude-style: every observed response carries a primary
-// window, so primary_window/rate_limit missing is a parse failure, never an
-// empty state. credits/spend_control/promo/additional_rate_limits/
-// code_review_rate_limit are NOT surfaced in v1.
+// Pure: a scoped {primary_window, secondary_window} pair -> windows. Lenient:
+// an unusable extra window is skipped, never fails the whole parse.
+// codex window mapping / cli-rpc fallback after quota-axi (MIT).
+function parseScopedPair(container: unknown, scope: string, nowMs: number): Window[] {
+  if (typeof container !== "object" || container === null) return [];
+  const c = container as { primary_window?: unknown; secondary_window?: unknown };
+  const out: Window[] = [];
+  for (const [w, fallback] of [
+    [c.primary_window, 18_000],
+    [c.secondary_window, 604_800],
+  ] as const) {
+    const parsed = parseOpenaiWindow(w, nowMs, fallback);
+    if (parsed) out.push({ ...parsed, scope });
+  }
+  return out;
+}
+
+// Numbers arrive as JSON numbers or numeric strings ("72000").
+function num(v: unknown): number | undefined {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
+  return undefined;
+}
+
+// Pure: spend_control.individual_limit (workspace credit cap) -> Credits;
+// undefined without usable limit/used totals. reached=true pins remaining to 0.
+export function parseSpendControl(raw: unknown, nowMs: number = Date.now()): Credits | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const control = raw as { reached?: unknown; individual_limit?: unknown };
+  if (typeof control.individual_limit !== "object" || control.individual_limit === null) return undefined;
+  const cap = control.individual_limit as Record<string, unknown>;
+  const limit = num(cap.limit);
+  const used = num(cap.used);
+  if (limit === undefined || limit <= 0 || used === undefined || used < 0) return undefined;
+  const remaining = control.reached === true ? 0 : Math.max(0, num(cap.remaining) ?? limit - used);
+  const credits: Credits = { total: limit, remaining, unit: "credits", source: "api" };
+  const resetAt = num(cap.reset_at);
+  const resetAfter = num(cap.reset_after_seconds);
+  if (resetAt !== undefined) credits.cycleEndsAt = new Date(resetAt * 1000).toISOString();
+  else if (resetAfter !== undefined && resetAfter >= 0)
+    credits.cycleEndsAt = new Date(nowMs + resetAfter * 1000).toISOString();
+  return credits;
+}
+
+// Pure: wham/usage body -> windows + plan label (+ spend_control credits);
+// null when the shape is unrecognized. Strict, claude-style for the base
+// limit: a present rate_limit needs a primary window. Extras are lenient:
+// code_review_rate_limit -> scope "code-review", additional_rate_limits ->
+// scope = limit_name, spend_control -> credits. A body without rate_limit is
+// accepted only when spend_control yields credits (business workspaces).
+// credits (balance) and promo are NOT surfaced.
 export function parseOpenaiUsage(
   body: unknown,
   nowMs: number = Date.now(),
-): { windows: Window[]; plan?: string } | null {
+): { windows: Window[]; plan?: string; credits?: Credits } | null {
   if (typeof body !== "object" || body === null) return null;
-  const b = body as { plan_type?: unknown; rate_limit?: unknown };
-  if (typeof b.rate_limit !== "object" || b.rate_limit === null) return null;
-  const rl = b.rate_limit as { primary_window?: unknown; secondary_window?: unknown };
-  const primary = parseOpenaiWindow(rl.primary_window, nowMs);
-  if (!primary) return null;
-  const windows = [primary];
-  // secondary_window null/absent -> skipped (claude's inactive windows);
-  // present -> parsed like primary, malformed fails the whole parse.
-  if (rl.secondary_window !== null && rl.secondary_window !== undefined) {
-    const secondary = parseOpenaiWindow(rl.secondary_window, nowMs);
-    if (!secondary) return null;
-    windows.push(secondary);
+  const b = body as {
+    plan_type?: unknown;
+    rate_limit?: unknown;
+    code_review_rate_limit?: unknown;
+    additional_rate_limits?: unknown;
+    spend_control?: unknown;
+  };
+  const credits = parseSpendControl(b.spend_control, nowMs);
+  const windows: Window[] = [];
+  if (typeof b.rate_limit === "object" && b.rate_limit !== null) {
+    const rl = b.rate_limit as { primary_window?: unknown; secondary_window?: unknown };
+    const primary = parseOpenaiWindow(rl.primary_window, nowMs);
+    if (!primary) return null;
+    windows.push(primary);
+    // secondary_window null/absent -> skipped (claude's inactive windows);
+    // present -> parsed like primary, malformed fails the whole parse.
+    if (rl.secondary_window !== null && rl.secondary_window !== undefined) {
+      const secondary = parseOpenaiWindow(rl.secondary_window, nowMs);
+      if (!secondary) return null;
+      windows.push(secondary);
+    }
+  } else if (!credits) {
+    return null;
+  }
+  windows.push(...parseScopedPair(b.code_review_rate_limit, "code-review", nowMs));
+  if (Array.isArray(b.additional_rate_limits)) {
+    for (const entry of b.additional_rate_limits) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const e = entry as { limit_name?: unknown; metered_feature?: unknown; rate_limit?: unknown };
+      const scope =
+        typeof e.limit_name === "string" && e.limit_name !== ""
+          ? e.limit_name
+          : typeof e.metered_feature === "string" && e.metered_feature !== ""
+            ? e.metered_feature
+            : null;
+      if (scope) windows.push(...parseScopedPair(e.rate_limit, scope, nowMs));
+    }
   }
   const plan = typeof b.plan_type === "string" && b.plan_type !== "" ? `ChatGPT ${b.plan_type}` : undefined;
-  return { windows, plan };
+  return credits ? { windows, plan, credits } : { windows, plan };
 }
 
 type FetchOutcome =
@@ -275,17 +353,37 @@ async function probeInner(): Promise<ProviderResult> {
       );
     }
   }
-  if (!out.ok) return fail(out.error, fetchedAt);
-  let body: unknown;
-  try {
-    body = JSON.parse(out.text);
-  } catch {
-    return fail({ kind: "parse-failure", message: "usage response was not JSON" }, fetchedAt);
+  let error: ProviderError | null = null;
+  let parsed: ReturnType<typeof parseOpenaiUsage> = null;
+  if (!out.ok) error = out.error;
+  else {
+    try {
+      parsed = parseOpenaiUsage(JSON.parse(out.text));
+      if (!parsed) error = { kind: "parse-failure", message: "usage response missing rate_limit windows" };
+    } catch {
+      error = { kind: "parse-failure", message: "usage response was not JSON" };
+    }
   }
-  const parsed = parseOpenaiUsage(body);
-  if (!parsed) return fail({ kind: "parse-failure", message: "usage response missing rate_limit windows" }, fetchedAt);
-  return { id: "openai", ok: true, stale: false, fetchedAt, plan: parsed.plan, windows: parsed.windows };
+  if (error && FALLBACK_KINDS.has(error.kind)) {
+    // Definitive HTTP failure with a stored login -> read-only codex
+    // app-server lane; its failure keeps the original HTTP error.
+    const viaRpc = parseOpenaiUsage(await readCodexRpcUsage());
+    if (viaRpc) {
+      parsed = viaRpc;
+      error = null;
+    }
+  }
+  if (error || !parsed) return fail(error ?? { kind: "parse-failure", message: "usage unreadable" }, fetchedAt);
+  const result: ProviderResult = { id: "openai", ok: true, stale: false, fetchedAt, plan: parsed.plan };
+  if (parsed.windows.length > 0) result.windows = parsed.windows;
+  if (parsed.credits) result.credits = parsed.credits;
+  return result;
 }
+
+// timeout/rate-limited are transient – a fallback spawn there would outlive
+// core's 10s probe budget or hit the same throttled backend. A 401 returned
+// above already: codex would refresh (rewrite) its login, which subtrk never does.
+const FALLBACK_KINDS = new Set<ProviderError["kind"]>(["http-error", "parse-failure"]);
 
 const provider: ProviderModule = {
   id: "openai",
