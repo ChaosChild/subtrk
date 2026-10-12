@@ -337,6 +337,22 @@ describe("priceForModel + rowCost", () => {
     assert.equal(priceForModel(newStore(), "weird-9"), null);
   });
 
+  it("prototype-resolving model names never resolve through the chain to a bogus price (no NaN cost)", () => {
+    // Regression: with a non-empty table, p[raw] walked the prototype chain –
+    // "constructor" returned the inherited Object function as a "price" and
+    // rowCost produced NaN. Own-property lookups only, then honestly unpriced.
+    const store = pricedStore();
+    for (const hostile of ["constructor", "toString", "CONSTRUCTOR"]) {
+      const resolved = priceForModel(store, hostile);
+      assert.equal(resolved, null, `"${hostile}" must not resolve to a ${typeof resolved?.price}`);
+      assert.equal(
+        rowCost({ in: 1_000_000, out: 1_000_000 }, resolved),
+        null,
+        `"${hostile}" falls back to unpriced handling, never a NaN cost`,
+      );
+    }
+  });
+
   it("rowCost: 1h-ephemeral writes price at 2x input, the 5m remainder at the cw rate", () => {
     // glm-4.6 fallback: in 0.6, cr 0.11, out 2.2 per 1M; no cw published -> cw at input
     const price = priceForModel(newStore(), "glm-4.6")?.price;

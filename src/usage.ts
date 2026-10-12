@@ -395,7 +395,11 @@ export function priceForModel(store: UsageStore, model: string): ResolvedPrice |
   const p = store.pricing.usdPerTok ?? {};
   if (Object.keys(p).length > 0) {
     const raw = model.toLowerCase().trim();
-    if (p[raw]) return { price: p[raw], source: "openrouter" };
+    // Own-property guard, same discipline as ensure()/PROTO_KEYS above: a
+    // hostile model name ("constructor", "valueOf") must not resolve through
+    // the prototype chain to a truthy inherited function and come back
+    // dressed as a price (its fields are undefined -> NaN costs).
+    if (Object.hasOwn(p, raw) && p[raw]) return { price: p[raw], source: "openrouter" };
     // Dots, dashes and vendor prefixes all normalize away: "GLM-5.3" and the
     // slugified scope "glm-5-3" both resolve to the "z-ai/glm-5.3" slug.
     const key = normalizeModelKey(model);

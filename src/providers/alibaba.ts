@@ -184,7 +184,10 @@ export function mapError(run: BlRun, fetchedAt: string, redact?: (s: string) => 
     );
   }
   const s = (run.stderr ?? "").toLowerCase();
-  if (s.includes("is not recognized") || s.includes("command not found") || s.includes("not found")) {
+  // Only the shells' own missing-command phrasing names a missing TOOL; a
+  // vendor/gateway message that merely contains "not found" (a 404 body like
+  // "API endpoint not found") is a run of an installed bl that failed.
+  if (s.includes("is not recognized") || s.includes("command not found")) {
     return fail(
       { kind: "tool-missing", message: "'bl' not found on PATH", hint: "npm i -g bailian-cli, then subtrk init" },
       fetchedAt,

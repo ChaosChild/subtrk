@@ -300,6 +300,44 @@ describe("alibaba probe degrade paths", () => {
     assert.equal(r.error.kind, "subprocess-failed");
     assert.equal(r.error.message, "bl exited non-zero (stderr withheld)");
   });
+
+  it("mapError: a gateway 404 body is a failed run, NOT tool-missing", () => {
+    // Regression: ANY stderr containing "not found" was classified as the bl
+    // binary being absent, telling users to reinstall a CLI that is installed.
+    const r = mapError(
+      { ok: false, stdout: "", stderr: "API endpoint not found (404)", toolMissing: false, timedOut: false },
+      new Date().toISOString(),
+    );
+    assert.ok(r?.error);
+    assert.equal(r.error.kind, "subprocess-failed", "a gateway 404 is subprocess-failed");
+    assert.notEqual(r.error.kind, "tool-missing");
+  });
+
+  it("mapError: the POSIX shell's own missing-command phrasing is tool-missing", () => {
+    const r = mapError(
+      { ok: false, stdout: "", stderr: "/bin/sh: 1: bl: command not found\n", toolMissing: false, timedOut: false },
+      new Date().toISOString(),
+    );
+    assert.ok(r?.error);
+    assert.equal(r.error.kind, "tool-missing");
+    assert.equal(r.error.message, "'bl' not found on PATH");
+  });
+
+  it("mapError: cmd.exe's missing-command phrasing is tool-missing", () => {
+    const r = mapError(
+      {
+        ok: false,
+        stdout: "",
+        stderr: "'bl' is not recognized as an internal or external command,\r\noperable program or batch file.",
+        toolMissing: false,
+        timedOut: false,
+      },
+      new Date().toISOString(),
+    );
+    assert.ok(r?.error);
+    assert.equal(r.error.kind, "tool-missing");
+    assert.equal(r.error.message, "'bl' not found on PATH");
+  });
 });
 
 // ---- google ---------------------------------------------------------------
