@@ -48,7 +48,8 @@ interface Accumulator {
 // the import (restore one immediate later, in case a deferred call site),
 // memoized so concurrent callers can't double-patch. Unavailable → no data.
 let sqlitePromise: Promise<typeof import("node:sqlite") | null> | null = null;
-function importSqlite(): Promise<typeof import("node:sqlite") | null> {
+// Shared with the usage harvest's local glm fallback (PR E).
+export function importSqlite(): Promise<typeof import("node:sqlite") | null> {
   sqlitePromise ??= (async () => {
     const origEmitWarning = process.emitWarning;
     process.emitWarning = (() => {}) as typeof process.emitWarning;

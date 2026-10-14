@@ -14,6 +14,7 @@ import { acquireLock, clearSecrets, type ProviderResult, registerSecret, release
 import { parseClaudeUsage } from "../src/providers/claude.ts";
 import { fetchZcodeBalance } from "../src/providers/zcode.ts";
 import { startConsole } from "../src/serve.ts";
+import { importSqlite } from "../src/track-harvest.ts";
 import {
   addDelta,
   aggregateUsage,
@@ -370,6 +371,7 @@ describe("usage parsers", () => {
           fetchImpl: fetchRejectingOthers(degraded),
           envPath: join(dir, "env"),
           glmConfig: cfg,
+          homeDir: join(dir, "no-home"),
           budgetMs: 4000,
         });
         assert.ok(
@@ -420,6 +422,7 @@ describe("usage parsers", () => {
           fetchImpl: fetchRejectingOthers(stale),
           envPath: join(dir, "env"),
           glmConfig: cfg,
+          homeDir: join(dir, "no-home"),
           budgetMs: 4000,
         });
         assert.ok(summary.applied.includes("glm"), `glm applied: ${JSON.stringify(summary)}`);
@@ -434,6 +437,181 @@ describe("usage parsers", () => {
           (store.state.glm as { throughMs?: number })?.throughMs,
           Date.parse(label.replace(" ", "T")) + HOUR,
           "watermark = the last reported bucket's end, not now",
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("harvestUsage: glm local reconstruction (PR E)", () => {
+    const cfg = () => ({ provider: { zai: { apiKey: "sk-test-abc123def456" } } });
+    const degradedEnvelope = {
+      code: 200,
+      msg: "Operation successful",
+      data: { granularity: "HOUR", timezone: "Asia/Shanghai", modelUsage: { xTime: [], modelDataList: [] } },
+      success: true,
+    };
+    const fetchWith = (glmBody: unknown, urls: string[] = []): typeof fetch =>
+      (async (url: unknown) => {
+        if (String(url).includes("usage-detail")) {
+          urls.push(String(url));
+          return new Response(JSON.stringify(glmBody), { status: 200 });
+        }
+        return new Response("unavailable", { status: 503 });
+      }) as unknown as typeof fetch;
+
+    // A minimal zcode db under a temp home, holding the model_usage columns
+    // the reconstruction query reads.
+    async function mkHome(rows: Array<{ ms: number; inTok: number; cr: number; out: number; src?: string }>) {
+      const home = tempDir();
+      const dbDir = join(home, ".zcode", "cli", "db");
+      mkdirSync(dbDir, { recursive: true });
+      const mod = await importSqlite();
+      assert.ok(mod, "node:sqlite available in this runtime");
+      const db = new mod.DatabaseSync(join(dbDir, "db.sqlite"));
+      db.exec(
+        `create table model_usage (
+           started_at integer, model_id text, provider_id text, query_source text,
+           input_tokens integer, output_tokens integer,
+           cache_creation_input_tokens integer, cache_read_input_tokens integer)`,
+      );
+      const ins = db.prepare("insert into model_usage values (?, 'GLM-5.3', 'zai', ?, ?, ?, 0, ?)");
+      for (const r of rows) ins.run(r.ms, r.src ?? "main_turn", r.inTok, r.out, r.cr);
+      db.close();
+      return home;
+    }
+    const seedFresh = (dir: string, now: number): void => {
+      mutateUsageStore(
+        dir,
+        (s) => {
+          const st = s.state as Record<string, Record<string, number | boolean>>;
+          st.glm = { at: 0, throughMs: 0, backfilled: true };
+          st.openrouter = { activityAt: now, analyticsAt: now };
+          st.zcode = { at: now };
+          st.alibaba = { at: now };
+          st.openai = { whamAt: now };
+        },
+        now,
+      );
+    };
+
+    it("a degraded API reconstructs glm hours from the local zcode store, with provenance", async () => {
+      const dir = tempDir();
+      const now = Date.now() + 3600_000;
+      const h1 = now - 2 * HOUR;
+      const home = await mkHome([
+        { ms: h1 + 60_000, inTok: 1100, cr: 200, out: 50 }, // inclusive input -> in 900
+        { ms: h1 + 120_000, inTok: 999, cr: 0, out: 1, src: "session_title" }, // bookkeeping - excluded
+      ]);
+      try {
+        seedFresh(dir, now);
+        const summary = await harvestUsage([], {
+          subtrkDir: dir,
+          now,
+          fetchImpl: fetchWith(degradedEnvelope),
+          envPath: join(dir, "env"),
+          glmConfig: cfg,
+          homeDir: home,
+          budgetMs: 4000,
+        });
+        assert.ok(
+          summary.applied.some((s) => s.includes("local reconstruction")),
+          `reconstruction applied: ${JSON.stringify(summary)}`,
+        );
+        const store = readUsageStore(dir);
+        const row = store.hourly.glm?.[hourKey(h1 + 60_000)]?.["GLM-5.3"];
+        assert.ok(row, "hour written");
+        assert.equal(row.in, 900, "inclusive input normalized: in = input - cr - cw");
+        assert.equal(row.cr, 200);
+        assert.equal(row.out, 50, "session_title rows excluded entirely");
+        const localRange = (store.state.glm as { localRange?: { fromMs: number; toMs: number } }).localRange;
+        assert.ok(localRange, "provenance range recorded for API recovery");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it("API recovery refetches the whole local span, replaces it and clears the provenance", async () => {
+      const dir = tempDir();
+      const now = Date.now() + 3600_000;
+      const localFrom = now - 6 * HOUR;
+      const localTo = now - 5 * HOUR;
+      const apiHour = now - 5 * HOUR + 600_000;
+      const d = new Date(apiHour);
+      const p = (n: number) => String(n).padStart(2, "0");
+      const apiLabel = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:00:00`;
+      const healthy = {
+        code: 200,
+        msg: "Operation successful",
+        data: {
+          granularity: "HOUR",
+          timezone: "Asia/Shanghai",
+          modelUsage: {
+            xTime: [apiLabel],
+            modelDataList: [
+              {
+                modelCode: "glm-5.3",
+                modelName: "GLM-5.3",
+                uncachedInputTokensUsage: [42],
+                cachedInputTokensUsage: [7],
+                outputTokensUsage: [3],
+              },
+            ],
+          },
+        },
+        success: true,
+      };
+      try {
+        mutateUsageStore(
+          dir,
+          (s) => {
+            replaceHourlyRange(s, "glm", localFrom, localTo, {
+              [hourKey(apiHour)]: { "GLM-5.3": { in: 900, cr: 200, cw: 0, out: 51, req: 2 } },
+            });
+            const st = s.state as Record<string, Record<string, number | boolean>>;
+            st.glm = {
+              at: 0,
+              throughMs: localTo,
+              backfilled: true,
+              localRange: { fromMs: localFrom, toMs: localTo },
+            } as unknown as Record<string, number | boolean>;
+            st.openrouter = { activityAt: now, analyticsAt: now };
+            st.zcode = { at: now };
+            st.alibaba = { at: now };
+            st.openai = { whamAt: now };
+          },
+          now,
+        );
+        const urls: string[] = [];
+        const summary = await harvestUsage([], {
+          subtrkDir: dir,
+          now,
+          fetchImpl: fetchWith(healthy, urls),
+          envPath: join(dir, "env"),
+          glmConfig: cfg,
+          homeDir: join(dir, "no-home"),
+          budgetMs: 4000,
+        });
+        assert.ok(summary.applied.includes("glm"), `glm applied: ${JSON.stringify(summary)}`);
+        const store = readUsageStore(dir);
+        const row = store.hourly.glm?.[hourKey(apiHour)]?.["GLM-5.3"];
+        assert.equal(row?.in, 42, "the authoritative API value replaced the local reconstruction");
+        assert.equal(
+          (store.state.glm as { localRange?: unknown }).localRange,
+          undefined,
+          "provenance cleared once the API covers the span",
+        );
+        const df = new Date(localFrom);
+        const wantStart = `${df.getFullYear()}-${p(df.getMonth() + 1)}-${p(df.getDate())} ${p(df.getHours())}`;
+        const starts = urls
+          .map((u) => /startTime=([^&]+)/.exec(decodeURIComponent(u))?.[1])
+          .filter((s): s is string => typeof s === "string")
+          .map((s) => Date.parse(s.replace(" ", "T")));
+        assert.ok(
+          starts.some((ms) => ms <= localFrom),
+          `recovery window starts at or before the local span (${wantStart}): ${urls.join(" ")}`,
         );
       } finally {
         rmSync(dir, { recursive: true, force: true });

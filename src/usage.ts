@@ -30,6 +30,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { stat as statAsync } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { acquireLock, errorMessage, getSecret, type ProviderResult, releaseLock, SUBTRK_DIR } from "./core.ts";
@@ -849,6 +850,7 @@ export interface HarvestOpts {
   now?: number; // injectable clock
   fetchImpl?: typeof fetch; // injectable for tests
   glmConfig?: () => unknown; // override the ~/.zcode config read (tests)
+  homeDir?: string; // override homedir for the local-reconstruction sqlite read (tests)
 }
 
 export interface HarvestSummary {
@@ -866,6 +868,7 @@ interface JobCtx {
   fetchImpl: typeof fetch;
   envPath?: string;
   glmConfig?: () => unknown;
+  homeDir?: string;
   summary: HarvestSummary;
 }
 
@@ -890,8 +893,17 @@ function timeLeft(ctx: JobCtx): number {
 
 // --- glm: credit-usage/usage-detail (hourly split near now, daily backfill) ---
 
+interface GlmState {
+  at?: number;
+  throughMs?: number;
+  backfilled?: boolean;
+  // Hours reconstructed from the local zcode store while the API was
+  // degraded; a healthy fetch extends its window to cover and clear this.
+  localRange?: { fromMs: number; toMs: number };
+}
+
 async function harvestGlm(ctx: JobCtx): Promise<void> {
-  const state = ctx.store().state.glm as { at?: number; throughMs?: number; backfilled?: boolean } | undefined;
+  const state = ctx.store().state.glm as GlmState | undefined;
   if (state?.at && ctx.now - state.at < GLM_TTL_MS) {
     ctx.summary.skipped.push("glm: fresh");
     return;
@@ -916,9 +928,14 @@ async function harvestGlm(ctx: JobCtx): Promise<void> {
   if (!backfilled) {
     fetchWindows.push({ fromMs: ctx.now - GLM_BACKFILL_MS, toMs: ctx.now - 2 * dayMs, daily: true });
   }
-  const hourlyFrom = Math.max(
-    ctx.now - GLM_HOURLY_WINDOW_MS,
-    state?.throughMs ? state.throughMs - 3 * 3_600_000 : ctx.now - GLM_HOURLY_WINDOW_MS,
+  // API recovery must refetch the whole locally-reconstructed span so the
+  // authoritative rows replace the local-subset ones.
+  const hourlyFrom = Math.min(
+    Math.max(
+      ctx.now - GLM_HOURLY_WINDOW_MS,
+      state?.throughMs ? state.throughMs - 3 * 3_600_000 : ctx.now - GLM_HOURLY_WINDOW_MS,
+    ),
+    state?.localRange ? state.localRange.fromMs : ctx.now - GLM_HOURLY_WINDOW_MS,
   );
   fetchWindows.push({ fromMs: hourlyFrom, toMs: ctx.now, daily: false });
 
@@ -962,12 +979,12 @@ async function harvestGlm(ctx: JobCtx): Promise<void> {
     }
   }
   // Upstream-degradation guard (z.ai usage-detail went flaky 2026-10-14:
-  // valid envelope, zero buckets for windows that provably contain usage,
-  // while replaceHourlyRange would zero every unreported hour). Zero hourly
-  // buckets = do not trust, do not wipe, leave state.at so the next run
-  // retries past the TTL. Observed-live shapes in test/usage.test.ts.
+  // valid envelope, zero buckets for windows that provably contain usage).
+  // Zero hourly buckets = do not trust the API – reconstruct the gap from
+  // the LOCAL zcode store instead of wiping or leaving a hole.
   if (Object.keys(hourlyOut).length === 0) {
-    ctx.summary.skipped.push("glm: usage-detail returned no hourly buckets – upstream degraded, existing rows kept");
+    ctx.summary.skipped.push("glm: usage-detail returned no hourly buckets – upstream degraded");
+    await harvestGlmLocal(ctx, state?.throughMs ?? ctx.now - GLM_HOURLY_WINDOW_MS);
     return;
   }
   const applied = mutateUsageStore(
@@ -977,15 +994,105 @@ async function harvestGlm(ctx: JobCtx): Promise<void> {
       // Always replace the hourly range – hours the fetch did not report are
       // zero usage, so stale keys inside it must clear.
       replaceHourlyRange(store, "glm", hourlyFrom, hourlyTo, hourlyOut);
-      const s = ensure(store.state, "glm") as { at?: number; throughMs?: number; backfilled?: boolean };
+      const s = ensure(store.state, "glm") as GlmState;
       s.at = ctx.now;
       s.throughMs = hourlyTo;
+      s.localRange = undefined; // authoritative data covers the local span
       if (!backfilled && !ctx.summary.aborted) s.backfilled = true;
     },
     ctx.now,
   );
   if (applied) ctx.summary.applied.push("glm");
   else ctx.summary.skipped.push("glm: store busy");
+}
+
+// Local reconstruction (PR E): the zcode sqlite store is ground truth for
+// THIS machine's z.ai traffic (the track harvester reads the same rows).
+// While the usage-detail API is degraded, rebuild the glm hourly section
+// from it so dashboards/CLI/store show real burn instead of a gap. Local
+// subset only – a healthy API refetch replaces the whole localRange span.
+async function harvestGlmLocal(ctx: JobCtx, fromMs: number): Promise<void> {
+  const home = ctx.homeDir ?? homedir();
+  const dbPath = join(home, ".zcode", "cli", "db", "db.sqlite");
+  try {
+    await statAsync(dbPath);
+  } catch {
+    ctx.summary.skipped.push("glm: no local zcode store to reconstruct from");
+    return;
+  }
+  const { importSqlite } = await import("./track-harvest.ts");
+  const mod = await importSqlite();
+  if (!mod) {
+    ctx.summary.skipped.push("glm: node:sqlite unavailable – cannot reconstruct locally");
+    return;
+  }
+  const rowsByHour = new Map<string, Record<string, UsageRow>>();
+  let toMs = fromMs;
+  try {
+    const db = new mod.DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const stmt = db.prepare(
+        `select started_at as ms, model_id as model, input_tokens as inTok,
+                output_tokens as outTok, cache_creation_input_tokens as cw,
+                cache_read_input_tokens as cr
+         from model_usage
+         where started_at >= ? and started_at <= ?
+           and query_source <> 'session_title'
+           and provider_id like '%zai%'`,
+      );
+      const rows = stmt.all(fromMs - 3_600_000, ctx.now) as unknown[];
+      for (const row of rows) {
+        const r = row as Record<string, unknown>;
+        const inTok = Number(r.inTok) || 0;
+        const cr = Number(r.cr) || 0;
+        const cw = Number(r.cw) || 0;
+        const out = Number(r.outTok) || 0;
+        // inclusive input: subtract cache read+write (same normalization as
+        // the track harvester's zcode tier)
+        const uncached = Math.max(0, inTok - cr - cw);
+        if (uncached + cr + cw + out <= 0) continue;
+        const model = typeof r.model === "string" && r.model !== "" ? r.model : "?";
+        const hk = hourKey(Number(r.ms));
+        toMs = Math.max(toMs, Number(r.ms));
+        const hour = rowsByHour.get(hk) ?? {};
+        const u = (hour[model] ?? { in: 0, cr: 0, cw: 0, out: 0, req: 0 }) as {
+          in: number;
+          cr: number;
+          cw: number;
+          out: number;
+          req: number;
+        };
+        u.in += uncached;
+        u.cr += cr;
+        u.cw += cw;
+        u.out += out;
+        u.req += 1;
+        hour[model] = u;
+        rowsByHour.set(hk, hour);
+      }
+    } finally {
+      db.close();
+    }
+  } catch {
+    ctx.summary.errors.push("glm: local zcode store unreadable – cannot reconstruct");
+    return;
+  }
+  const hours: Record<string, Record<string, UsageRow>> = {};
+  for (const [hk, models] of rowsByHour) hours[hk] = models;
+  const applied = mutateUsageStore(
+    ctx.dir,
+    (store) => {
+      replaceHourlyRange(store, "glm", fromMs, toMs + 3_600_000, hours);
+      const s = ensure(store.state, "glm") as GlmState;
+      s.at = ctx.now;
+      s.throughMs = toMs + 3_600_000;
+      s.localRange = { fromMs, toMs: toMs + 3_600_000 };
+    },
+    ctx.now,
+  );
+  if (applied) {
+    ctx.summary.applied.push(`glm (local reconstruction: ${hours.size}h from the zcode store – upstream degraded)`);
+  } else ctx.summary.skipped.push("glm: store busy (local reconstruction)");
 }
 
 interface ParsedGlmDetail {
@@ -2214,6 +2321,7 @@ export async function harvestUsage(results: ProviderResult[] = [], opts: Harvest
     fetchImpl: opts.fetchImpl ?? fetch,
     envPath: opts.envPath,
     glmConfig: opts.glmConfig,
+    homeDir: opts.homeDir,
     summary,
   };
   const jobs: Promise<void>[] = [
