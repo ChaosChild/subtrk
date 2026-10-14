@@ -1069,6 +1069,61 @@ describe("track pause + resume", () => {
   });
 });
 
+describe("PR D: parent harvest excludes child session pins", () => {
+  it("a pinned child's session rides the parent's window as excludeSessions and lands on the record", async () => {
+    const fx = fixture();
+    const cap = captureConsole();
+    try {
+      await run(fx, ["track", "start", "--task=parent work"]);
+      await run(fx, ["track", "start", "--task=child work", "--session=sess_kid"]);
+      const ids = cap.out.map((l) => /^trk_[0-9a-f]{8}(?=\s+marker open)/.exec(l)?.[0]).filter(Boolean) as string[];
+      const parent = ids[0];
+      const child = ids[1];
+      assert.ok(parent && child, `two markers opened: ${JSON.stringify(cap.out)}`);
+      fx.now.ms += 60_000;
+      await run(fx, ["track", "stop", `--id=${child}`]);
+      fx.now.ms += 60_000;
+      await run(fx, ["track", "stop", `--id=${parent}`]);
+      const store = readTrackStore(fx.dir);
+      const kid = store.records.find((r) => r.id === child);
+      const par = store.records.find((r) => r.id === parent);
+      assert.ok(kid && par, "both records closed");
+      assert.equal(kid.nested, parent, "child window is contained in the parent");
+      assert.equal(kid.sessionPin, "sess_kid");
+      assert.deepEqual(par.excludedPins, ["sess_kid"], "the parent record names the pin it left to the child");
+      const windows = fx.calls.windows as unknown as Array<{ excludeSessions?: string[] }>;
+      const withExclusions = windows.filter((w) => w.excludeSessions !== undefined);
+      assert.equal(withExclusions.length, 1, "only the parent's window carries exclusions");
+      assert.deepEqual(withExclusions[0]?.excludeSessions, ["sess_kid"]);
+    } finally {
+      cap.restore();
+      fx.restore();
+    }
+  });
+
+  it("unpinned children are not excluded - old-world containment stays", async () => {
+    const fx = fixture();
+    const cap = captureConsole();
+    try {
+      await run(fx, ["track", "start", "--task=parent work"]);
+      await run(fx, ["track", "start", "--task=child unpinned"]);
+      const ids = cap.out.map((l) => /^trk_[0-9a-f]{8}(?=\s+marker open)/.exec(l)?.[0]).filter(Boolean) as string[];
+      const parent = ids[0];
+      const child = ids[1];
+      assert.ok(parent && child);
+      fx.now.ms += 60_000;
+      await run(fx, ["track", "stop", `--id=${child}`]);
+      await run(fx, ["track", "stop", `--id=${parent}`]);
+      const store = readTrackStore(fx.dir);
+      const par = store.records.find((r) => r.id === parent);
+      assert.equal(par?.excludedPins, undefined, "nothing to exclude without a pin");
+    } finally {
+      cap.restore();
+      fx.restore();
+    }
+  });
+});
+
 describe("track recode", () => {
   it("recodes an open marker and the value rides into the record", async () => {
     const fx = fixture();

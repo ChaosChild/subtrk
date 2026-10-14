@@ -116,6 +116,27 @@ export function delegatedShare(r: TrackRecord): number | null {
   return tot > 0 ? sub / tot : null;
 }
 
+// PR D: a nested child whose session pin its parent's harvest EXCLUDED is a
+// clean per-worker record - disjoint burn, counted exactly once (by itself).
+export function cleanPinnedChild(c: TrackRecord, all: TrackRecord[]): boolean {
+  if (c.nested === null || !c.sessionPin) return false;
+  const parent = all.find((r) => r.id === c.nested);
+  return parent?.excludedPins?.includes(c.sessionPin) === true;
+}
+
+// PR D tree sums: a parent's leaf calibration sample is its WHOLE tree - its
+// own (post-exclusion) burn plus its clean pinned children. Old-world parents
+// (children unpinned or harvested before the split) already contain their
+// children, so the sum collapses to their own number. Mutates .tokens so every
+// bucket/chart/console that reads tokens sees the tree, never a bare root.
+export function applyTreeSums(records: EnrichedRecord[]): void {
+  for (const r of records) {
+    const kids = records.filter((c) => c.nested === r.id && cleanPinnedChild(c, records));
+    if (kids.length === 0) continue;
+    r.tokens = r.tokens + kids.reduce((a, c) => a + c.tokens, 0);
+  }
+}
+
 export interface Bucket {
   provider: string | null;
   complexity: string | null;
@@ -125,6 +146,7 @@ export interface Bucket {
   p50Usd: number | null;
   p90Usd: number | null;
   lowN: boolean;
+  clean?: boolean; // delegated buckets: excluded-pin children (exact), vs window snapshots
 }
 
 function bucketOf(records: EnrichedRecord[]): { tok: number[]; usd: number[] } {
@@ -192,6 +214,11 @@ export function buildStats(
 ): StatsOut {
   const { tok, usd } = bucketOf(records);
   const buckets = bucketsOf(records);
+  const cleanIds = new Set(delegated.filter((r) => cleanPinnedChild(r, all)).map((r) => r.id));
+  const delegatedBuckets = [
+    ...bucketsOf(delegated.filter((r) => cleanIds.has(r.id))).map((b) => ({ ...b, clean: true })),
+    ...bucketsOf(delegated.filter((r) => !cleanIds.has(r.id))).map((b) => ({ ...b, clean: false })),
+  ];
   return {
     days,
     n: records.length,
@@ -205,7 +232,7 @@ export function buildStats(
       p90Usd: usd.length > 0 ? percentile(usd, 0.9) : null,
     },
     buckets,
-    delegated: bucketsOf(delegated),
+    delegated: delegatedBuckets,
     excluded: {
       nested: all.filter((r) => r.nested !== null).length,
       contested: all.filter((r) => r.contested).length,
@@ -677,14 +704,16 @@ export function statsText(out: StatsOut): string[] {
     }
     if (out.delegated.length > 0) {
       for (const b of out.delegated) {
-        const label = `delegated ${b.provider ?? "?"} · ${b.complexity ?? "?"}`;
+        const label = `delegated ${b.provider ?? "?"} · ${b.complexity ?? "?"}${b.clean ? " · clean" : ""}`;
         lines.push(
           `${label.padEnd(16)} n=${String(b.n).padStart(3)}${b.lowN ? " ⚠" : "  "} p50 ${fmtTok(b.p50Tok).padStart(8)}  p90 ${fmtTok(b.p90Tok).padStart(8)}  ${fmtUsd(b.p50Usd)} / ${fmtUsd(b.p90Usd)}`,
         );
       }
-      lines.push(
-        "delegated buckets: nested subagent tasks – window snapshots including concurrent orchestrator/sibling burn (upper bounds, not clean per-task costs)",
-      );
+      if (out.delegated.some((b) => b.clean === false)) {
+        lines.push(
+          "delegated buckets: 'clean' = session-pinned children excluded from their parent (exact); the rest are window snapshots incl. concurrent orchestrator/sibling burn (upper bounds)",
+        );
+      }
     }
   }
   const ex = out.excluded;
@@ -808,12 +837,14 @@ export async function statsCommand(args: StatsArgs, deps: { subtrkDir?: string; 
     (args.provider === undefined || r.provider === args.provider) &&
     (args.complexity === undefined || r.complexity === args.complexity) &&
     (model === undefined || Object.keys(r.models ?? {}).some((m) => m.toLowerCase().includes(model)));
-  const enriched = statableRecords(store, nowMs, daysN)
-    .map((r) => enrichRecord(r, ustore))
-    .filter(matches);
-  const delegated = statableDelegated(store, nowMs, daysN)
-    .map((r) => enrichRecord(r, ustore))
-    .filter(matches);
+  // Enrich the whole done/uncontested set once, tree-sum it (PR D), then
+  // partition leaves (calibration samples) from delegated children.
+  const pool = [...statableRecords(store, nowMs, daysN), ...statableDelegated(store, nowMs, daysN)].map((r) =>
+    enrichRecord(r, ustore),
+  );
+  applyTreeSums(pool);
+  const enriched = pool.filter((r) => r.nested === null && matches(r));
+  const delegated = pool.filter((r) => r.nested !== null && matches(r));
   const out = buildStats(enriched, store.records, daysN, delegated);
   if (args.json) console.log(JSON.stringify(scrubValue({ schemaVersion: 1, ...out })));
   else for (const line of statsText(out)) console.log(line);
@@ -838,14 +869,17 @@ export async function estimateCommand(
   const store = readTrackStore(dir);
   const ustore = readUsageStore(dir);
   const model = args.model?.toLowerCase();
-  const enriched = statableRecords(store, nowMs, 30)
-    .map((r) => enrichRecord(r, ustore))
-    .filter(
-      (r) =>
-        (args.provider === undefined || r.provider === args.provider) &&
-        (args.complexity === undefined || r.complexity === args.complexity) &&
-        (model === undefined || Object.keys(r.models ?? {}).some((m) => m.toLowerCase().includes(model))),
-    );
+  const matchesFilter = (r: EnrichedRecord): boolean =>
+    (args.provider === undefined || r.provider === args.provider) &&
+    (args.complexity === undefined || r.complexity === args.complexity) &&
+    (model === undefined || Object.keys(r.models ?? {}).some((m) => m.toLowerCase().includes(model)));
+  // Tree-sum the pool before filtering (PR D): a parent's sample is its
+  // whole tree, so the children must be enriched alongside it.
+  const fullPool = [...statableRecords(store, nowMs, 30), ...statableDelegated(store, nowMs, 30)].map((r) =>
+    enrichRecord(r, ustore),
+  );
+  applyTreeSums(fullPool);
+  const enriched = fullPool.filter((r) => r.nested === null && matchesFilter(r));
   const out = buildEstimate(enriched, {
     provider: args.provider ?? null,
     complexity: args.complexity ?? null,
@@ -863,7 +897,7 @@ export async function estimateCommand(
       console.error(`subtrk: ${errorMessage(err)}`);
       return 1;
     }
-    const pool = statableRecords(store, nowMs, 30).map((r) => enrichRecord(r, ustore));
+    const pool = fullPool; // tree-summed above – every provider's ladder sees whole trees
     suggest = buildSuggest(pool, { providers, complexity: args.complexity ?? null, subtrkDir: dir, nowMs });
   }
   const full = suggest ? { ...out, suggest } : out;

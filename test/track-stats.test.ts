@@ -12,8 +12,10 @@ import type { ProviderModule } from "../src/core.ts";
 import { type ServeHandle, startConsole } from "../src/serve.ts";
 import { readTrackStore, type TrackRecord, type TrackStore, trackStorePath } from "../src/track.ts";
 import {
+  applyTreeSums,
   buildEstimate,
   buildStats,
+  cleanPinnedChild,
   delegatedShare,
   dominantModel,
   enrichRecord,
@@ -254,7 +256,7 @@ describe("delegated population + orchestrated annotation (PR C)", () => {
     assert.equal(out.delegated[0]?.n, 1);
     const text = statsText(out).join("\n");
     assert.match(text, /delegated glm · m/);
-    assert.match(text, /upper bounds, not clean per-task costs/);
+    assert.match(text, /upper bounds/);
   });
 
   it("buildEstimate annotates whole-tree burn when the picked bucket holds orchestrated records", () => {
@@ -286,6 +288,68 @@ describe("delegated population + orchestrated annotation (PR C)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("PR D: attribution split - clean pinned children + tree sums", () => {
+  const noPricing = emptyUsageStore();
+
+  it("cleanPinnedChild: only excluded-pin children count; unpinned or unexcluded stay window snapshots", () => {
+    const parent = rec({ id: "p1", task: "parent", excludedPins: ["pin_x"] });
+    const clean = rec({ id: "c1", task: "clean child", nested: "p1", sessionPin: "pin_x" });
+    const unpinned = rec({ id: "c2", task: "unpinned child", nested: "p1" });
+    const notExcluded = rec({ id: "c3", task: "other pin", nested: "p1", sessionPin: "pin_y" });
+    const all = [parent, clean, unpinned, notExcluded];
+    assert.equal(cleanPinnedChild(clean, all), true);
+    assert.equal(cleanPinnedChild(unpinned, all), false);
+    assert.equal(cleanPinnedChild(notExcluded, all), false);
+  });
+
+  it("applyTreeSums: a parent's sample is its whole tree; delegated clean buckets split from snapshots", () => {
+    const parent = enrichRecord(
+      rec({
+        id: "p1",
+        task: "orchestrated",
+        complexity: "xl",
+        usage: { in: 600, cr: 300, cw: 0, out: 100, reqs: 5 },
+        excludedPins: ["pin_x"],
+      }),
+      noPricing,
+    );
+    const cleanKid = enrichRecord(
+      rec({
+        id: "c1",
+        task: "clean child",
+        complexity: "m",
+        nested: "p1",
+        sessionPin: "pin_x",
+        usage: { in: 300, cr: 150, cw: 0, out: 50, reqs: 2 },
+      }),
+      noPricing,
+    );
+    const snapKid = enrichRecord(
+      rec({
+        id: "c2",
+        task: "snapshot child",
+        complexity: "m",
+        nested: "p1",
+        usage: { in: 10, cr: 5, cw: 0, out: 1, reqs: 1 },
+      }),
+      noPricing,
+    );
+    const pool = [parent, cleanKid, snapKid];
+    applyTreeSums(pool);
+    assert.equal(parent.tokens, 1000 + 500, "tree = own 1000 + clean child 500");
+    assert.equal(snapKid.tokens, 16, "snapshot child untouched by tree sums");
+    const out = buildStats([parent], [parent, cleanKid, snapKid], 30, [cleanKid, snapKid]);
+    assert.equal(out.buckets[0]?.p50Tok, 1500, "the leaf calibration sample is the tree");
+    const clean = out.delegated.find((b) => b.clean === true);
+    const snapshot = out.delegated.find((b) => b.clean === false);
+    assert.ok(clean && clean.p50Tok === 500, "clean delegated bucket carries the child's exact burn");
+    assert.ok(snapshot && snapshot.p50Tok === 16, "snapshot delegated bucket stays separate");
+    const text = statsText(out).join("\n");
+    assert.match(text, /· clean/);
+    assert.match(text, /upper bounds/);
   });
 });
 

@@ -61,6 +61,7 @@ export interface TrackRecord {
   models?: Record<string, number>; // model -> token share 0..1
   providerHint?: string; // carried from the marker; stats derive from models otherwise
   sessionPin?: string; // carried from the marker; retried harvests reuse it
+  excludedPins?: string[]; // child session pins this harvest left to the children (PR D)
   wallMs: number;
   note?: string;
 }
@@ -87,6 +88,7 @@ export interface HarvestWindow {
   t0: number;
   t1: number;
   session?: string; // manual pin: restrict session-attributed tiers (zcode rows, claude transcripts) to one session id
+  excludeSessions?: string[]; // PR D: child session pins whose burn belongs to child markers, not this window
 }
 
 export type HarvestFn = (w: HarvestWindow) => Promise<HarvestResult | null>;
@@ -431,10 +433,34 @@ async function closeMarker(
   ctx: Required<Pick<VerbCtx, "dir" | "now">> & { harvest: HarvestFn },
 ): Promise<TrackRecord> {
   const t1 = ctx.now();
+  // PR D attribution split: session pins of CHILD markers (open ones started
+  // inside this window, closed ones contained in it) are left to the children
+  // – the parent's harvest excludes them, so both sides count their own burn
+  // exactly once.
+  const pre = readTrackStore(ctx.dir);
+  const pinSet = new Set<string>();
+  const sameProject = (p: string): boolean => normalizeDir(p) === normalizeDir(marker.project);
+  for (const m of pre.markers) {
+    if (m.id !== marker.id && m.session && sameProject(m.project) && m.t0 >= marker.t0 && m.t0 <= t1) {
+      pinSet.add(m.session);
+    }
+  }
+  for (const r of pre.records) {
+    if (r.id !== marker.id && r.sessionPin && sameProject(r.project) && r.t0 >= marker.t0 && r.t1 <= t1) {
+      pinSet.add(r.sessionPin);
+    }
+  }
+  const excludeSessions = pinSet.size > 0 ? [...pinSet].sort() : undefined;
   let result: HarvestResult | null = null;
   let pending = false;
   try {
-    result = await ctx.harvest({ project: marker.project, t0: marker.t0, t1, session: marker.session });
+    result = await ctx.harvest({
+      project: marker.project,
+      t0: marker.t0,
+      t1,
+      session: marker.session,
+      excludeSessions,
+    });
   } catch {
     pending = true;
   }
@@ -460,6 +486,7 @@ async function closeMarker(
     models: usage === null ? undefined : result?.models,
     providerHint: marker.providerHint,
     sessionPin: marker.session,
+    excludedPins: excludeSessions,
     wallMs: t1 - marker.t0,
     note: note?.trim() || undefined,
   };
@@ -698,7 +725,13 @@ async function retryPending(dir: string, now: () => number, harvest: HarvestFn):
   for (const rec of pending) {
     let result: HarvestResult | null = null;
     try {
-      result = await harvest({ project: rec.project, t0: rec.t0, t1: rec.t1, session: rec.sessionPin });
+      result = await harvest({
+        project: rec.project,
+        t0: rec.t0,
+        t1: rec.t1,
+        session: rec.sessionPin,
+        excludeSessions: rec.excludedPins,
+      });
     } catch {
       continue;
     }

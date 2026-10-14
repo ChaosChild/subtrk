@@ -1717,21 +1717,32 @@ function renderTrackView() {
     }
   }
   // The delegated population: nested subagent tasks as their own labeled
-  // rows - window snapshots (they include concurrent orchestrator/sibling
-  // burn), so they read as upper bounds, never clean per-task costs.
+  // rows. Session-pinned children whose parent's harvest excluded them are
+  // EXACT (clean); the rest are window snapshots (they include concurrent
+  // orchestrator/sibling burn) - upper bounds.
+  const isCleanKid = r => {
+    if (!r.sessionPin || r.nested === null) return false;
+    const p = records.find(x => x.id === r.nested);
+    return Array.isArray(p && p.excludedPins) && p.excludedPins.includes(r.sessionPin);
+  };
   const nested30 = records.filter(r => r.usage !== null && !r.pending && !r.contested && r.nested !== null && r.status === "done" && r.t1 >= nowMs - 30 * 864e5);
-  const delBuckets = trkBuckets(nested30);
-  for (const model of delBuckets.models) {
-    for (const cx of [...TRK_CX, "–"]) {
-      const cell = (delBuckets.byCx[cx] || {})[model];
-      if (!cell) continue;
-      const p50 = trkPct(cell.tok, 0.5);
-      const p90tok = trkPct(cell.tok, 0.9);
-      const p50usd = trkPct(cell.usd, 0.5);
-      const p90usd = trkPct(cell.usd, 0.9);
-      distRows.push(
-        `<tr style="color:var(--text-2)"><td><i class="swatch" style="background:${trkModelColor(model)}"></i><span class="mono">${esc(model)}</span></td><td class="mono">${esc(cx)} <span class="badge b-orch">delegated</span></td><td class="r mono" style="text-align:right">${cell.tok.length}${cell.tok.length < 3 ? " ⚠" : ""}</td><td class="r mono" style="text-align:right">–</td><td class="r mono" style="text-align:right">${p50 === null ? "–" : fmtTok(p50)}</td><td class="r mono" style="text-align:right">${p90tok === null ? "–" : fmtTok(p90tok)}</td><td class="r mono" style="text-align:right">${p50usd === null ? "–" : trkUsd(p50usd)}</td><td class="r mono" style="text-align:right">${p90usd === null ? "–" : trkUsd(p90usd)}</td></tr>`,
-      );
+  for (const [set, badge, title] of [
+    [nested30.filter(isCleanKid), '<span class="badge b-ok">clean delegated</span>', 'session-pinned child, excluded from its parent - exact'],
+    [nested30.filter(r => !isCleanKid(r)), '<span class="badge b-orch">delegated</span>', 'window snapshot incl. concurrent orchestrator/sibling burn - upper bound'],
+  ]) {
+    const delBuckets = trkBuckets(set);
+    for (const model of delBuckets.models) {
+      for (const cx of [...TRK_CX, "–"]) {
+        const cell = (delBuckets.byCx[cx] || {})[model];
+        if (!cell) continue;
+        const p50 = trkPct(cell.tok, 0.5);
+        const p90tok = trkPct(cell.tok, 0.9);
+        const p50usd = trkPct(cell.usd, 0.5);
+        const p90usd = trkPct(cell.usd, 0.9);
+        distRows.push(
+          `<tr style="color:var(--text-2)"><td><i class="swatch" style="background:${trkModelColor(model)}"></i><span class="mono">${esc(model)}</span></td><td class="mono" title="${title}">${esc(cx)} ${badge}</td><td class="r mono" style="text-align:right">${cell.tok.length}${cell.tok.length < 3 ? " ⚠" : ""}</td><td class="r mono" style="text-align:right">–</td><td class="r mono" style="text-align:right">${p50 === null ? "–" : fmtTok(p50)}</td><td class="r mono" style="text-align:right">${p90tok === null ? "–" : fmtTok(p90tok)}</td><td class="r mono" style="text-align:right">${p50usd === null ? "–" : trkUsd(p50usd)}</td><td class="r mono" style="text-align:right">${p90usd === null ? "–" : trkUsd(p90usd)}</td></tr>`,
+        );
+      }
     }
   }
   $("tvdist").querySelector("tbody").innerHTML = distRows.length

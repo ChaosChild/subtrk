@@ -31,7 +31,7 @@ import {
 } from "./core.ts";
 import { allProviders, refreshableProviders } from "./providers/index.ts";
 import { type HarvestFn, readTrackStore, type TrackMarker } from "./track.ts";
-import { type EnrichedRecord, enrichRecord } from "./track-stats.ts";
+import { applyTreeSums, type EnrichedRecord, enrichRecord } from "./track-stats.ts";
 import { aggregateUsage, harvestUsage, readUsageStore } from "./usage.ts";
 
 export interface ServeDeps {
@@ -310,6 +310,7 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
             const tstore = readTrackStore(dir);
             const ustore = readUsageStore(dir);
             const records: EnrichedRecord[] = tstore.records.map((r) => enrichRecord(r, ustore));
+            applyTreeSums(records); // PR D: tokens are whole trees for parents with clean pinned children
             let markers: (TrackMarker & { live?: { tokens: number; attribution: string } | null })[] = tstore.markers;
             if (live) {
               const runLive: HarvestFn =

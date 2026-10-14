@@ -107,8 +107,10 @@ async function harvestZcode(acc: Accumulator, w: HarvestWindow, homeDir: string)
     compact: "zcode:compact",
   };
   let any = false;
+  const excluded = new Set(w.excludeSessions ?? []);
   for (const row of rows) {
     const r = row as Record<string, unknown>;
+    if (excluded.size > 0 && typeof r.sid === "string" && excluded.has(r.sid)) continue; // PR D: a child pin's burn is the child's
     const inTok = Number(r.inTok) || 0;
     const cr = Number(r.cr) || 0;
     const cw = Number(r.cw) || 0;
@@ -350,8 +352,12 @@ async function harvestClaude(acc: Accumulator, w: HarvestWindow, homeDir: string
   let any = false;
   const seen = new Set<string>(); // streaming replays duplicate message ids – first wins (ccusage rule), shared across all files
   const contributed = new Set<string>(); // session ids that produced in-window usage
+  // PR D: excluded child pins – a session id excludes that session (its main
+  // transcript + subagents), an agent-<id> pin excludes that one subagent file.
+  const excluded = new Set(w.excludeSessions ?? []);
   for (const dir of dirs) {
-    for (const { file, session } of await claudeFilesIn(dir, pin)) {
+    for (const { file, session, agent } of await claudeFilesIn(dir, pin)) {
+      if (excluded.size > 0 && ((agent !== undefined && excluded.has(agent)) || excluded.has(session))) continue;
       try {
         const st = await stat(file);
         if (st.mtimeMs < w.t0) continue; // untouched during the window
