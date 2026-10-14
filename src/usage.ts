@@ -848,6 +848,7 @@ export interface HarvestOpts {
   envPath?: string; // override ~/.subtrk/env for secret reads (tests)
   now?: number; // injectable clock
   fetchImpl?: typeof fetch; // injectable for tests
+  glmConfig?: () => unknown; // override the ~/.zcode config read (tests)
 }
 
 export interface HarvestSummary {
@@ -864,6 +865,7 @@ interface JobCtx {
   deadline: number;
   fetchImpl: typeof fetch;
   envPath?: string;
+  glmConfig?: () => unknown;
   summary: HarvestSummary;
 }
 
@@ -895,6 +897,7 @@ async function harvestGlm(ctx: JobCtx): Promise<void> {
     return;
   }
   const configObj = (() => {
+    if (ctx.glmConfig) return ctx.glmConfig();
     try {
       return JSON.parse(readFileSync(join(homedir(), ".zcode", "cli", "config.json"), "utf8"));
     } catch {
@@ -921,7 +924,9 @@ async function harvestGlm(ctx: JobCtx): Promise<void> {
 
   const dailyOut: Record<string, Record<string, UsageRow>> = {};
   const hourlyOut: Record<string, Record<string, UsageRow>> = {};
-  let hourlyTo = ctx.now;
+  // Bucket-ends only: never assume the API reported through "now". A stale
+  // tail must leave the trailing hours untouched, not zero them.
+  let hourlyTo = 0;
   for (const win of fetchWindows) {
     if (timeLeft(ctx) < 1_500) {
       ctx.summary.aborted = true;
@@ -955,6 +960,15 @@ async function harvestGlm(ctx: JobCtx): Promise<void> {
         hourlyTo = Math.max(hourlyTo, ms + 3_600_000);
       }
     }
+  }
+  // Upstream-degradation guard (z.ai usage-detail went flaky 2026-10-14:
+  // valid envelope, zero buckets for windows that provably contain usage,
+  // while replaceHourlyRange would zero every unreported hour). Zero hourly
+  // buckets = do not trust, do not wipe, leave state.at so the next run
+  // retries past the TTL. Observed-live shapes in test/usage.test.ts.
+  if (Object.keys(hourlyOut).length === 0) {
+    ctx.summary.skipped.push("glm: usage-detail returned no hourly buckets – upstream degraded, existing rows kept");
+    return;
   }
   const applied = mutateUsageStore(
     ctx.dir,
@@ -2199,6 +2213,7 @@ export async function harvestUsage(results: ProviderResult[] = [], opts: Harvest
     deadline: now + (opts.budgetMs ?? 8_000),
     fetchImpl: opts.fetchImpl ?? fetch,
     envPath: opts.envPath,
+    glmConfig: opts.glmConfig,
     summary,
   };
   const jobs: Promise<void>[] = [

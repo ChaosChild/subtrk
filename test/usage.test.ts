@@ -308,6 +308,135 @@ describe("usage parsers", () => {
     assert.equal(parseGlmDetail({ data: null }), null);
   });
 
+  describe("harvestUsage: glm upstream-degradation guards (z.ai incident 2026-10-14)", () => {
+    const cfg = () => ({ provider: { zai: { apiKey: "sk-test-abc123def456" } } });
+    const localLabel = (ms: number): string => {
+      const d = new Date(ms);
+      const p = (n: number) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:00:00`;
+    };
+    // Seed glm history + mark every other harvest job fresh so only glm runs.
+    const seed = (dir: string, now: number): string => {
+      const seedHk = hourKey(now - HOUR);
+      mutateUsageStore(
+        dir,
+        (s) => {
+          replaceHourlyRange(s, "glm", now - 2 * HOUR, now, {
+            [seedHk]: { "GLM-5.3": { in: 100, cr: 200, cw: 0, out: 5, req: 1 } },
+          });
+          const st = s.state as Record<string, Record<string, number | boolean>>;
+          st.glm = { at: 0, throughMs: 0, backfilled: true };
+          st.openrouter = { activityAt: now, analyticsAt: now };
+          st.zcode = { at: now };
+          st.alibaba = { at: now };
+          st.openai = { whamAt: now };
+        },
+        now,
+      );
+      return seedHk;
+    };
+    const fetchRejectingOthers = (glmBody: unknown): typeof fetch =>
+      (async (url: unknown) => {
+        if (String(url).includes("usage-detail")) {
+          return new Response(JSON.stringify(glmBody), { status: 200 });
+        }
+        return new Response("unavailable", { status: 503 });
+      }) as unknown as typeof fetch;
+
+    it("a healthy envelope with zero buckets keeps existing rows and leaves the watermark for retry", async () => {
+      const dir = tempDir();
+      const now = Date.UTC(2026, 9, 14, 8, 0, 0);
+      try {
+        const seedHk = seed(dir, now);
+        const degraded = {
+          code: 200,
+          msg: "Operation successful",
+          data: {
+            granularity: "HOUR",
+            timezone: "Asia/Shanghai",
+            modelUsage: {
+              xTime: ["2026-10-14 07:00:00", "2026-10-14 08:00:00"],
+              modelDataList: [],
+              totalUsage: { totalTokens: 0 },
+            },
+          },
+          success: true,
+        };
+        const summary = await harvestUsage([], {
+          subtrkDir: dir,
+          now,
+          fetchImpl: fetchRejectingOthers(degraded),
+          envPath: join(dir, "env"),
+          glmConfig: cfg,
+          budgetMs: 4000,
+        });
+        assert.ok(
+          summary.skipped.some((s) => s.includes("upstream degraded")),
+          `degradation note present: ${JSON.stringify(summary.skipped)}`,
+        );
+        const store = readUsageStore(dir);
+        assert.equal(store.hourly.glm?.[seedHk]?.["GLM-5.3"]?.in, 100, "seeded row survives the degraded fetch");
+        assert.equal((store.state.glm as { at?: number })?.at, 0, "watermark untouched – the next run retries");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("a stale tail no longer zeroes trailing hours beyond the last reported bucket", async () => {
+      const dir = tempDir();
+      const now = Date.UTC(2026, 9, 14, 8, 0, 0);
+      const staleMs = now - 5 * HOUR;
+      const label = localLabel(staleMs);
+      try {
+        const seedHk = seed(dir, now);
+        const stale = {
+          code: 200,
+          msg: "Operation successful",
+          data: {
+            granularity: "HOUR",
+            timezone: "Asia/Shanghai",
+            modelUsage: {
+              xTime: [label],
+              modelDataList: [
+                {
+                  modelCode: "glm-5.3",
+                  modelName: "GLM-5.3",
+                  uncachedInputTokensUsage: [1000],
+                  cachedInputTokensUsage: [2000],
+                  outputTokensUsage: [10],
+                },
+              ],
+            },
+          },
+          success: true,
+        };
+        const summary = await harvestUsage([], {
+          subtrkDir: dir,
+          now,
+          fetchImpl: fetchRejectingOthers(stale),
+          envPath: join(dir, "env"),
+          glmConfig: cfg,
+          budgetMs: 4000,
+        });
+        assert.ok(summary.applied.includes("glm"), `glm applied: ${JSON.stringify(summary)}`);
+        const store = readUsageStore(dir);
+        assert.equal(store.hourly.glm?.[hourKey(staleMs)]?.["GLM-5.3"]?.cr, 2000, "the stale bucket is applied");
+        assert.equal(
+          store.hourly.glm?.[seedHk]?.["GLM-5.3"]?.in,
+          100,
+          "the hour after the stale tail survives – trailing hours are no longer zeroed",
+        );
+        assert.equal(
+          (store.state.glm as { throughMs?: number })?.throughMs,
+          Date.parse(label.replace(" ", "T")) + HOUR,
+          "watermark = the last reported bucket's end, not now",
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   it("parses openrouter activity rows (UTC dates, numeric fields)", () => {
     const rows = extractOrActivity({
       data: [
