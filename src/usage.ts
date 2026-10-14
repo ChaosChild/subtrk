@@ -979,11 +979,18 @@ async function harvestGlm(ctx: JobCtx): Promise<void> {
     }
   }
   // Upstream-degradation guard (z.ai usage-detail went flaky 2026-10-14:
-  // valid envelope, zero buckets for windows that provably contain usage).
-  // Zero hourly buckets = do not trust the API – reconstruct the gap from
-  // the LOCAL zcode store instead of wiping or leaving a hole.
-  if (Object.keys(hourlyOut).length === 0) {
-    ctx.summary.skipped.push("glm: usage-detail returned no hourly buckets – upstream degraded");
+  // first valid envelopes with ZERO buckets, later bucket-shaped windows
+  // whose every value is zero - while windows provably contain usage). An
+  // hourly fetch totalling zero = do not trust the API – reconstruct from
+  // the LOCAL zcode store instead of wiping the range (when the machine
+  // truly was idle, the reconstruction writes the same zeros).
+  const apiHourlyTotal = Object.values(hourlyOut).reduce(
+    (a, models) =>
+      a + Object.values(models).reduce((b, u) => b + (u.in ?? 0) + (u.cr ?? 0) + (u.cw ?? 0) + (u.out ?? 0), 0),
+    0,
+  );
+  if (apiHourlyTotal === 0) {
+    ctx.summary.skipped.push("glm: usage-detail reported zero hourly usage – upstream degraded");
     await harvestGlmLocal(ctx, state?.throughMs ?? ctx.now - GLM_HOURLY_WINDOW_MS);
     return;
   }

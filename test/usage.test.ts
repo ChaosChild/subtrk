@@ -533,6 +533,56 @@ describe("usage parsers", () => {
       }
     });
 
+    it("bucket-shaped all-zero windows are degradation too (incident evolution) - local truth wins", async () => {
+      const dir = tempDir();
+      const now = Date.now() + 3600_000;
+      const h1 = now - 2 * HOUR;
+      const home = await mkHome([{ ms: h1 + 60_000, inTok: 500, cr: 100, out: 10 }]);
+      const zeroValuedEnvelope = {
+        code: 200,
+        msg: "Operation successful",
+        data: {
+          granularity: "HOUR",
+          timezone: "Asia/Shanghai",
+          modelUsage: {
+            xTime: ["2026-10-14 07:00:00", "2026-10-14 08:00:00"],
+            modelDataList: [
+              {
+                modelCode: "glm-5.3",
+                modelName: "GLM-5.3",
+                uncachedInputTokensUsage: [0, 0],
+                cachedInputTokensUsage: [0, 0],
+                outputTokensUsage: [0, 0],
+              },
+            ],
+          },
+        },
+        success: true,
+      };
+      try {
+        seedFresh(dir, now);
+        const summary = await harvestUsage([], {
+          subtrkDir: dir,
+          now,
+          fetchImpl: fetchWith(zeroValuedEnvelope),
+          envPath: join(dir, "env"),
+          glmConfig: cfg,
+          homeDir: home,
+          budgetMs: 4000,
+        });
+        assert.ok(
+          summary.applied.some((s) => s.includes("local reconstruction")),
+          `zero-valued claims do not count as healthy: ${JSON.stringify(summary)}`,
+        );
+        const store = readUsageStore(dir);
+        const row = store.hourly.glm?.[hourKey(h1 + 60_000)]?.["GLM-5.3"];
+        assert.ok(row && row.in === 400, `local truth written (in = 500 - 100): ${JSON.stringify(row)}`);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
     it("API recovery refetches the whole local span, replaces it and clears the provenance", async () => {
       const dir = tempDir();
       const now = Date.now() + 3600_000;
