@@ -209,10 +209,25 @@ async function projectDirs(root: string, project: string): Promise<string[]> {
   return out;
 }
 
+// A pin of the form agent-<agentId> names ONE subagent transcript
+// (<parentSid>/subagents/agent-<agentId>.jsonl) instead of a whole session.
+function isAgentPin(pin: string | null): pin is string {
+  return pin?.startsWith("agent-") === true;
+}
+
 // Does this encoded dir hold files the window can use? Pinned: the session's
 // own transcript (or one of its subagent files) existing is enough – the pin
-// names the session exactly. Unpinned: any transcript touched in the window.
+// names the session exactly; an agent pin needs its one subagent file.
+// Unpinned: any transcript touched in the window.
 async function dirUsable(dir: string, w: HarvestWindow, pin: string | null): Promise<boolean> {
+  if (isAgentPin(pin)) {
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      if (await stat(join(dir, e.name, "subagents", `${pin}.jsonl`)).catch(() => null)) return true;
+    }
+    return false;
+  }
   if (pin !== null) {
     try {
       await stat(join(dir, `${pin}.jsonl`));
@@ -296,9 +311,13 @@ async function claudeDirsFor(root: string, w: HarvestWindow, pin: string | null)
 
 // Session transcripts plus subagent transcripts (<sid>/subagents/*.jsonl,
 // attributed to the parent session – sidechain lines carry its sessionId).
-// A pin restricts the set to that one session (main + subagents).
-async function claudeFilesIn(dir: string, pin: string | null): Promise<{ file: string; session: string }[]> {
-  const files: { file: string; session: string }[] = [];
+// A pin restricts the set to that one session (main + subagents); an agent
+// pin to that one subagent file.
+async function claudeFilesIn(
+  dir: string,
+  pin: string | null,
+): Promise<{ file: string; session: string; agent?: string }[]> {
+  const files: { file: string; session: string; agent?: string }[] = [];
   let entries: Dirent[] = [];
   try {
     entries = await readdir(dir, { withFileTypes: true });
@@ -315,9 +334,12 @@ async function claudeFilesIn(dir: string, pin: string | null): Promise<{ file: s
     const sub = join(dir, e.name, "subagents");
     const subs = await readdir(sub, { withFileTypes: true }).catch(() => []);
     for (const f of subs) {
-      if (f.isFile() && f.name.endsWith(".jsonl")) files.push({ file: join(sub, f.name), session: e.name });
+      if (f.isFile() && f.name.endsWith(".jsonl")) {
+        files.push({ file: join(sub, f.name), session: e.name, agent: f.name.replace(/\.jsonl$/, "") });
+      }
     }
   }
+  if (isAgentPin(pin)) return files.filter((f) => f.agent === pin);
   return pin !== null ? files.filter((f) => f.session === pin) : files;
 }
 
@@ -347,7 +369,8 @@ async function harvestClaude(acc: Accumulator, w: HarvestWindow, homeDir: string
         const tot = (r.row.in ?? 0) + (r.row.cr ?? 0) + (r.row.cw ?? 0) + (r.row.out ?? 0);
         if (tot <= 0) continue;
         any = true;
-        contributed.add(r.sessionId ?? session);
+        // sidechain lines carry the PARENT sessionId – an agent pin records itself
+        contributed.add(isAgentPin(pin) ? pin : (r.sessionId ?? session));
         const u = bucket(acc.bySource, "claude");
         u.in += r.row.in ?? 0;
         u.cr += r.row.cr ?? 0;
@@ -393,6 +416,8 @@ async function codexFiles(sessionsRoot: string): Promise<string[]> {
 async function harvestCodex(acc: Accumulator, w: HarvestWindow, homeDir: string): Promise<boolean> {
   const files = await codexFiles(join(homeDir, ".codex", "sessions"));
   const wantDir = normalizeDir(w.project);
+  // a pin names one rollout by its session_meta.payload.id (= CODEX_THREAD_ID)
+  const pin = typeof w.session === "string" && w.session.trim() !== "" ? w.session.trim() : null;
   let any = false;
   for (const file of files) {
     try {
@@ -402,20 +427,24 @@ async function harvestCodex(acc: Accumulator, w: HarvestWindow, homeDir: string)
       continue;
     }
     let cwd: string | null = null;
+    let id: string | null = null;
     let model: string | null = null;
     let prev: CodexParserState | null = null;
     const rl = readline.createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
     for await (const line of rl) {
       if (cwd === null && line.includes('"session_meta"')) {
         try {
-          const meta = JSON.parse(line) as { payload?: { cwd?: unknown } };
+          const meta = JSON.parse(line) as { payload?: { cwd?: unknown; id?: unknown } };
           if (typeof meta.payload?.cwd === "string") cwd = meta.payload.cwd;
+          if (typeof meta.payload?.id === "string") id = meta.payload.id;
         } catch {
           /* keep scanning */
         }
         if (cwd !== null && normalizeDir(cwd) !== wantDir) break; // a different project's rollout
+        if (cwd !== null && pin !== null && id !== pin) break; // another session's rollout
         continue;
       }
+      if (pin !== null && id !== pin) continue; // pinned: nothing counts before a matching session_meta
       const r = parseCodexRolloutLine(line, model, prev);
       if (!r) continue;
       if (r.modelUpdate !== null) model = r.modelUpdate;
@@ -424,6 +453,7 @@ async function harvestCodex(acc: Accumulator, w: HarvestWindow, homeDir: string)
       const tot = (r.row.in ?? 0) + (r.row.cr ?? 0) + (r.row.cw ?? 0) + (r.row.out ?? 0);
       if (tot <= 0) continue;
       any = true;
+      if (pin !== null) acc.sessions.add(pin);
       const u = bucket(acc.bySource, "codex");
       u.in += r.row.in ?? 0;
       u.cr += r.row.cr ?? 0;

@@ -56,8 +56,9 @@ function claudeLine(
   });
 }
 
-function codexMeta(cwd: string): string {
-  return JSON.stringify({ timestamp: iso(T0), ordinal: 0, type: "session_meta", payload: { cwd } });
+function codexMeta(cwd: string, id?: string): string {
+  const payload = id ? { cwd, id } : { cwd };
+  return JSON.stringify({ timestamp: iso(T0), ordinal: 0, type: "session_meta", payload });
 }
 
 function codexCtx(model: string, ts: number): string {
@@ -193,6 +194,38 @@ describe("harvestWindow: claude transcript robustness", () => {
     }
   });
 
+  it("an agent-<id> pin harvests exactly that subagent file; a parent-sid pin keeps main + all subagents", async () => {
+    const home = tempHome();
+    const dir = join(home, ".claude", "projects", "C--work-agentpin");
+    const sub = join(dir, "sessP", "subagents");
+    mkdirSync(sub, { recursive: true });
+    try {
+      writeFileSync(join(dir, "sessP.jsonl"), claudeLine(T0 + 30_000, "m", 1, 0, 1, { sessionId: "sessP" }));
+      writeFileSync(join(sub, "agent-aaa.jsonl"), claudeLine(T0 + 60_000, "a", 100, 0, 10, { sessionId: "sessP" }));
+      writeFileSync(join(sub, "agent-bbb.jsonl"), claudeLine(T0 + 70_000, "b", 1_000, 0, 100, { sessionId: "sessP" }));
+      const w = { project: "C:\\work\\agentpin", t0: T0, t1: T1 };
+
+      const agent = await harvestWindow({ ...w, session: "agent-aaa" }, { homeDir: home });
+      assert.ok(agent, "an agent pin must not harvest null");
+      assert.equal(agent.attribution, "session-scan");
+      assert.deepEqual(agent.usage, { in: 100, cr: 0, cw: 0, out: 10, reqs: 1 });
+      assert.deepEqual(agent.sessions, ["agent-aaa"], "the pin, not the parent sessionId the lines carry");
+
+      const parent = await harvestWindow({ ...w, session: "sessP" }, { homeDir: home });
+      assert.ok(parent);
+      assert.deepEqual(parent.usage, { in: 1_101, cr: 0, cw: 0, out: 111, reqs: 3 });
+      assert.deepEqual(parent.sessions, ["sessP"]);
+
+      const unpinned = await harvestWindow(w, { homeDir: home });
+      assert.ok(unpinned);
+      assert.deepEqual(unpinned.usage, parent.usage);
+
+      assert.equal(await harvestWindow({ ...w, session: "agent-nope" }, { homeDir: home }), null);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("preserves the 1h cache-write split on bySource and the aggregate", async () => {
     const home = tempHome();
     const dir = join(home, ".claude", "projects", "C--work-split");
@@ -266,6 +299,40 @@ describe("harvestWindow: codex rollout robustness", () => {
       const res = await harvestWindow({ project: "C:\\work\\mine", t0: T0, t1: T1 }, { homeDir: home });
       assert.ok(res);
       assert.deepEqual(res.usage, { in: 200, cr: 0, cw: 0, out: 20, reqs: 2 });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("harvestWindow: codex session pin", () => {
+  it("a pin keeps only the rollout whose session_meta id matches and records it; unpinned sums all", async () => {
+    const home = tempHome();
+    const day = join(home, ".codex", "sessions", "2026", "01", "02");
+    mkdirSync(day, { recursive: true });
+    try {
+      writeFileSync(
+        join(day, "parent.jsonl"),
+        [codexMeta("C:\\work\\cx", "thr-parent"), codexToken(T0 + 60_000, 100, 0, 0, 10)].join("\n"),
+      );
+      writeFileSync(
+        join(day, "child.jsonl"),
+        [codexMeta("C:\\work\\cx", "thr-child"), codexToken(T0 + 70_000, 1_000, 0, 0, 100)].join("\n"),
+      );
+      const w = { project: "C:\\work\\cx", t0: T0, t1: T1 };
+
+      const pinned = await harvestWindow({ ...w, session: "thr-child" }, { homeDir: home });
+      assert.ok(pinned);
+      assert.equal(pinned.attribution, "window");
+      assert.deepEqual(pinned.usage, { in: 1_000, cr: 0, cw: 0, out: 100, reqs: 1 });
+      assert.deepEqual(pinned.sessions, ["thr-child"]);
+
+      const unpinned = await harvestWindow(w, { homeDir: home });
+      assert.ok(unpinned);
+      assert.deepEqual(unpinned.usage, { in: 1_100, cr: 0, cw: 0, out: 110, reqs: 2 });
+      assert.deepEqual(unpinned.sessions, []);
+
+      assert.equal(await harvestWindow({ ...w, session: "thr-nope" }, { homeDir: home }), null);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
