@@ -989,7 +989,10 @@ async function harvestGlm(ctx: JobCtx): Promise<void> {
   const apiHourlyTotal = Object.values(hourlyOut).reduce((a, models) => a + sumRows(models), 0);
   const degraded = async (why: string): Promise<void> => {
     ctx.summary.skipped.push(`glm: ${why} – upstream degraded`);
-    await harvestGlmLocal(ctx, state?.throughMs ?? ctx.now - GLM_HOURLY_WINDOW_MS);
+    // Always reconstruct the FULL hourly window, never from throughMs -
+    // garbage-shaped "healthy" runs poison the watermark, and the local
+    // store rewrites the whole span cheaply.
+    await harvestGlmLocal(ctx, ctx.now - GLM_HOURLY_WINDOW_MS);
   };
   if (apiHourlyTotal === 0) {
     await degraded("usage-detail reported zero hourly usage");
@@ -1142,7 +1145,9 @@ async function harvestGlmLocal(ctx: JobCtx, fromMs: number): Promise<void> {
     ctx.now,
   );
   if (applied) {
-    ctx.summary.applied.push(`glm (local reconstruction: ${hours.size}h from the zcode store – upstream degraded)`);
+    ctx.summary.applied.push(
+      `glm (local reconstruction: ${Object.keys(hours).length}h from the zcode store – upstream degraded)`,
+    );
   } else ctx.summary.skipped.push("glm: store busy (local reconstruction)");
 }
 
