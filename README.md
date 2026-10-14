@@ -183,84 +183,60 @@ The section comes in two tiers. The default is quota guidance only – some
 users never want task tracking in their agents' instructions. Interactive
 `subtrk init` asks once whether to teach it (default No, stored as
 `agents.track` in `~/.subtrk/config.json`); `subtrk init --agent <harness>
---track` opts in explicitly, `--no-track` opts back out. The track tier also
-registers lifecycle hooks in the harnesses that support them – claude
-(`~/.claude/settings.json`), zcode (`~/.zcode/cli/config.json`) and codex
-(`~/.codex/config.toml`) – so the harness itself reminds the agent to run
-`track start`/`track stop` at session start and turn end (`subtrk track
-hook` under the hood: read-only, throttled to once per session plus
+--track` opts in explicitly, `--no-track` opts back out. Both tiers keep the
+AGENTS.md/CLAUDE.md section SLIM – the detailed contracts live on demand in
+skills, installed into each harness's skills dir:
+
+| harness | skills dir |
+|---|---|
+| claude | `~/.claude/skills` |
+| zcode | `~/.zcode/skills` |
+| codex | `~/.codex/skills` |
+| opencode | `~/.config/opencode/skills` |
+| agy | `~/.gemini/config/skills` (IDE) and `~/.gemini/antigravity-cli/skills` (CLI) |
+
+The `subtrk` skill (both tiers) carries the full quota/status contract; the
+`subtrk-track` skill (track tier) carries the lifecycle playbook – ladder,
+pause/resume, stop-time reassessment, subagent session pins. `init --agent`
+writes/refreshes them idempotently and `--no-track` removes `subtrk-track`.
+
+The track tier also registers lifecycle hooks in the harnesses that support
+them – claude (`~/.claude/settings.json`), zcode (`~/.zcode/cli/config.json`)
+and codex (`~/.codex/config.toml`) – so the harness itself reminds the agent
+to run `track start`/`track stop` at session start and turn end (`subtrk
+track hook` under the hood: read-only, throttled to once per session plus
 marker-set changes, never blocks). Every hook entry subtrk writes carries the
 literal `subtrk track hook` in its command; re-running with `--no-track`
 removes exactly those and nothing else, and a JSON target gets a one-time
 `.subtrk-bak` copy before its first modification. opencode and agy get
-instructions only. On any other harness, paste the status body below into its
-instructions file manually (without the markers – `subtrk init --agent`
-wraps it in them):
+instructions only (agy hooks are documented but not yet wired). On any other
+harness, paste the status body below into its instructions file manually
+(without the markers – `subtrk init --agent` wraps it in them):
 
 ```markdown
 ## subtrk
 
 `subtrk` reports remaining quota for the AI plans configured on this machine.
-Use it before committing to large or long-running work on a provider –
-discovering a rate limit mid-task wastes the work – when a provider starts
-failing with quota or rate-limit errors, and on wake-ups: `recheckAfter` and
-`nextEvent.at` say when new information can exist, so schedule around them
-instead of polling.
-
-Plain `subtrk` or `subtrk status` prints a compact view; `subtrk status --json`
-is the machine-readable contract:
-
-- `providers[].windows[]` – per-provider usage windows with `usedPercent` and `resetsAt` (ISO-8601 UTC)
-- `nextEvent.at` – the earliest time new information can exist; schedule wake-ups there, never poll
-- `recheckAfter` – heartbeat when no `nextEvent` applies
-- `error.kind` – branch on it, never on message text; `error.remedy` is the exact command that fixes the error
-- exit codes: 0 ran · 1 runtime failure · 2 usage error · 3 --strict violation
-- plain calls go through a shared TTL cache and are polite; `--fresh` only when a result is actively stale
-- when an error's `remedy` is `subtrk auth refresh --provider <id>`, the provider's login expired – you may run that command yourself, but it opens a browser tab on this machine: tell the operator first and wait for their go
-- any other remedy is an interactive operator step (logins, setup prompts) – surface it verbatim instead of attempting it
-- a missing provider means the plan is not configured on this machine, not an error
+Run `subtrk status --json` before committing to large or long-running provider
+work, when a provider fails with quota or rate-limit errors, and on wake-ups –
+`nextEvent.at` says when new information can exist, so schedule around it
+instead of polling. The full contract (windows, error kinds and remedies, exit
+codes, cache etiquette) is in the `subtrk` skill. Never run
+`subtrk auth refresh` without telling the operator first – it opens a browser
+tab on this machine.
 ```
 
 The `--track` tier appends this section to the body above:
 
 ```markdown
-### track - task effort accounting (local only)
+### track
 
-- Applies to every task that produces or changes a deliverable - code, docs,
-  research writeups, planning, batch runs, releases - and anything expected
-  to span more than a few minutes. When unsure, start a marker: an extra
-  record costs ~350 bytes; a missing one is unrecoverable - that window's
-  burn can never be attributed again, and stats/estimate lose the calibration.
-- First actions of the task, before the first file read or search:
-  1. `subtrk track status` - handle what it lists: stop a stale marker you
-     own (`track stop --id <id> --status aborted`), resume a paused task
-     that this work continues (`track resume --id <id>`), prune dead ones
-     (`subtrk track prune`). Never stack open markers.
-  2. `subtrk track start --task "<short description>" --complexity <xs|s|m|l|xl>`
-     - the complexity is a ONE-LINE ladder guess - no research, no lookups;
-     accuracy is earned at stop. xs=quick edit or doc tweak, s=focused
-     change, m=multi-file feature, l=subsystem, xl=multi-day epic.
-- Complexity means the WHOLE tree's burn, delegation included: an
-  orchestrated task carries its fleet. Judge by total tokens, never by your
-  own session's effort or the wall clock - parallel workers hide epic scale.
-- Lifecycle: stop `--status done` only when nothing can come back - no
-  timer, CI run, background command, or expected reply still pending - and
-  stop BEFORE the final turn ends when no channel can ever return. While
-  feedback is pending: `track stop --status paused`; when it lands and the
-  work continues: `track resume --id <id>` (same identity, t0 kept). A
-  genuinely new instruction closes the current marker first.
-- ALWAYS reassess complexity at stop - hard rule. The stop output shows the
-  delegation split; drifted labels get fixed right there
-  (`track stop --complexity <cx>`), or afterwards on the record
-  (`subtrk track recode --id <id> --complexity <cx>`).
-- Subagents track their own activity too, starting with the session pin the
-  orchestrator passes in the dispatch brief (zcode:
-  `sess_subagent_agent_<agentId>`; claude: `agent-<agentId>`; codex: the
-  child self-pins `$CODEX_THREAD_ID`).
-- Before committing to large work, ask:
-  `subtrk track estimate --complexity m --provider <id>`
-  If the verdict says p90 does not fit the remaining window, defer, split the
-  task, or switch model - discovering a rate limit mid-task wastes the work.
+Track every task that produces or changes a deliverable. First actions of any
+task: `subtrk track status` (handle what it lists), then
+`subtrk track start --task "<short description>" --complexity <xs|s|m|l|xl>`
+(one-line ladder guess, no research – you reassess at stop). The full
+lifecycle playbook (pause/resume, reassessment, subagent session pins) is the
+`subtrk-track` skill; hooks will remind you at the right moments.
 ```
 
 ## Providers

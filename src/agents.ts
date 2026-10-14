@@ -3,7 +3,7 @@
 // is wrapped in conda-init-style sentinels so a re-run replaces only subtrk's
 // own block and removal is a clean delete. The file belongs to the user –
 // nothing outside the markers is ever rewritten.
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -13,24 +13,42 @@ export interface AgentTarget {
   label: string;
   file: string; // absolute; derived from os.homedir() – never manual ~ expansion
   hint: string; // one-line note for the unknown-name listing
+  skillsDirs: string[]; // harness skills roots; subtrk owns <dir>/subtrk*/ there
 }
 
 // Ordered record – the listing and the usage line follow this order. base
 // replaces homedir (tests inject a temp dir so tests never touch real files).
 export function agentTargets(base: string = homedir()): Record<AgentId, AgentTarget> {
   return {
-    claude: { label: "Claude Code", file: join(base, ".claude", "CLAUDE.md"), hint: "global memory file" },
-    zcode: { label: "ZCode", file: join(base, ".zcode", "AGENTS.md"), hint: "global instructions" },
-    codex: { label: "Codex CLI", file: join(base, ".codex", "AGENTS.md"), hint: "global instructions" },
+    claude: {
+      label: "Claude Code",
+      file: join(base, ".claude", "CLAUDE.md"),
+      hint: "global memory file",
+      skillsDirs: [join(base, ".claude", "skills")],
+    },
+    zcode: {
+      label: "ZCode",
+      file: join(base, ".zcode", "AGENTS.md"),
+      hint: "global instructions",
+      skillsDirs: [join(base, ".zcode", "skills")],
+    },
+    codex: {
+      label: "Codex CLI",
+      file: join(base, ".codex", "AGENTS.md"),
+      hint: "global instructions",
+      skillsDirs: [join(base, ".codex", "skills")],
+    },
     opencode: {
       label: "OpenCode",
       file: join(base, ".config", "opencode", "AGENTS.md"),
       hint: "this exact path even on Windows",
+      skillsDirs: [join(base, ".config", "opencode", "skills")],
     },
     agy: {
       label: "Antigravity",
       file: join(base, ".gemini", "AGENTS.md"),
       hint: "Antigravity global rules (path is ~/.gemini by convention)",
+      skillsDirs: [join(base, ".gemini", "config", "skills"), join(base, ".gemini", "antigravity-cli", "skills")],
     },
   };
 }
@@ -40,19 +58,49 @@ export const AGENT_TARGETS: Readonly<Record<AgentId, AgentTarget>> = agentTarget
 export const AGENT_SECTION_BEGIN = "<!-- subtrk:begin -->";
 export const AGENT_SECTION_END = "<!-- subtrk:end -->";
 
-// The blurb comes in two tiers (D19). Tier 1 (default) is quota guidance only;
-// tier 2 (opt-in via `init --agent --track` or the config preference) adds the
-// task-tracking section. Keep both terse and in sync with the status contract
-// (spec §Output contract) – when a provider is added, check whether this text
-// needs updating.
+// The blurb comes in two tiers (D19). Since v0.22 both tiers are SLIM: the
+// detailed contracts moved on demand into skills (see SUBTRK_SKILL_MD /
+// SUBTRK_TRACK_SKILL_MD below) because an AGENTS.md body is always-in-context
+// cost. Keep the sections terse and in sync with the skills.
 const AGENT_STATUS_BODY = `## subtrk
 
 \`subtrk\` reports remaining quota for the AI plans configured on this machine.
-Use it before committing to large or long-running work on a provider –
-discovering a rate limit mid-task wastes the work – when a provider starts
-failing with quota or rate-limit errors, and on wake-ups: \`recheckAfter\` and
-\`nextEvent.at\` say when new information can exist, so schedule around them
-instead of polling.
+Run \`subtrk status --json\` before committing to large or long-running provider
+work, when a provider fails with quota or rate-limit errors, and on wake-ups –
+\`nextEvent.at\` says when new information can exist, so schedule around it
+instead of polling. The full contract (windows, error kinds and remedies, exit
+codes, cache etiquette) is in the \`subtrk\` skill. Never run
+\`subtrk auth refresh\` without telling the operator first – it opens a browser
+tab on this machine.`;
+
+// Tier 2 adds the track trigger – a pointer, not the playbook. The playbook
+// lives in the subtrk-track skill; the lifecycle hooks nudge at the moments.
+const AGENT_TRACK_SECTION = `### track
+
+Track every task that produces or changes a deliverable. First actions of any
+task: \`subtrk track status\` (handle what it lists), then
+\`subtrk track start --task "<short description>" --complexity <xs|s|m|l|xl>\`
+(one-line ladder guess, no research – you reassess at stop). The full
+lifecycle playbook (pause/resume, reassessment, subagent session pins) is the
+\`subtrk-track\` skill; hooks will remind you at the right moments.`;
+
+// ---------- skills (on-demand depth; installed into each harness's skills dir) ----------
+
+export const SUBTRK_SKILL_NAME = "subtrk";
+export const SUBTRK_TRACK_SKILL_NAME = "subtrk-track";
+
+// Tier 1 skill: the quota/status contract that used to live in AGENTS.md.
+export const SUBTRK_SKILL_MD = `---
+name: subtrk
+description: >
+  Remaining quota for the AI plans configured on this machine. Use before
+  committing to large or long-running provider work, when a provider starts
+  failing with quota or rate-limit errors, and on wake-ups: subtrk status
+  --json is the machine contract (windows, nextEvent.at, recheckAfter,
+  error kinds + remedies, exit codes).
+---
+
+# subtrk – quota status contract
 
 Plain \`subtrk\` or \`subtrk status\` prints a compact view; \`subtrk status --json\`
 is the machine-readable contract:
@@ -67,11 +115,20 @@ is the machine-readable contract:
 - any other remedy is an interactive operator step (logins, setup prompts) – surface it verbatim instead of attempting it
 - a missing provider means the plan is not configured on this machine, not an error`;
 
-// Tier 2 extension. The trigger is positional, not predictive: "first actions
-// of the task", before any file read – a gate an agent evaluates by forecast
-// ("a task you expect to take more than a few minutes") fails exactly on the
-// underestimated tasks, which are the ones worth tracking.
-const AGENT_TRACK_SECTION = `### track - task effort accounting (local only)
+// Tier 2 skill: the lifecycle playbook that used to live in AGENTS.md.
+export const SUBTRK_TRACK_SKILL_MD = `---
+name: subtrk-track
+description: >
+  Task effort accounting for every task that produces or changes a
+  deliverable - code, docs, research writeups, planning, batch runs,
+  releases. Fires at task start (track start with a one-line complexity
+  guess), at stop (mandatory complexity reassessment; pause while feedback
+  is pending; resume continuations), and before large work (track
+  estimate). Subagents track their own activity with the session pin from
+  the dispatch brief.
+---
+
+# subtrk track – the lifecycle playbook
 
 - Applies to every task that produces or changes a deliverable - code, docs,
   research writeups, planning, batch runs, releases - and anything expected
@@ -103,11 +160,34 @@ const AGENT_TRACK_SECTION = `### track - task effort accounting (local only)
 - Subagents track their own activity too, starting with the session pin the
   orchestrator passes in the dispatch brief (zcode:
   \`sess_subagent_agent_<agentId>\`; claude: \`agent-<agentId>\`; codex: the
-  child self-pins \`$CODEX_THREAD_ID\`).
+  child self-pins \`$CODEX_THREAD_ID\`; agy: the SessionStart hook payload's
+  conversationId).
 - Before committing to large work, ask:
   \`subtrk track estimate --complexity m --provider <id>\`
   If the verdict says p90 does not fit the remaining window, defer, split the
   task, or switch model - discovering a rate limit mid-task wastes the work.`;
+
+// Idempotent skill write: subtrk owns <skillsDir>/subtrk*/ outright.
+export function writeAgentSkill(skillsDir: string, name: string, body: string): "created" | "updated" {
+  const skillFile = join(skillsDir, name, "SKILL.md");
+  let existed = true;
+  try {
+    readFileSync(skillFile, "utf8");
+  } catch {
+    existed = false;
+  }
+  mkdirSync(dirname(skillFile), { recursive: true });
+  writeFileSync(skillFile, body.endsWith("\n") ? body : `${body}\n`);
+  return existed ? "updated" : "created";
+}
+
+// Symmetric removal (tier downgrade strips the track skill).
+export function removeAgentSkill(skillsDir: string, name: string): boolean {
+  const skillDir = join(skillsDir, name);
+  if (!existsSync(skillDir)) return false;
+  rmSync(skillDir, { recursive: true, force: true });
+  return true;
+}
 
 // The full marked section for a tier. Tier 2 = tier 1 + the track section.
 export function agentSectionFor(track: boolean): string {

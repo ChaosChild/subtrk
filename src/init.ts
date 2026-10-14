@@ -9,9 +9,29 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { hookCapable, installAgentHooks, removeAgentHooks } from "./agent-hooks.ts";
 import type { AgentTarget } from "./agents.ts";
-import { agentSectionFor, agentTargets, applyAgentSection, printAgentListing } from "./agents.ts";
+import {
+  agentSectionFor,
+  agentTargets,
+  applyAgentSection,
+  printAgentListing,
+  removeAgentSkill,
+  SUBTRK_SKILL_MD,
+  SUBTRK_SKILL_NAME,
+  SUBTRK_TRACK_SKILL_MD,
+  SUBTRK_TRACK_SKILL_NAME,
+  writeAgentSkill,
+} from "./agents.ts";
 import type { ProviderId } from "./core.ts";
-import { ALL_PROVIDER_IDS, getSecret, loadConfig, registerSecret, SUBTRK_DIR, saveConfig, scrub } from "./core.ts";
+import {
+  ALL_PROVIDER_IDS,
+  errorMessage,
+  getSecret,
+  loadConfig,
+  registerSecret,
+  SUBTRK_DIR,
+  saveConfig,
+  scrub,
+} from "./core.ts";
 import { claudeAuth } from "./providers/claude.ts";
 import { desktopKeyPath, kimiTokenStale, parseDesktopKeyFile, parseKimiCliCredentials } from "./providers/kimi.ts";
 import { parseOpenaiAuth } from "./providers/openai.ts";
@@ -393,9 +413,11 @@ function resolveTrackTier(opts: InitOpts, subtrkDir: string): boolean {
 }
 
 // `subtrk init --agent <harness>`: write the instruction section for the
-// resolved tier, install (tier 2) or remove (tier 1) lifecycle hooks where the
-// harness supports them, print what happened, exit – no provider selection,
-// no checks. Unknown name prints the supported listing on stderr and exits 2.
+// resolved tier, install the tier's skills into every harness skills dir
+// (tier 2 adds subtrk-track; tier 1 removes it), install (tier 2) or remove
+// (tier 1) lifecycle hooks where the harness supports them, print what
+// happened, exit – no provider selection, no checks. Unknown name prints the
+// supported listing on stderr and exits 2.
 function agentStep(name: string, base: string | undefined, track: boolean): number {
   const targets: Record<string, AgentTarget> = agentTargets(base);
   const target = targets[name];
@@ -406,6 +428,20 @@ function agentStep(name: string, base: string | undefined, track: boolean): numb
   }
   const { status } = applyAgentSection(target.file, agentSectionFor(track));
   console.log(`${name} – ${status} ${target.file}${track ? " (track tier)" : ""}`);
+  for (const dir of target.skillsDirs) {
+    try {
+      const s1 = writeAgentSkill(dir, SUBTRK_SKILL_NAME, SUBTRK_SKILL_MD);
+      console.log(`${name} – ${s1} skill ${SUBTRK_SKILL_NAME} in ${dir}`);
+      if (track) {
+        const s2 = writeAgentSkill(dir, SUBTRK_TRACK_SKILL_NAME, SUBTRK_TRACK_SKILL_MD);
+        console.log(`${name} – ${s2} skill ${SUBTRK_TRACK_SKILL_NAME} in ${dir}`);
+      } else if (removeAgentSkill(dir, SUBTRK_TRACK_SKILL_NAME)) {
+        console.log(`${name} – removed skill ${SUBTRK_TRACK_SKILL_NAME} from ${dir}`);
+      }
+    } catch (err) {
+      console.log(`${name} – skill write failed in ${dir}: ${errorMessage(err)}`);
+    }
+  }
   if (track) {
     if (hookCapable(name)) {
       const r = installAgentHooks(name, base);

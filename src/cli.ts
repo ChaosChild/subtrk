@@ -134,15 +134,18 @@ const INIT_USAGE = `subtrk init – one-time interactive setup
 Checks every provider, offers installs and logins where missing, and writes
 new secrets to ~/.subtrk/env (mode 0600 on POSIX). Secrets are never echoed.
 
---agent <id> skips all of that: it only writes subtrk's instruction section
-into harness <id>'s global instructions file (claude|zcode|codex|opencode|agy)
-and exits. Idempotent – only subtrk's own marked block is touched.
+--agent <id> skips all of that: it only writes subtrk's slim instruction
+section into harness <id>'s global instructions file and installs subtrk's
+skills into the harness's skills dir (claude|zcode|codex|opencode|agy)
+and exits. Idempotent – only subtrk's own marked block and skill folders
+(subtrk, subtrk-track) are touched.
 
 The instruction section comes in two tiers (interactive init asks once which
 you want, stored as agents.track in ~/.subtrk/config.json): status-only by
-default, or --track for the task-tracking section plus lifecycle hooks that
-remind agents to run track start/stop (claude, zcode, codex; re-run with
---no-track to strip both back).
+default, or --track for task tracking. Both tiers keep AGENTS.md slim (the
+detail lives in the skills); --track additionally installs the subtrk-track
+skill and lifecycle hooks that remind agents to run track start/stop
+(claude, zcode, codex; re-run with --no-track to strip both back).
 
 flags:
   --agent <id>   install agent instructions for <id>, no interaction

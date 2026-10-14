@@ -101,7 +101,7 @@ export function nudgeText(event: HookEvent, markers: TrackMarker[], paused: Trac
     return scrub(
       "subtrk: no open track marker. If this session starts a task that produces or changes a deliverable, " +
         'open one first: subtrk track start --task "<short description>" --complexity <xs|s|m|l|xl> ' +
-        "(one-line ladder guess, no research – you reassess at stop)",
+        "(one-line ladder guess, no research – you reassess at stop; playbook: the subtrk-track skill)",
     );
   }
   const first = markers[0] as TrackMarker;
@@ -111,7 +111,7 @@ export function nudgeText(event: HookEvent, markers: TrackMarker[], paused: Trac
     `subtrk: track marker ${first.id} ("${task}") open since ${clock(first.t0)} in this folder${more}. ` +
       `Continue under it, or stop it before new work: subtrk track stop --id ${first.id} ` +
       `--status done|aborted|paused (paused while feedback is pending; resume --id reopens it; ` +
-      `--complexity is the final reassessment)`,
+      `--complexity is the final reassessment; playbook: the subtrk-track skill)`,
   );
 }
 

@@ -851,16 +851,27 @@ between the markers. Writes go through a temp file + rename in the target
 directory (two attempts); a failed write is reported, never silently dropped –
 the file belongs to the user.
 
-Tiers (v0.1.19): the section comes in two variants over one shared status
-body. Default is status-only; the track tier (`--track`, or `agents.track:
-true` in `~/.subtrk/config.json`, asked once by interactive init with default
-No) adds the `### track` section – trigger positional ("first actions of the
-task, before the first file read"), not predictive – and, for
-claude/zcode/codex, installs the lifecycle hooks of §Track store. `--no-track`
-overrides per run and also removes previously installed hooks (matching only
-subtrk-tagged handlers; a one-time `.subtrk-bak` copy precedes the first
-modification of a JSON target). No grandfathering: a plain re-run on a
-pre-0.1.19 track blurb writes the status-only tier.
+Tiers (v0.1.19; slimmed v0.22): the section comes in two variants, both SLIM
+since v0.22 – the detailed contracts moved on demand into skills. Default is
+status-only (a short pointer to the `subtrk` skill); the track tier
+(`--track`, or `agents.track: true` in `~/.subtrk/config.json`, asked once by
+interactive init with default No) adds the `### track` trigger pointer –
+positional ("first actions of the task, before the first file read"), not
+predictive – and, for claude/zcode/codex, installs the lifecycle hooks of
+§Track store. `--no-track` overrides per run and also removes previously
+installed hooks (matching only subtrk-tagged handlers; a one-time
+`.subtrk-bak` copy precedes the first modification of a JSON target). No
+grandfathering: a plain re-run on a pre-0.1.19 track blurb writes the
+status-only tier.
+
+Skills (v0.22): `init --agent` also writes subtrk-owned skill folders into
+each harness's skills dir – `subtrk` (both tiers, the quota/status contract)
+and `subtrk-track` (track tier only, the lifecycle playbook: ladder,
+pause/resume, stop-time reassessment, subagent session pins). Locations:
+`~/.claude/skills`, `~/.zcode/skills`, `~/.codex/skills`,
+`~/.config/opencode/skills`, `~/.gemini/config/skills` + `~/.gemini/
+antigravity-cli/skills` (agy IDE + CLI). Writes are idempotent (subtrk owns
+`subtrk*` folders outright); `--no-track` removes `subtrk-track`.
 
 Exit codes: 0 written · 2 unknown or missing harness name – stderr then lists
 every supported harness with its file and whether the section is present right
