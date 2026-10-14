@@ -26,8 +26,10 @@ shared cache so concurrent agents never hammer provider endpoints.
 | `subtrk usage --hour` | Hourly buckets instead of daily |
 | `subtrk usage --rebuild` | Drop and refetch re-derivable range-API history (glm, openrouter); zcode deltas and % samples are never rebuilt (not re-derivable) |
 | `subtrk track start --task <text>` | Open a task marker; `--complexity xs\|s\|m\|l\|xl`, `--tags a,b`, `--project <dir>` (default cwd), `--session <id>` pin (restricts the session-window tier to one harness session), `--provider <id>` hint; warns when markers are already open in the project |
-| `subtrk track stop` | Close the newest open marker for this directory (`--id` to pick, `--status done\|aborted\|failed`, `--note`) and harvest its real token usage from local harness stores (§Track store) |
-| `subtrk track status` | Open markers (age, `stale?` past 6h) + records still pending their harvest retry |
+| `subtrk track stop` | Close the newest open marker for this directory (`--id` to pick, `--status done\|aborted\|failed\|paused`, `--note`) and harvest its real token usage from local harness stores (§Track store); `--complexity <cx>` is the final reassessment — it overrides the start declaration and the original survives in `recodeFrom`; plain output adds the delegation split (orchestrated records) and the recode hint |
+| `subtrk track resume` | Reopen a closed record under its identity (`--id`): t0 kept, the closed gap becomes a pause segment (`pauses`), prior harvest numbers are recomputed at the next stop over the whole span |
+| `subtrk track recode` | Realign the complexity of an open marker or closed record (`--id`, `--complexity`); `recodeFrom` keeps the original start declaration across recodes |
+| `subtrk track status` | Open markers (age, `stale?` past 6h), paused records with their resume command, + records still pending their harvest retry |
 | `subtrk track list` | Recent records, newest first (`--days N`, 1-365, default 30) |
 | `subtrk track stats` | Usage distributions per provider × complexity (`--provider`, `--complexity`, `--model`, `--days`); done, leaf, uncontested records only; model-agnostic headline median with min/max/p90 |
 | `subtrk track estimate` | The go/no-go: history p50/p90 for a bucket (fallback chain shown) vs the provider's live window, calibrated into tokens by the ladder in §Track store (`--provider`, `--complexity`, `--model`); `--suggest` flips it around — ranks every enabled provider × observed priced model by fit, each line labelled with its calibration confidence |

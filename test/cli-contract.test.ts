@@ -555,7 +555,7 @@ describe("track status/list on an empty store", () => {
       assert.match(cap.out.join("\n"), /^no open tracks$/m);
       assert.match(
         cap.out.join("\n"),
-        /^help: subtrk track start\|stop\|status\|list\|stats\|estimate\|prune --help$/m,
+        /^help: subtrk track start\|stop\|resume\|recode\|status\|list\|stats\|estimate\|prune --help$/m,
       );
     } finally {
       cap.restore();

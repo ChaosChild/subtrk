@@ -79,15 +79,31 @@ const AGENT_TRACK_SECTION = `### track - task effort accounting (local only)
   record costs ~350 bytes; a missing one is unrecoverable - that window's
   burn can never be attributed again, and stats/estimate lose the calibration.
 - First actions of the task, before the first file read or search:
-  1. \`subtrk track status\` - if a marker you own is still open, stop it
-     (\`track stop --id <id> --status aborted\`) or, if clearly dead (a crashed
-     session), \`subtrk track prune\`. Never stack open markers.
+  1. \`subtrk track status\` - handle what it lists: stop a stale marker you
+     own (\`track stop --id <id> --status aborted\`), resume a paused task
+     that this work continues (\`track resume --id <id>\`), prune dead ones
+     (\`subtrk track prune\`). Never stack open markers.
   2. \`subtrk track start --task "<short description>" --complexity <xs|s|m|l|xl>\`
-     - remember the printed id. xs=quick edit or doc tweak, s=focused change,
-     m=multi-file feature, l=subsystem, xl=multi-day epic (split into tracks).
-- When finished, aborted or failed: \`subtrk track stop --status done|aborted|failed\`
-  (omit --id to close the newest open marker for this folder). subtrk then
-  records the task window's real token usage from local harness stores.
+     - the complexity is a ONE-LINE ladder guess - no research, no lookups;
+     accuracy is earned at stop. xs=quick edit or doc tweak, s=focused
+     change, m=multi-file feature, l=subsystem, xl=multi-day epic.
+- Complexity means the WHOLE tree's burn, delegation included: an
+  orchestrated task carries its fleet. Judge by total tokens, never by your
+  own session's effort or the wall clock - parallel workers hide epic scale.
+- Lifecycle: stop \`--status done\` only when nothing can come back - no
+  timer, CI run, background command, or expected reply still pending - and
+  stop BEFORE the final turn ends when no channel can ever return. While
+  feedback is pending: \`track stop --status paused\`; when it lands and the
+  work continues: \`track resume --id <id>\` (same identity, t0 kept). A
+  genuinely new instruction closes the current marker first.
+- ALWAYS reassess complexity at stop - hard rule. The stop output shows the
+  delegation split; drifted labels get fixed right there
+  (\`track stop --complexity <cx>\`), or afterwards on the record
+  (\`subtrk track recode --id <id> --complexity <cx>\`).
+- Subagents track their own activity too, starting with the session pin the
+  orchestrator passes in the dispatch brief (zcode:
+  \`sess_subagent_agent_<agentId>\`; claude: \`agent-<agentId>\`; codex: the
+  child self-pins \`$CODEX_THREAD_ID\`).
 - Before committing to large work, ask:
   \`subtrk track estimate --complexity m --provider <id>\`
   If the verdict says p90 does not fit the remaining window, defer, split the

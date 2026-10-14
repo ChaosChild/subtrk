@@ -16,7 +16,7 @@ import { ALL_PROVIDER_IDS, acquireLock, releaseLock, SUBTRK_DIR, scrub, scrubVal
 // "window" (codex transcript scans – sessions not recorded), "none".
 export type Attribution = "session-window" | "session-scan" | "window" | "none";
 
-export type TrackStatus = "done" | "aborted" | "failed" | "stale";
+export type TrackStatus = "done" | "aborted" | "failed" | "paused" | "stale";
 
 export interface TrackUsage {
   in: number; // UNCACHED input (inclusive stores normalized at harvest)
@@ -31,6 +31,8 @@ export interface TrackMarker {
   id: string;
   task: string;
   complexity?: string; // xs|s|m|l|xl (declared by the starting agent)
+  recodeFrom?: string; // the original start declaration, kept when complexity changes
+  pauses?: { from: number; to: number }[]; // closed gaps (resume keeps one identity)
   tags?: string[];
   project: string; // absolute dir resolved at start
   t0: number; // epoch ms
@@ -42,6 +44,8 @@ export interface TrackRecord {
   id: string;
   task: string;
   complexity?: string;
+  recodeFrom?: string; // the original start declaration (forecast-drift evidence)
+  pauses?: { from: number; to: number }[];
   tags?: string[];
   project: string;
   t0: number;
@@ -100,7 +104,7 @@ const WRITE_RETRIES = [25, 50, 75, 100];
 const PRUNE_DEFAULT_MS = 3 * 86_400_000;
 const STALE_AFTER_MS = 6 * 3_600_000;
 const COMPLEXITIES = new Set(["xs", "s", "m", "l", "xl"]);
-const STATUSES = new Set(["done", "aborted", "failed", "stale"]);
+const STATUSES = new Set(["done", "aborted", "failed", "paused", "stale"]);
 const DURATION_RE = /^(\d{1,3})([dhm])$/;
 
 // Store keys derived from (untrusted) harness store content must not resolve
@@ -324,7 +328,7 @@ export interface TrackArgs {
   days?: string;
 }
 
-const USAGE_HINT = "help: subtrk track start|stop|status|list|stats|estimate|prune --help";
+const USAGE_HINT = "help: subtrk track start|stop|resume|recode|status|list|stats|estimate|prune --help";
 
 export async function trackCommand(args: TrackArgs, deps: TrackDeps = {}): Promise<number> {
   const dir = deps.subtrkDir ?? SUBTRK_DIR;
@@ -336,6 +340,10 @@ export async function trackCommand(args: TrackArgs, deps: TrackDeps = {}): Promi
       return startTrack(args, { dir, now, cwd });
     case "stop":
       return stopTrack(args, { dir, now, harvest, cwd });
+    case "resume":
+      return resumeTrack(args, { dir, now });
+    case "recode":
+      return recodeTrack(args, { dir, now });
     case "status":
       return statusTrack(args, { dir, now, harvest });
     case "list":
@@ -435,6 +443,8 @@ async function closeMarker(
     id: marker.id,
     task: marker.task,
     complexity: marker.complexity,
+    recodeFrom: marker.recodeFrom,
+    pauses: marker.pauses,
     tags: marker.tags,
     project: marker.project,
     t0: marker.t0,
@@ -491,7 +501,11 @@ function recordLines(r: TrackRecord): string[] {
 async function stopTrack(args: TrackArgs, ctx: VerbCtx & { harvest: HarvestFn; cwd: () => string }): Promise<number> {
   const status = args.status ?? "done";
   if (!STATUSES.has(status) || status === "stale") {
-    console.error("subtrk: --status must be done, aborted or failed (stale is set by track prune)");
+    console.error("subtrk: --status must be done, aborted, failed or paused (stale is set by track prune)");
+    return 2;
+  }
+  if (args.complexity !== undefined && !COMPLEXITIES.has(args.complexity)) {
+    console.error(`subtrk: --complexity must be one of xs, s, m, l, xl (got '${args.complexity}')`);
     return 2;
   }
   const store = readTrackStore(ctx.dir);
@@ -511,6 +525,12 @@ async function stopTrack(args: TrackArgs, ctx: VerbCtx & { harvest: HarvestFn; c
       return 1;
     }
   }
+  // Final complexity override at close: the reassessment moment. The start
+  // declaration survives in recodeFrom (forecast-drift evidence).
+  if (args.complexity !== undefined && args.complexity !== marker.complexity) {
+    marker.recodeFrom = marker.recodeFrom ?? marker.complexity;
+    marker.complexity = args.complexity;
+  }
   const record = await closeMarker(marker, status as TrackStatus, args.note, {
     dir: ctx.dir,
     now: ctx.now,
@@ -520,6 +540,147 @@ async function stopTrack(args: TrackArgs, ctx: VerbCtx & { harvest: HarvestFn; c
     console.log(JSON.stringify(scrubValue({ schemaVersion: 1, record })));
   } else {
     for (const line of recordLines(record)) console.log(line);
+    const orch = orchestrationLine(record);
+    if (orch !== null) console.log(orch);
+    console.log(scrub(recodeHintLine(record)));
+    console.log(USAGE_HINT);
+  }
+  return 0;
+}
+
+// Delegation split from bySource (zcode tiers only – claude scans and codex
+// windows carry no main/subagent distinction, so they degrade to silence).
+function orchestrationLine(r: TrackRecord): string | null {
+  if (!r.usage || !r.bySource) return null;
+  const sub = Object.entries(r.bySource)
+    .filter(([k]) => k.startsWith("zcode:subagent"))
+    .reduce((a, [, u]) => a + usageTotal(u), 0);
+  if (sub <= 0) return null;
+  const tot = usageTotal(r.usage);
+  const pct = Math.round((sub / tot) * 100);
+  return scrub(
+    `orchestrated · ${pct}% delegated (main ${fmtTok(tot - sub)} · subagents ${fmtTok(sub)}) — complexity covers the whole tree`,
+  );
+}
+
+function recodeHintLine(r: TrackRecord): string {
+  return r.complexity
+    ? `complexity ${r.complexity} recorded — drifted? subtrk track recode --id ${r.id} --complexity <xs|s|m|l|xl> (works after stop too)`
+    : `no complexity declared — subtrk track recode --id ${r.id} --complexity <xs|s|m|l|xl> can set one`;
+}
+
+// Realign the complexity of an open marker or a closed record. recodeFrom
+// keeps the ORIGINAL start declaration across any number of recodes.
+function recodeTrack(args: TrackArgs, ctx: VerbCtx): number {
+  if (args.id === undefined || args.id.trim() === "") {
+    console.error("subtrk: track recode needs --id <trk_x>");
+    return 2;
+  }
+  if (args.complexity === undefined || !COMPLEXITIES.has(args.complexity)) {
+    console.error("subtrk: track recode needs --complexity <xs|s|m|l|xl>");
+    return 2;
+  }
+  const id = args.id.trim();
+  const store = readTrackStore(ctx.dir);
+  const inMarkers = store.markers.some((m) => m.id === id);
+  const inRecords = store.records.some((r) => r.id === id);
+  if (!inMarkers && !inRecords) {
+    console.error(`subtrk: no open or closed track '${id}'`);
+    return 1;
+  }
+  const cx = args.complexity;
+  let from: string | undefined;
+  let unchanged = false;
+  const applied = mutateTrackStore(
+    ctx.dir,
+    (s) => {
+      const t = s.markers.find((m) => m.id === id) ?? s.records.find((r) => r.id === id);
+      if (!t) return false;
+      from = t.recodeFrom ?? t.complexity;
+      if (t.complexity === cx) {
+        unchanged = true;
+        return false; // already there – no write
+      }
+      t.recodeFrom = t.recodeFrom ?? t.complexity;
+      t.complexity = cx;
+    },
+    ctx.now(),
+  );
+  if (!applied) {
+    console.error("subtrk: track store busy – recode not written, re-run track recode");
+    return 1;
+  }
+  const label = inMarkers ? "marker" : "record";
+  if (args.json) {
+    console.log(JSON.stringify(scrubValue({ schemaVersion: 1, id, from: from ?? null, to: cx, target: label })));
+  } else if (unchanged) {
+    console.log(
+      scrub(`${id}  complexity already ${cx}${from && from !== cx ? ` (original ${from})` : ""}  (${label})`),
+    );
+  } else {
+    console.log(scrub(`${id}  complexity ${from ?? "—"} -> ${cx}  (${label})`));
+    console.log(USAGE_HINT);
+  }
+  return 0;
+}
+
+// Reopen a closed record under its original identity: t0 is kept, the closed
+// gap becomes a pause segment, and the final stop re-harvests the whole span
+// (the discarded window's harvest numbers are recomputed, never lost).
+function resumeTrack(args: TrackArgs, ctx: VerbCtx & { now: () => number }): number {
+  if (args.id === undefined || args.id.trim() === "") {
+    console.error("subtrk: track resume needs --id <trk_x>");
+    return 2;
+  }
+  const id = args.id.trim();
+  const store = readTrackStore(ctx.dir);
+  if (store.markers.some((m) => m.id === id)) {
+    console.error(`subtrk: track '${id}' is already open`);
+    return 1;
+  }
+  const rec = store.records.find((r) => r.id === id);
+  if (!rec) {
+    console.error(`subtrk: no closed track '${id}'`);
+    return 1;
+  }
+  const nowMs = ctx.now();
+  const pauses = [...(rec.pauses ?? []), { from: rec.t1, to: nowMs }];
+  const marker: TrackMarker = {
+    id: rec.id,
+    task: rec.task,
+    complexity: rec.complexity,
+    recodeFrom: rec.recodeFrom,
+    pauses,
+    tags: rec.tags,
+    project: rec.project,
+    t0: rec.t0,
+    session: rec.sessionPin,
+    providerHint: rec.providerHint,
+  };
+  const applied = mutateTrackStore(
+    ctx.dir,
+    (s) => {
+      const before = s.records.length;
+      s.records = s.records.filter((r) => r.id !== id);
+      if (s.records.length === before) return false; // lost a race – nothing changed
+      s.markers.push(marker);
+      recomputeFlags(s.records);
+    },
+    nowMs,
+  );
+  if (!applied) {
+    console.error("subtrk: track store busy – resume not written, re-run track resume");
+    return 1;
+  }
+  if (args.json) {
+    console.log(JSON.stringify(scrubValue({ schemaVersion: 1, marker })));
+  } else {
+    console.log(
+      scrub(
+        `${marker.id}  resumed · t0 kept (${fmtDur(nowMs - marker.t0)} old) · ${pauses.length} pause segment${pauses.length === 1 ? "" : "s"}`,
+      ),
+    );
+    console.log(scrub(`stop with: subtrk track stop --id ${marker.id}`));
     console.log(USAGE_HINT);
   }
   return 0;
@@ -575,7 +736,7 @@ async function statusTrack(args: TrackArgs, ctx: VerbCtx & { harvest: HarvestFn 
     );
     return 0;
   }
-  if (store.markers.length === 0 && !store.records.some((r) => r.pending)) {
+  if (store.markers.length === 0 && !store.records.some((r) => r.pending || r.status === "paused")) {
     console.log("no open tracks");
     console.log(USAGE_HINT);
     return 0;
@@ -584,7 +745,16 @@ async function statusTrack(args: TrackArgs, ctx: VerbCtx & { harvest: HarvestFn 
     const age = nowMs - m.t0;
     const stale = age > STALE_AFTER_MS ? "  [stale?]" : "";
     const cx = m.complexity ? ` ${m.complexity}` : "";
-    console.log(scrub(`${m.id}  ${fmtDur(age)} open${cx}${stale}  ${m.task}  ·  ${m.project}`));
+    const pz = m.pauses?.length ? `  ·  ${m.pauses.length} pause${m.pauses.length === 1 ? "" : "s"}` : "";
+    console.log(scrub(`${m.id}  ${fmtDur(age)} open${cx}${pz}${stale}  ${m.task}  ·  ${m.project}`));
+  }
+  for (const r of store.records.filter((r) => r.status === "paused").sort((a, b) => b.t1 - a.t1)) {
+    const cx = r.complexity ? ` ${r.complexity}` : "";
+    console.log(
+      scrub(
+        `${r.id}  paused ${fmtDur(nowMs - r.t1)}${cx}  ·  ${r.task}  ·  resume with: subtrk track resume --id ${r.id}`,
+      ),
+    );
   }
   for (const r of store.records.filter((r) => r.pending)) {
     console.log(scrub(`${r.id}  pending harvest (${r.status})  ·  ${r.task}`));
