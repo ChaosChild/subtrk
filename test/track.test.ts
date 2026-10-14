@@ -1017,6 +1017,16 @@ describe("track pause + resume", () => {
       assert.equal(await run(fx, ["track", "status"]), 0);
       assert.match(cap.out.join("\n"), new RegExp(`${id}\\s+paused 1m`));
       assert.match(cap.out.join("\n"), /track resume --id/);
+      assert.match(
+        cap.out.join("\n"),
+        new RegExp(fx.cwd.replace(/\\/g, "\\\\")),
+        "B4: the paused line shows its folder",
+      );
+
+      cap.out.length = 0;
+      assert.equal(await run(fx, ["track", "status", "--json=true"]), 0);
+      const parsed = JSON.parse(cap.out[0]) as { paused?: Array<{ id: string; status: string }> };
+      assert.equal(parsed.paused?.[0]?.id, id, "B3: --json exposes paused records to machine readers");
 
       fx.now.ms += 3_600_000;
       cap.out.length = 0;

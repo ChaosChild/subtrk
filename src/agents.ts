@@ -66,23 +66,27 @@ const AGENT_STATUS_BODY = `## subtrk
 
 \`subtrk\` reports remaining quota for the AI plans configured on this machine.
 Run \`subtrk status --json\` before committing to large or long-running provider
-work, when a provider fails with quota or rate-limit errors, and on wake-ups –
-\`nextEvent.at\` says when new information can exist, so schedule around it
-instead of polling. The full contract (windows, error kinds and remedies, exit
-codes, cache etiquette) is in the \`subtrk\` skill. Never run
-\`subtrk auth refresh\` without telling the operator first – it opens a browser
-tab on this machine.`;
+work, when a provider fails with quota or rate-limit errors, and on wake-ups -
+\`nextEvent.at\` (or \`recheckAfter\` when absent) says when new information can
+exist, so schedule around it instead of polling. The full contract (windows,
+error kinds and remedies, exit codes, cache etiquette) is in the \`subtrk\`
+skill. Run \`subtrk auth refresh\` only after the operator says go - it opens a
+browser tab; surface any other remedy verbatim. A missing provider is not
+configured, not an error.`;
 
 // Tier 2 adds the track trigger – a pointer, not the playbook. The playbook
 // lives in the subtrk-track skill; the lifecycle hooks nudge at the moments.
 const AGENT_TRACK_SECTION = `### track
 
 Track every task that produces or changes a deliverable. First actions of any
-task: \`subtrk track status\` (handle what it lists), then
+task: \`subtrk track status\` (it lists every folder and session - touch only
+markers you opened in this folder), then
 \`subtrk track start --task "<short description>" --complexity <xs|s|m|l|xl>\`
-(one-line ladder guess, no research – you reassess at stop). The full
-lifecycle playbook (pause/resume, reassessment, subagent session pins) is the
-\`subtrk-track\` skill; hooks will remind you at the right moments.`;
+(one-line ladder guess, no research; remember the printed id). When the task
+ends: \`subtrk track stop --status done|aborted|failed|paused --complexity
+<reassessed>\` (omit --id to close the newest open marker for this folder). The
+full lifecycle playbook (pause/resume, reassessment, subagent session pins) is
+the \`subtrk-track\` skill; hooks will remind you at the right moments.`;
 
 // ---------- skills (on-demand depth; installed into each harness's skills dir) ----------
 
@@ -93,11 +97,11 @@ export const SUBTRK_TRACK_SKILL_NAME = "subtrk-track";
 export const SUBTRK_SKILL_MD = `---
 name: subtrk
 description: >
-  Remaining quota for the AI plans configured on this machine. Use before
-  committing to large or long-running provider work, when a provider starts
-  failing with quota or rate-limit errors, and on wake-ups: subtrk status
-  --json is the machine contract (windows, nextEvent.at, recheckAfter,
-  error kinds + remedies, exit codes).
+  Use before committing to large or long-running AI provider work, before
+  handing work to another agent, when a provider fails with quota or
+  rate-limit errors, and when scheduling a wake-up. Reports remaining quota
+  per plan via subtrk status --json (machine contract: windows,
+  nextEvent.at, recheckAfter, error kinds + remedies, exit codes).
 ---
 
 # subtrk – quota status contract
@@ -119,13 +123,11 @@ is the machine-readable contract:
 export const SUBTRK_TRACK_SKILL_MD = `---
 name: subtrk-track
 description: >
-  Task effort accounting for every task that produces or changes a
-  deliverable - code, docs, research writeups, planning, batch runs,
-  releases. Fires at task start (track start with a one-line complexity
-  guess), at stop (mandatory complexity reassessment; pause while feedback
-  is pending; resume continuations), and before large work (track
-  estimate). Subagents track their own activity with the session pin from
-  the dispatch brief.
+  Use when starting, pausing, resuming or finishing any task that changes a
+  deliverable - code, docs, research, planning, batch runs, releases - when
+  dispatching a subagent, or when a subtrk hook nudge names this skill.
+  Covers the marker lifecycle (track start / stop / resume / recode) and
+  the complexity ladder.
 ---
 
 # subtrk track – the lifecycle playbook
@@ -136,36 +138,48 @@ description: >
   record costs ~350 bytes; a missing one is unrecoverable - that window's
   burn can never be attributed again, and stats/estimate lose the calibration.
 - First actions of the task, before the first file read or search:
-  1. \`subtrk track status\` - handle what it lists: stop a stale marker you
-     own (\`track stop --id <id> --status aborted\`), resume a paused task
-     that this work continues (\`track resume --id <id>\`), prune dead ones
+  1. \`subtrk track status\` - it lists every folder and session. Touch only
+     markers you opened in this folder: stop one that is no longer live
+     (\`track stop --id <id> --status aborted\`), resume a paused task that
+     this work continues (\`track resume --id <id>\`), prune dead ones
      (\`subtrk track prune\`). Never stack open markers.
   2. \`subtrk track start --task "<short description>" --complexity <xs|s|m|l|xl>\`
-     - the complexity is a ONE-LINE ladder guess - no research, no lookups;
-     accuracy is earned at stop. xs=quick edit or doc tweak, s=focused
-     change, m=multi-file feature, l=subsystem, xl=multi-day epic.
+     - remember the printed id. The complexity is a ONE-LINE ladder guess -
+     no research, no lookups; accuracy is earned at stop. xs=quick edit or
+     doc tweak, s=focused change, m=multi-file feature, l=subsystem,
+     xl=multi-day epic (split into tracks).
 - Complexity means the WHOLE tree's burn, delegation included: an
   orchestrated task carries its fleet. Judge by total tokens, never by your
   own session's effort or the wall clock - parallel workers hide epic scale.
-- Lifecycle: stop \`--status done\` only when nothing can come back - no
-  timer, CI run, background command, or expected reply still pending - and
-  stop BEFORE the final turn ends when no channel can ever return. While
-  feedback is pending: \`track stop --status paused\`; when it lands and the
-  work continues: \`track resume --id <id>\` (same identity, t0 kept). A
+  A subagent's own marker covers its own subtree - that is the nesting, not
+  double counting.
+- Lifecycle: stop \`--status done\` once the deliverable is handed over and
+  nothing YOU started is still running (timer, CI run, background command,
+  a reply you asked for). A possible later review is not pending - if it
+  comes, resume. In a one-shot run with no way back, stop before your last
+  message. While feedback is pending: \`track stop --status paused\`; when it
+  lands and the work continues: \`track resume --id <id>\` (same identity, t0
+  kept). Omitting --id stops the newest open marker for this folder. A
   genuinely new instruction closes the current marker first.
 - ALWAYS reassess complexity at stop - hard rule. The stop output shows the
   delegation split; drifted labels get fixed right there
   (\`track stop --complexity <cx>\`), or afterwards on the record
   (\`subtrk track recode --id <id> --complexity <cx>\`).
-- Subagents track their own activity too, starting with the session pin the
-  orchestrator passes in the dispatch brief (zcode:
-  \`sess_subagent_agent_<agentId>\`; claude: \`agent-<agentId>\`; codex: the
-  child self-pins \`$CODEX_THREAD_ID\`; agy: the SessionStart hook payload's
-  conversationId).
+- When you dispatch a subagent, put this in its brief:
+  \`subtrk track start --task "<sub-task>" --complexity <cx> --session <pin>\`
+  plus the matching stop. The pin: zcode
+  \`sess_subagent_agent_<agentId>\` and claude \`agent-<agentId>\` both use the
+  agentId from the spawn RESULT - it does not exist before the spawn, so
+  relay it to the child as your first message after it starts; codex and agy
+  children self-pin (\`$CODEX_THREAD_ID\`; the SessionStart hook payload's
+  conversationId). A child without a pin still tracks - unpinned is better
+  than untracked.
 - Before committing to large work, ask:
   \`subtrk track estimate --complexity m --provider <id>\`
-  If the verdict says p90 does not fit the remaining window, defer, split the
-  task, or switch model - discovering a rate limit mid-task wastes the work.`;
+  (provider ids: \`subtrk status --json\` -> providers[].id; no provider in
+  mind: \`--suggest\`). If the verdict says p90 does not fit the remaining
+  window, defer, split the task, or switch model - discovering a rate limit
+  mid-task wastes the work.`;
 
 // Idempotent skill write: subtrk owns <skillsDir>/subtrk*/ outright.
 export function writeAgentSkill(skillsDir: string, name: string, body: string): "created" | "updated" {

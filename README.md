@@ -205,25 +205,28 @@ them – claude (`~/.claude/settings.json`), zcode (`~/.zcode/cli/config.json`)
 and codex (`~/.codex/config.toml`) – so the harness itself reminds the agent
 to run `track start`/`track stop` at session start and turn end (`subtrk
 track hook` under the hood: read-only, throttled to once per session plus
-marker-set changes, never blocks). Every hook entry subtrk writes carries the
+open/paused-set changes, never blocks). Every hook entry subtrk writes carries the
 literal `subtrk track hook` in its command; re-running with `--no-track`
 removes exactly those and nothing else, and a JSON target gets a one-time
 `.subtrk-bak` copy before its first modification. opencode and agy get
 instructions only (agy hooks are documented but not yet wired). On any other
 harness, paste the status body below into its instructions file manually
-(without the markers – `subtrk init --agent` wraps it in them):
+(without the markers – `subtrk init --agent` wraps it in them) and place the
+skill bodies (`subtrk`, plus `subtrk-track` on the track tier) into its
+skills dir – or inline them if it has none:
 
 ```markdown
 ## subtrk
 
 `subtrk` reports remaining quota for the AI plans configured on this machine.
 Run `subtrk status --json` before committing to large or long-running provider
-work, when a provider fails with quota or rate-limit errors, and on wake-ups –
-`nextEvent.at` says when new information can exist, so schedule around it
-instead of polling. The full contract (windows, error kinds and remedies, exit
-codes, cache etiquette) is in the `subtrk` skill. Never run
-`subtrk auth refresh` without telling the operator first – it opens a browser
-tab on this machine.
+work, when a provider fails with quota or rate-limit errors, and on wake-ups -
+`nextEvent.at` (or `recheckAfter` when absent) says when new information can
+exist, so schedule around it instead of polling. The full contract (windows,
+error kinds and remedies, exit codes, cache etiquette) is in the `subtrk`
+skill. Run `subtrk auth refresh` only after the operator says go - it opens a
+browser tab; surface any other remedy verbatim. A missing provider is not
+configured, not an error.
 ```
 
 The `--track` tier appends this section to the body above:
@@ -232,11 +235,14 @@ The `--track` tier appends this section to the body above:
 ### track
 
 Track every task that produces or changes a deliverable. First actions of any
-task: `subtrk track status` (handle what it lists), then
+task: `subtrk track status` (it lists every folder and session - touch only
+markers you opened in this folder), then
 `subtrk track start --task "<short description>" --complexity <xs|s|m|l|xl>`
-(one-line ladder guess, no research – you reassess at stop). The full
-lifecycle playbook (pause/resume, reassessment, subagent session pins) is the
-`subtrk-track` skill; hooks will remind you at the right moments.
+(one-line ladder guess, no research; remember the printed id). When the task
+ends: `subtrk track stop --status done|aborted|failed|paused --complexity
+<reassessed>` (omit --id to close the newest open marker for this folder). The
+full lifecycle playbook (pause/resume, reassessment, subagent session pins) is
+the `subtrk-track` skill; hooks will remind you at the right moments.
 ```
 
 ## Providers

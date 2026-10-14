@@ -77,7 +77,7 @@ test("nudgeText: long task descriptions truncate; secrets scrub out", () => {
   }
 });
 
-test("nudgeText: paused records surface with the resume command; silence needs BOTH sets empty", () => {
+test("nudgeText: paused records surface with the resume command; stop stays silent without an OPEN marker", () => {
   const rec = {
     id: "trk_pause1",
     task: "waiting on CI",
@@ -87,9 +87,12 @@ test("nudgeText: paused records surface with the resume command; silence needs B
     project: marker().project,
   } as unknown as TrackRecord;
   assert.equal(nudgeText("stop", [], []), null, "nothing open, nothing paused – silence");
+  assert.equal(nudgeText("stop", [], [rec]), null, "B1: a deliberate pause must not be nudged to resume at turn end");
   const pz = nudgeText("session-start", [], [rec]);
   assert.ok(pz?.includes("trk_pause1") && pz?.includes("waiting on CI"), "the paused task is named");
   assert.ok(pz?.includes("track resume --id trk_pause1"), "the resume command rides the nudge");
+  assert.ok(pz?.includes("track start --task"), "B2: a parked task does not suppress the new-work reminder");
+  assert.ok((pz ?? "").length < 400, "paused nudge stays under the bound");
   assert.ok(nudgeText("stop", [marker()], [rec])?.includes("trk_test01"), "an open marker still wins the nudge");
 });
 

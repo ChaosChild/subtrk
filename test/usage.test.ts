@@ -345,7 +345,9 @@ describe("usage parsers", () => {
 
     it("a healthy envelope with zero buckets keeps existing rows and leaves the watermark for retry", async () => {
       const dir = tempDir();
-      const now = Date.UTC(2026, 9, 14, 8, 0, 0);
+      // Injected clock sits 1h in the future: harvestGlm compares ctx.deadline (derived
+      // from this now) against the REAL clock, so a past-dated fixture would abort.
+      const now = Date.now() + 3600_000;
       try {
         const seedHk = seed(dir, now);
         const degraded = {
@@ -384,7 +386,9 @@ describe("usage parsers", () => {
 
     it("a stale tail no longer zeroes trailing hours beyond the last reported bucket", async () => {
       const dir = tempDir();
-      const now = Date.UTC(2026, 9, 14, 8, 0, 0);
+      // Injected clock sits 1h in the future: harvestGlm compares ctx.deadline (derived
+      // from this now) against the REAL clock, so a past-dated fixture would abort.
+      const now = Date.now() + 3600_000;
       const staleMs = now - 5 * HOUR;
       const label = localLabel(staleMs);
       try {

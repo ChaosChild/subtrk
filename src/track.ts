@@ -731,7 +731,12 @@ async function statusTrack(args: TrackArgs, ctx: VerbCtx & { harvest: HarvestFn 
   if (args.json) {
     console.log(
       JSON.stringify(
-        scrubValue({ schemaVersion: 1, markers: store.markers, pending: store.records.filter((r) => r.pending) }),
+        scrubValue({
+          schemaVersion: 1,
+          markers: store.markers,
+          paused: store.records.filter((r) => r.status === "paused"),
+          pending: store.records.filter((r) => r.pending),
+        }),
       ),
     );
     return 0;
@@ -752,7 +757,7 @@ async function statusTrack(args: TrackArgs, ctx: VerbCtx & { harvest: HarvestFn 
     const cx = r.complexity ? ` ${r.complexity}` : "";
     console.log(
       scrub(
-        `${r.id}  paused ${fmtDur(nowMs - r.t1)}${cx}  ·  ${r.task}  ·  resume with: subtrk track resume --id ${r.id}`,
+        `${r.id}  paused ${fmtDur(nowMs - r.t1)}${cx}  ·  ${r.task}  ·  ${r.project}  ·  resume with: subtrk track resume --id ${r.id}`,
       ),
     );
   }

@@ -86,7 +86,11 @@ function clock(ms: number): string {
 //  - stop (turn end): nudge only when something is open or paused AND the
 //    state changed since the last nudge – a turn ending markerless is normal.
 export function nudgeText(event: HookEvent, markers: TrackMarker[], paused: TrackRecord[] = []): string | null {
-  if (event === "stop" && markers.length === 0 && paused.length === 0) return null;
+  // Turn-end nudges need an OPEN marker: a paused-only state at turn end is
+  // usually the pause the agent just made on purpose - telling it to resume
+  // its own deliberate pause is noise (B1). Parked tasks surface at session
+  // start instead.
+  if (event === "stop" && markers.length === 0) return null;
   if (markers.length === 0 && paused.length > 0) {
     const p = paused[0] as TrackRecord;
     const task = p.task.length > 48 ? `${p.task.slice(0, 47)}…` : p.task;
@@ -94,7 +98,8 @@ export function nudgeText(event: HookEvent, markers: TrackMarker[], paused: Trac
     return scrub(
       `subtrk: track ${p.id} ("${task}") is paused in this folder${more}. ` +
         `If this session continues that work, resume it: subtrk track resume --id ${p.id}; ` +
-        `otherwise it stays parked for a later session.`,
+        `otherwise it stays parked for a later session. New task? ` +
+        `subtrk track start --task "<short description>" --complexity <xs|s|m|l|xl>`,
     );
   }
   if (markers.length === 0) {
