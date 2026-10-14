@@ -91,6 +91,31 @@ export function statableRecords(store: TrackStore, nowMs: number, days = 30): Tr
   );
 }
 
+// The delegated population: nested records (a subagent tracked inside its
+// parent's window). Window-harvested, so each number includes concurrent
+// orchestrator/sibling burn - honest UPPER bounds, never clean per-task
+// costs. They never mix into the leaf buckets.
+export function statableDelegated(store: TrackStore, nowMs: number, days = 30): TrackRecord[] {
+  const from = nowMs - days * 86_400_000;
+  return store.records.filter(
+    (r) => r.usage !== null && !r.pending && !r.contested && r.nested !== null && r.status === "done" && r.t1 >= from,
+  );
+}
+
+// Delegated token share of a record from bySource (zcode tiers only - claude
+// scans and codex windows carry no main/subagent distinction; null = unknown,
+// never zero).
+export function delegatedShare(r: TrackRecord): number | null {
+  if (!r.bySource) return null;
+  let sub = 0;
+  for (const [k, u] of Object.entries(r.bySource)) {
+    if (k.startsWith("zcode:subagent")) sub += u.in + u.cr + u.cw + u.out;
+  }
+  if (sub === 0) return null;
+  const tot = trackTokens(r);
+  return tot > 0 ? sub / tot : null;
+}
+
 export interface Bucket {
   provider: string | null;
   complexity: string | null;
@@ -123,6 +148,25 @@ function makeBucket(provider: string | null, complexity: string | null, records:
   };
 }
 
+function bucketsOf(records: EnrichedRecord[]): Bucket[] {
+  const byProviderCx = new Map<string, EnrichedRecord[]>();
+  for (const r of records) {
+    const key = `${r.provider ?? "?"}|${r.complexity ?? "?"}`;
+    const list = byProviderCx.get(key);
+    if (list) list.push(r);
+    else byProviderCx.set(key, [r]);
+  }
+  return [...byProviderCx.entries()]
+    .map(([key, list]) => {
+      const [provider, complexity] = key.split("|");
+      return makeBucket(provider === "?" ? null : provider, complexity === "?" ? null : complexity, list);
+    })
+    .sort(
+      (a, b) =>
+        (a.provider ?? "").localeCompare(b.provider ?? "") || (a.complexity ?? "").localeCompare(b.complexity ?? ""),
+    );
+}
+
 export interface StatsOut {
   days: number;
   n: number;
@@ -136,27 +180,18 @@ export interface StatsOut {
     p90Usd: number | null;
   };
   buckets: Bucket[];
+  delegated: Bucket[]; // nested records - window-contaminated upper bounds
   excluded: { nested: number; contested: number; notDone: number; pending: number; noUsage: number };
 }
 
-export function buildStats(records: EnrichedRecord[], all: TrackStore["records"], days: number): StatsOut {
+export function buildStats(
+  records: EnrichedRecord[],
+  all: TrackStore["records"],
+  days: number,
+  delegated: EnrichedRecord[] = [],
+): StatsOut {
   const { tok, usd } = bucketOf(records);
-  const byProviderCx = new Map<string, EnrichedRecord[]>();
-  for (const r of records) {
-    const key = `${r.provider ?? "?"}|${r.complexity ?? "?"}`;
-    const list = byProviderCx.get(key);
-    if (list) list.push(r);
-    else byProviderCx.set(key, [r]);
-  }
-  const buckets = [...byProviderCx.entries()]
-    .map(([key, list]) => {
-      const [provider, complexity] = key.split("|");
-      return makeBucket(provider === "?" ? null : provider, complexity === "?" ? null : complexity, list);
-    })
-    .sort(
-      (a, b) =>
-        (a.provider ?? "").localeCompare(b.provider ?? "") || (a.complexity ?? "").localeCompare(b.complexity ?? ""),
-    );
+  const buckets = bucketsOf(records);
   return {
     days,
     n: records.length,
@@ -170,6 +205,7 @@ export function buildStats(records: EnrichedRecord[], all: TrackStore["records"]
       p90Usd: usd.length > 0 ? percentile(usd, 0.9) : null,
     },
     buckets,
+    delegated: bucketsOf(delegated),
     excluded: {
       nested: all.filter((r) => r.nested !== null).length,
       contested: all.filter((r) => r.contested).length,
@@ -222,6 +258,7 @@ export interface EstimateOut {
     p90Usd: number | null;
     lowN: boolean;
     fellBack: boolean;
+    orchestrated?: { n: number; medianDelegatedPct: number | null };
   };
   fallbacks: { label: string; n: number; p50Tok: number; lowN: boolean }[];
   window: EstimateWindow | null;
@@ -440,6 +477,15 @@ export function buildEstimate(
     };
   }
   const { tok, usd } = bucketOf(picked.list);
+  // Orchestration composition of the picked bucket: how many samples are
+  // orchestrated trees and their median delegated share - so the caller knows
+  // the p50/p90 are whole-tree numbers.
+  const shares = picked.list
+    .map((r) => delegatedShare(r))
+    .filter((s): s is number => s !== null)
+    .map((s) => Math.round(s * 100));
+  const orchestrated =
+    shares.length > 0 ? { n: shares.length, medianDelegatedPct: percentile(shares, 0.5) } : undefined;
   const history: EstimateOut["history"] = {
     n: picked.list.length,
     provider: opts.provider,
@@ -450,6 +496,7 @@ export function buildEstimate(
     p90Usd: usd.length > 0 ? percentile(usd, 0.9) : null,
     lowN: picked.lowN,
     fellBack: picked.fellBack,
+    orchestrated,
   };
 
   const window = opts.provider ? (readWindow(opts.provider, opts.subtrkDir, opts.nowMs)?.window ?? null) : null;
@@ -628,6 +675,17 @@ export function statsText(out: StatsOut): string[] {
         `${label.padEnd(16)} n=${String(b.n).padStart(3)}${b.lowN ? " ⚠" : "  "} p50 ${fmtTok(b.p50Tok).padStart(8)}  p90 ${fmtTok(b.p90Tok).padStart(8)}  ${fmtUsd(b.p50Usd)} / ${fmtUsd(b.p90Usd)}`,
       );
     }
+    if (out.delegated.length > 0) {
+      for (const b of out.delegated) {
+        const label = `delegated ${b.provider ?? "?"} · ${b.complexity ?? "?"}`;
+        lines.push(
+          `${label.padEnd(16)} n=${String(b.n).padStart(3)}${b.lowN ? " ⚠" : "  "} p50 ${fmtTok(b.p50Tok).padStart(8)}  p90 ${fmtTok(b.p90Tok).padStart(8)}  ${fmtUsd(b.p50Usd)} / ${fmtUsd(b.p90Usd)}`,
+        );
+      }
+      lines.push(
+        "delegated buckets: nested subagent tasks – window snapshots including concurrent orchestrator/sibling burn (upper bounds, not clean per-task costs)",
+      );
+    }
   }
   const ex = out.excluded;
   const bits: string[] = [];
@@ -672,6 +730,12 @@ export function estimateText(out: EstimateOut & { suggest?: SuggestOut }): strin
     lines.push(
       `  p50 ${fmtTok(h.p50Tok)} tok / ${fmtUsd(h.p50Usd)}      p90 ${fmtTok(h.p90Tok)} tok / ${fmtUsd(h.p90Usd)}`,
     );
+    if (h.orchestrated && h.orchestrated.n > 0) {
+      const pct = h.orchestrated.medianDelegatedPct;
+      lines.push(
+        `  orchestration: ${h.orchestrated.n} of ${h.n} orchestrated${pct !== null ? ` · median ${pct}% delegated` : ""} – p50/p90 are whole-tree burn`,
+      );
+    }
   }
   if (out.fallbacks.length > 0) {
     lines.push(
@@ -740,15 +804,17 @@ export async function statsCommand(args: StatsArgs, deps: { subtrkDir?: string; 
   const store = readTrackStore(dir);
   const ustore = readUsageStore(dir);
   const model = args.model?.toLowerCase();
+  const matches = (r: EnrichedRecord): boolean =>
+    (args.provider === undefined || r.provider === args.provider) &&
+    (args.complexity === undefined || r.complexity === args.complexity) &&
+    (model === undefined || Object.keys(r.models ?? {}).some((m) => m.toLowerCase().includes(model)));
   const enriched = statableRecords(store, nowMs, daysN)
     .map((r) => enrichRecord(r, ustore))
-    .filter(
-      (r) =>
-        (args.provider === undefined || r.provider === args.provider) &&
-        (args.complexity === undefined || r.complexity === args.complexity) &&
-        (model === undefined || Object.keys(r.models ?? {}).some((m) => m.toLowerCase().includes(model))),
-    );
-  const out = buildStats(enriched, store.records, daysN);
+    .filter(matches);
+  const delegated = statableDelegated(store, nowMs, daysN)
+    .map((r) => enrichRecord(r, ustore))
+    .filter(matches);
+  const out = buildStats(enriched, store.records, daysN, delegated);
   if (args.json) console.log(JSON.stringify(scrubValue({ schemaVersion: 1, ...out })));
   else for (const line of statsText(out)) console.log(line);
   return 0;

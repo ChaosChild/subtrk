@@ -291,6 +291,8 @@ a.brand:hover .logo { opacity: .8; }
 .ds-stale { background: var(--warn); }
 .cxchip { font: 600 10.5px var(--mono); color: var(--text-2); background: var(--surface-2); border: 1px solid var(--border); border-radius: 5px; padding: 0 6px; flex: none; }
 #tvstats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.b-orch { background: var(--accent-soft); color: var(--accent); }
+.tbarm i.tdel { position: absolute; left: 0; right: 0; bottom: 0; background: repeating-linear-gradient(45deg, transparent 0 3px, rgba(128,128,128,.55) 3px 5px); pointer-events: none; }
 @media (max-width: 1000px) { #tvstats { grid-template-columns: 1fr 1fr; } }
 .tbars { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 10px; align-items: end; height: 170px; border-left: 1px solid var(--border-strong); border-bottom: 1px solid var(--border-strong); padding: 18px 10px 0 6px; }
 .tbgroup { display: flex; gap: 5px; align-items: end; height: 100%; min-width: 0; }
@@ -459,13 +461,17 @@ a.brand:hover .logo { opacity: .8; }
     </div>
   </section>
   <section>
-    <div class="sechead"><h2>Usage by complexity</h2><p>one bar per actually tracked model · solid = p50 · dashed top = p90 · gap = not tracked</p></div>
+    <div class="sechead"><h2>Usage by complexity</h2><p>one bar per actually tracked model · solid = p50 · dashed top = p90 · hatched inside the fill = delegated share · gap = not tracked</p></div>
     <div class="card" id="tvtokchart"><div class="empty">loading…</div></div>
     <div class="card" id="tvusdchart" style="margin-top:12px"><div class="empty">loading…</div></div>
   </section>
   <section>
-    <div class="sechead"><h2>Distributions</h2><p>the same data as the charts, table form · done · leaves · uncontested</p></div>
-    <div class="card"><div class="tablewrap"><table id="tvdist"><thead><tr><th>model</th><th>cx</th><th class="r">n</th><th class="r">tokens p50</th><th class="r">tokens p90</th><th class="r">est $ p50</th><th class="r">est $ p90</th></tr></thead><tbody><tr><td colspan="7">…</td></tr></tbody></table></div></div>
+    <div class="sechead"><h2>Distributions</h2><p>done · leaves · uncontested · del = share of the bucket's burn that ran in subagents · delegated rows = nested subagent tasks (window snapshots incl. concurrent orchestrator burn – upper bounds)</p></div>
+    <div class="card"><div class="tablewrap"><table id="tvdist"><thead><tr><th>model</th><th>cx</th><th class="r">n</th><th class="r">del</th><th class="r">tokens p50</th><th class="r">tokens p90</th><th class="r">est $ p50</th><th class="r">est $ p90</th></tr></thead><tbody><tr><td colspan="8">…</td></tr></tbody></table></div></div>
+  </section>
+  <section>
+    <div class="sechead"><h2>Orchestrated</h2><p>tasks that delegated · own = the orchestrating session · tree = the whole burn (complexity covers the tree) · hatched chart segments = delegated share</p></div>
+    <div class="card"><div class="tablewrap"><table id="tvorch"><thead><tr><th>id</th><th>task</th><th>cx</th><th>model</th><th class="r">own</th><th class="r">tree</th><th class="r">delegated</th><th class="r">wall</th><th>status</th></tr></thead><tbody><tr><td colspan="9">…</td></tr></tbody></table></div></div>
   </section>
 </main>
 
@@ -1503,6 +1509,17 @@ const trkUsd = v => (typeof v !== "number" ? "–" : v > 0 && v < 0.01 ? `$${v.t
 // The estimation set: done, leaf, uncontested records with numbers.
 const trkUsable = r => r.usage !== null && !r.pending && !r.contested && r.nested === null && r.status === "done";
 
+// Orchestrated records: bySource splits zcode:main from zcode:subagent tiers.
+// own = the orchestrating session's tokens, sub = the fleet's burn; null when
+// the record's tiers carry no delegation (claude scans / codex windows).
+const trkOrch = r => {
+  if (!r.bySource || !r.tokens) return null;
+  let sub = 0;
+  for (const [k, u] of Object.entries(r.bySource)) if (k.startsWith("zcode:subagent")) sub += (u.in || 0) + (u.cr || 0) + (u.cw || 0) + (u.out || 0);
+  if (sub <= 0) return null;
+  return { own: r.tokens - sub, sub, pct: Math.round((sub / r.tokens) * 100) };
+};
+
 async function fetchTrack() {
   try {
     const res = await fetch("/api/track?live=1", { cache: "no-store", headers: authHeaders() });
@@ -1551,7 +1568,7 @@ function renderTasks() {
 }
 
 // The model × complexity grid the charts and the distributions table share:
-// { models: [name...], byCx: { cx: { model: { tok: [], usd: [] } } } }
+// { models: [name...], byCx: { cx: { model: { tok: [], usd: [], delTok: 0, totTok: 0 } } } }
 function trkBuckets(records) {
   const models = new Map(); // name -> n
   const byCx = {};
@@ -1560,8 +1577,11 @@ function trkBuckets(records) {
     models.set(model, (models.get(model) || 0) + 1);
     const cx = r.complexity || "–";
     (byCx[cx] ??= {});
-    const cell = (byCx[cx][model] ??= { tok: [], usd: [] });
+    const cell = (byCx[cx][model] ??= { tok: [], usd: [], delTok: 0, totTok: 0 });
     cell.tok.push(r.tokens);
+    cell.totTok += r.tokens;
+    const o = trkOrch(r);
+    if (o) cell.delTok += o.sub;
     if (typeof r.usdE === "number") cell.usd.push(r.usdE);
   }
   return { models: [...models.entries()].sort((a, b) => b[1] - a[1]).map(e => e[0]), byCx };
@@ -1570,6 +1590,8 @@ function trkBuckets(records) {
 function trkChartHTML(buckets, field, fmt) {
   // One column per complexity, one bar per tracked model: wrapper height =
   // p90 of the scale, solid fill = p50, dashed wrapper top = the p90 mark.
+  // The hatched overlay inside the fill is the cell's delegated share - the
+  // fraction of that bucket's burn that ran in subagent sessions.
   const scaleMax = Math.max(
     1,
     ...TRK_CX.flatMap(cx =>
@@ -1590,8 +1612,11 @@ function trkChartHTML(buckets, field, fmt) {
         // dwarfs it ($0.005 flash tasks against $0.19 GLM ones)
         const h90 = p90 > 0 ? Math.max(3, (p90 / scaleMax) * 100) : 0;
         const fill = p90 > 0 ? Math.max(6, (p50 / p90) * 100) : 0;
+        const delShare = cell[m].totTok > 0 ? cell[m].delTok / cell[m].totTok : 0;
+        const hatch = delShare > 0 && fill > 0 ? `<i class="tdel" style="height:${(fill * delShare).toFixed(1)}%"></i>` : "";
         const color = trkModelColor(m);
-        return `<div class="tbarm" style="height:${h90.toFixed(1)}%;border-color:${color}" title="${esc(m)} · p50 ${fmt(p50)} · p90 ${fmt(p90)}"><i style="height:${fill.toFixed(1)}%;background:${color}"></i></div>`;
+        const title = `${m} · p50 ${fmt(p50)} · p90 ${fmt(p90)}${delShare > 0 ? ` · delegated ${Math.round(delShare * 100)}%` : ""}`;
+        return `<div class="tbarm" style="height:${h90.toFixed(1)}%;border-color:${color}" title="${esc(title)}"><i style="height:${fill.toFixed(1)}%;background:${color}"></i>${hatch}</div>`;
       })
       .join("");
     return `<div class="tbgroup">${bars}</div>`;
@@ -1654,9 +1679,14 @@ function renderTrackView() {
   for (const r of [...records].sort((a, b) => b.t1 - a.t1)) {
     if (rows.length >= 15) break;
     const model = trkDominant(r) || "–";
+    const orch = trkOrch(r);
     const split = r.usage ? `${fmtTok(r.usage.in)} / ${fmtTok(r.usage.cr)}·${fmtTok(r.usage.cw)} / ${fmtTok(r.usage.out)}` : "–";
+    const tokCell = orch
+      ? `${fmtTok(r.tokens)}<span style="color:var(--text-3)"> (own ${fmtTok(orch.own)})</span>`
+      : `${r.tokens ? fmtTok(r.tokens) : "–"}${r.usage ? `<span style="color:var(--text-3)"> (${split})</span>` : ""}`;
+    const cxCell = `${r.complexity ? `<span class="cxchip">${esc(r.complexity)}</span>` : "–"}${orch ? ` <span class="badge b-orch" title="delegated work: own ${fmtTok(orch.own)} · subagents ${fmtTok(orch.sub)}">orch ${orch.pct}%</span>` : ""}`;
     rows.push(
-      `<tr><td><span class="dotst ${dotFor(r)}"></span></td><td class="mono">${esc(r.id)}</td><td style="white-space:normal;min-width:180px">${esc(r.task)}</td><td>${r.complexity ? `<span class="cxchip">${esc(r.complexity)}</span>` : "–"}</td><td class="mono">${esc(model)}</td><td class="r mono" style="text-align:right" title="in / cr·cw / out">${r.tokens ? fmtTok(r.tokens) : "–"}${r.usage ? `<span style="color:var(--text-3)"> (${split})</span>` : ""}</td><td class="r mono" style="text-align:right">${trkUsd(r.usdE)}</td><td class="r mono" style="text-align:right">${trkAgo(r.wallMs)}</td><td>${statusBadge(r)}${flags(r)}</td></tr>`,
+      `<tr><td><span class="dotst ${dotFor(r)}"></span></td><td class="mono">${esc(r.id)}</td><td style="white-space:normal;min-width:180px">${esc(r.task)}</td><td>${cxCell}</td><td class="mono">${esc(model)}</td><td class="r mono" style="text-align:right" title="${orch ? `own ${fmtTok(orch.own)} · delegated ${fmtTok(orch.sub)} = tree ${fmtTok(r.tokens)}` : "in / cr·cw / out"}">${tokCell}</td><td class="r mono" style="text-align:right">${trkUsd(r.usdE)}</td><td class="r mono" style="text-align:right">${trkAgo(r.wallMs)}</td><td>${statusBadge(r)}${flags(r)}</td></tr>`,
     );
   }
   $("tvlast").querySelector("tbody").innerHTML = rows.length
@@ -1680,15 +1710,46 @@ function renderTrackView() {
       const p90tok = trkPct(cell.tok, 0.9);
       const p50usd = trkPct(cell.usd, 0.5);
       const p90usd = trkPct(cell.usd, 0.9);
+      const del = cell.totTok > 0 ? Math.round((cell.delTok / cell.totTok) * 100) : 0;
       distRows.push(
-        `<tr><td><i class="swatch" style="background:${trkModelColor(model)}"></i><span class="mono">${esc(model)}</span></td><td class="mono">${esc(cx)}</td><td class="r mono" style="text-align:right">${cell.tok.length}${cell.tok.length < 3 ? " ⚠" : ""}</td><td class="r mono" style="text-align:right">${p50 === null ? "–" : fmtTok(p50)}</td><td class="r mono" style="text-align:right">${p90tok === null ? "–" : fmtTok(p90tok)}</td><td class="r mono" style="text-align:right">${p50usd === null ? "–" : trkUsd(p50usd)}</td><td class="r mono" style="text-align:right">${p90usd === null ? "–" : trkUsd(p90usd)}</td></tr>`,
+        `<tr><td><i class="swatch" style="background:${trkModelColor(model)}"></i><span class="mono">${esc(model)}</span></td><td class="mono">${esc(cx)}</td><td class="r mono" style="text-align:right">${cell.tok.length}${cell.tok.length < 3 ? " ⚠" : ""}</td><td class="r mono" style="text-align:right">${del > 0 ? `${del}%` : "–"}</td><td class="r mono" style="text-align:right">${p50 === null ? "–" : fmtTok(p50)}</td><td class="r mono" style="text-align:right">${p90tok === null ? "–" : fmtTok(p90tok)}</td><td class="r mono" style="text-align:right">${p50usd === null ? "–" : trkUsd(p50usd)}</td><td class="r mono" style="text-align:right">${p90usd === null ? "–" : trkUsd(p90usd)}</td></tr>`,
+      );
+    }
+  }
+  // The delegated population: nested subagent tasks as their own labeled
+  // rows - window snapshots (they include concurrent orchestrator/sibling
+  // burn), so they read as upper bounds, never clean per-task costs.
+  const nested30 = records.filter(r => r.usage !== null && !r.pending && !r.contested && r.nested !== null && r.status === "done" && r.t1 >= nowMs - 30 * 864e5);
+  const delBuckets = trkBuckets(nested30);
+  for (const model of delBuckets.models) {
+    for (const cx of [...TRK_CX, "–"]) {
+      const cell = (delBuckets.byCx[cx] || {})[model];
+      if (!cell) continue;
+      const p50 = trkPct(cell.tok, 0.5);
+      const p90tok = trkPct(cell.tok, 0.9);
+      const p50usd = trkPct(cell.usd, 0.5);
+      const p90usd = trkPct(cell.usd, 0.9);
+      distRows.push(
+        `<tr style="color:var(--text-2)"><td><i class="swatch" style="background:${trkModelColor(model)}"></i><span class="mono">${esc(model)}</span></td><td class="mono">${esc(cx)} <span class="badge b-orch">delegated</span></td><td class="r mono" style="text-align:right">${cell.tok.length}${cell.tok.length < 3 ? " ⚠" : ""}</td><td class="r mono" style="text-align:right">–</td><td class="r mono" style="text-align:right">${p50 === null ? "–" : fmtTok(p50)}</td><td class="r mono" style="text-align:right">${p90tok === null ? "–" : fmtTok(p90tok)}</td><td class="r mono" style="text-align:right">${p50usd === null ? "–" : trkUsd(p50usd)}</td><td class="r mono" style="text-align:right">${p90usd === null ? "–" : trkUsd(p90usd)}</td></tr>`,
       );
     }
   }
   $("tvdist").querySelector("tbody").innerHTML = distRows.length
     ? distRows.join("")
-    : `<tr><td colspan="7"><div class="empty">nothing yet</div></td></tr>`;
-  $("tvsub").textContent = `${markers.length} open · ${records.length} records · estimates repriced at read time`;
+    : `<tr><td colspan="8"><div class="empty">nothing yet</div></td></tr>`;
+
+  // Orchestrated: the own-vs-tree decomposition - the planning numbers.
+  const orchRecs = [...records].filter(r => trkOrch(r)).sort((a, b) => b.t1 - a.t1).slice(0, 15);
+  const orchRows = orchRecs.map(r => {
+    const o = trkOrch(r);
+    const model = trkDominant(r) || "–";
+    return `<tr><td class="mono">${esc(r.id)}</td><td style="white-space:normal;min-width:180px">${esc(r.task)}</td><td>${r.complexity ? `<span class="cxchip">${esc(r.complexity)}</span>` : "–"}</td><td class="mono">${esc(model)}</td><td class="r mono" style="text-align:right" title="the orchestrating session's tokens">${fmtTok(o.own)}</td><td class="r mono" style="text-align:right" title="whole tree - complexity covers this">${fmtTok(r.tokens)}</td><td class="r mono" style="text-align:right">${o.pct}%</td><td class="r mono" style="text-align:right">${trkAgo(r.wallMs)}</td><td>${statusBadge(r)}${flags(r)}</td></tr>`;
+  });
+  $("tvorch").querySelector("tbody").innerHTML = orchRows.length
+    ? orchRows.join("")
+    : `<tr><td colspan="9"><div class="empty">no orchestrated tasks yet – fills as orchestrators delegate</div></td></tr>`;
+  const orchCount = records.filter(r => trkOrch(r)).length;
+  $("tvsub").textContent = `${markers.length} open · ${records.length} records · ${orchCount} orchestrated · estimates repriced at read time`;
 }
 
 $("host").textContent = HOST;
