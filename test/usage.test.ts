@@ -533,6 +533,59 @@ describe("usage parsers", () => {
       }
     });
 
+    it("sparse-garbage windows (one old nonzero bucket) contradict the local store - reconstruct", async () => {
+      const dir = tempDir();
+      const now = Date.now() + 3600_000;
+      const recent = now - HOUR;
+      const home = await mkHome([{ ms: recent + 60_000, inTok: 400_000, cr: 50_000, out: 1_000 }]);
+      const old = new Date(now - 20 * HOUR);
+      const op = (n: number) => String(n).padStart(2, "0");
+      const oldLabel = `${old.getFullYear()}-${op(old.getMonth() + 1)}-${op(old.getDate())} ${op(old.getHours())}:00:00`;
+      const sparseGarbage = {
+        code: 200,
+        msg: "Operation successful",
+        data: {
+          granularity: "HOUR",
+          timezone: "Asia/Shanghai",
+          modelUsage: {
+            xTime: [oldLabel],
+            modelDataList: [
+              {
+                modelCode: "glm-5.3",
+                modelName: "GLM-5.3",
+                uncachedInputTokensUsage: [12345],
+                cachedInputTokensUsage: [0],
+                outputTokensUsage: [678],
+              },
+            ],
+          },
+        },
+        success: true,
+      };
+      try {
+        seedFresh(dir, now);
+        const summary = await harvestUsage([], {
+          subtrkDir: dir,
+          now,
+          fetchImpl: fetchWith(sparseGarbage),
+          envPath: join(dir, "env"),
+          glmConfig: cfg,
+          homeDir: home,
+          budgetMs: 4000,
+        });
+        assert.ok(
+          summary.applied.some((s) => s.includes("local reconstruction")),
+          `an old-hour bucket cannot certify a window the local store contradicts: ${JSON.stringify(summary)}`,
+        );
+        const store = readUsageStore(dir);
+        const row = store.hourly.glm?.[hourKey(recent + 60_000)]?.["GLM-5.3"];
+        assert.ok(row && row.in === 350_000, `local truth written (in = 400k - 50k): ${JSON.stringify(row)}`);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
     it("bucket-shaped all-zero windows are degradation too (incident evolution) - local truth wins", async () => {
       const dir = tempDir();
       const now = Date.now() + 3600_000;

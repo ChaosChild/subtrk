@@ -978,20 +978,31 @@ async function harvestGlm(ctx: JobCtx): Promise<void> {
       }
     }
   }
-  // Upstream-degradation guard (z.ai usage-detail went flaky 2026-10-14:
-  // first valid envelopes with ZERO buckets, later bucket-shaped windows
-  // whose every value is zero - while windows provably contain usage). An
-  // hourly fetch totalling zero = do not trust the API – reconstruct from
-  // the LOCAL zcode store instead of wiping the range (when the machine
-  // truly was idle, the reconstruction writes the same zeros).
-  const apiHourlyTotal = Object.values(hourlyOut).reduce(
-    (a, models) =>
-      a + Object.values(models).reduce((b, u) => b + (u.in ?? 0) + (u.cr ?? 0) + (u.cw ?? 0) + (u.out ?? 0), 0),
-    0,
-  );
-  if (apiHourlyTotal === 0) {
-    ctx.summary.skipped.push("glm: usage-detail reported zero hourly usage – upstream degraded");
+  // Upstream-degradation guard (z.ai usage-detail went flaky 2026-10-14 and
+  // kept evolving: valid envelopes with zero buckets -> bucket-shaped
+  // all-zero windows -> sparse garbage: one nonzero bucket at an hour with
+  // no local usage, everything else zero). Two checks, local truth as the
+  // referee - the API is account-wide, so a healthy response can never
+  // report LESS than this machine's own sqlite for the same hours.
+  const sumRows = (models: Record<string, UsageRow>): number =>
+    Object.values(models).reduce((b, u) => b + (u.in ?? 0) + (u.cr ?? 0) + (u.cw ?? 0) + (u.out ?? 0), 0);
+  const apiHourlyTotal = Object.values(hourlyOut).reduce((a, models) => a + sumRows(models), 0);
+  const degraded = async (why: string): Promise<void> => {
+    ctx.summary.skipped.push(`glm: ${why} – upstream degraded`);
     await harvestGlmLocal(ctx, state?.throughMs ?? ctx.now - GLM_HOURLY_WINDOW_MS);
+  };
+  if (apiHourlyTotal === 0) {
+    await degraded("usage-detail reported zero hourly usage");
+    return;
+  }
+  // Sparse-garbage check: the last 3h API total vs the local sqlite's.
+  const recentFromKey = hourKey(ctx.now - 3 * 3_600_000);
+  const apiRecent = Object.entries(hourlyOut)
+    .filter(([hk]) => hk >= recentFromKey)
+    .reduce((a, [, models]) => a + sumRows(models), 0);
+  const localRecent = await localZcodeSum(ctx, ctx.now - 3 * 3_600_000, ctx.now);
+  if (localRecent !== null && localRecent > 100_000 && apiRecent < localRecent * 0.1) {
+    await degraded(`usage-detail contradicts the local store (${apiRecent} vs ${localRecent} tok in 3h)`);
     return;
   }
   const applied = mutateUsageStore(
@@ -1011,6 +1022,39 @@ async function harvestGlm(ctx: JobCtx): Promise<void> {
   );
   if (applied) ctx.summary.applied.push("glm");
   else ctx.summary.skipped.push("glm: store busy");
+}
+
+// Cheap cross-source referee: this machine's z.ai token burn in a window,
+// straight from the zcode sqlite (null = no local store to consult).
+async function localZcodeSum(ctx: JobCtx, fromMs: number, toMs: number): Promise<number | null> {
+  const home = ctx.homeDir ?? homedir();
+  const dbPath = join(home, ".zcode", "cli", "db", "db.sqlite");
+  try {
+    await statAsync(dbPath);
+  } catch {
+    return null;
+  }
+  const { importSqlite } = await import("./track-harvest.ts");
+  const mod = await importSqlite();
+  if (!mod) return null;
+  try {
+    const db = new mod.DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const row = db
+        .prepare(
+          `select coalesce(sum(input_tokens + output_tokens + cache_creation_input_tokens + cache_read_input_tokens), 0) as tot
+           from model_usage
+           where started_at >= ? and started_at <= ?
+             and query_source <> 'session_title' and provider_id like '%zai%'`,
+        )
+        .get(fromMs, toMs) as { tot?: unknown } | undefined;
+      return Number(row?.tot) || 0;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return null;
+  }
 }
 
 // Local reconstruction (PR E): the zcode sqlite store is ground truth for
