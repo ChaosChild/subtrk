@@ -424,6 +424,8 @@ async function harvestCodex(acc: Accumulator, w: HarvestWindow, homeDir: string)
   const wantDir = normalizeDir(w.project);
   // a pin names one rollout by its session_meta.payload.id (= CODEX_THREAD_ID)
   const pin = typeof w.session === "string" && w.session.trim() !== "" ? w.session.trim() : null;
+  // PR D: a child's pinned rollout belongs to the child, not this window.
+  const excluded = new Set(w.excludeSessions ?? []);
   let any = false;
   for (const file of files) {
     try {
@@ -448,6 +450,7 @@ async function harvestCodex(acc: Accumulator, w: HarvestWindow, homeDir: string)
         }
         if (cwd !== null && normalizeDir(cwd) !== wantDir) break; // a different project's rollout
         if (cwd !== null && pin !== null && id !== pin) break; // another session's rollout
+        if (cwd !== null && id !== null && excluded.has(id)) break; // an excluded child's rollout
         continue;
       }
       if (pin !== null && id !== pin) continue; // pinned: nothing counts before a matching session_meta

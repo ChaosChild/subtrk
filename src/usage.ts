@@ -1045,7 +1045,7 @@ async function localZcodeSum(ctx: JobCtx, fromMs: number, toMs: number): Promise
     try {
       const row = db
         .prepare(
-          `select coalesce(sum(input_tokens + output_tokens + cache_creation_input_tokens + cache_read_input_tokens), 0) as tot
+          `select coalesce(sum(input_tokens + output_tokens), 0) as tot
            from model_usage
            where started_at >= ? and started_at <= ?
              and query_source <> 'session_title' and provider_id like '%zai%'`,

@@ -333,6 +333,12 @@ describe("harvestWindow: codex session pin", () => {
       assert.deepEqual(unpinned.sessions, []);
 
       assert.equal(await harvestWindow({ ...w, session: "thr-nope" }, { homeDir: home }), null);
+
+      // PR D (release blocker B1): an excluded child pin leaves the child's
+      // rollout out of the parent's window - codex children count once.
+      const parentOnly = await harvestWindow({ ...w, excludeSessions: ["thr-child"] }, { homeDir: home });
+      assert.ok(parentOnly);
+      assert.deepEqual(parentOnly.usage, { in: 100, cr: 0, cw: 0, out: 10, reqs: 1 });
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
