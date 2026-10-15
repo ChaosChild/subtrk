@@ -124,17 +124,44 @@ export function cleanPinnedChild(c: TrackRecord, all: TrackRecord[]): boolean {
   return parent?.excludedPins?.includes(c.sessionPin) === true;
 }
 
+// The ancestor that actually excluded a child's pin - normally the direct
+// parent, but a pinned leaf under an UNPINNED mid sits in the tree of
+// whichever ancestor's harvest skipped it (the pin lives on that ancestor).
+export function excludingAncestor(c: TrackRecord, byId: Map<string, TrackRecord>): TrackRecord | null {
+  if (!c.sessionPin) return null;
+  let p = c.nested !== null ? byId.get(c.nested) : undefined;
+  const seen = new Set<string>([c.id]);
+  while (p && !seen.has(p.id)) {
+    seen.add(p.id);
+    if ((p.excludedPins ?? []).includes(c.sessionPin)) return p;
+    p = p.nested !== null ? byId.get(p.nested) : undefined;
+  }
+  return null;
+}
+
 // PR D tree sums: a parent's leaf calibration sample is its WHOLE tree - its
-// own (post-exclusion) burn plus its clean pinned children. Old-world parents
-// (children unpinned or harvested before the split) already contain their
-// children, so the sum collapses to their own number. Mutates .tokens so every
+// own (post-exclusion) burn plus its clean pinned children, recursively
+// (multi-level orchestration is the norm here). Old-world parents (children
+// unpinned or harvested before the split) already contain their children, so
+// the sum collapses to their own number. Mutates .tokens so every
 // bucket/chart/console that reads tokens sees the tree, never a bare root.
 export function applyTreeSums(records: EnrichedRecord[]): void {
-  for (const r of records) {
-    const kids = records.filter((c) => c.nested === r.id && cleanPinnedChild(c, records));
-    if (kids.length === 0) continue;
-    r.tokens = r.tokens + kids.reduce((a, c) => a + c.tokens, 0);
-  }
+  const byId = new Map<string, TrackRecord>(records.map((r) => [r.id, r]));
+  const cache = new Map<string, number>();
+  const treeOf = (r: EnrichedRecord): number => {
+    const hit = cache.get(r.id);
+    if (hit !== undefined) return hit;
+    cache.set(r.id, r.tokens); // seed guards hypothetical cycles
+    let sum = r.tokens;
+    for (const c of records) {
+      if (c.nested === null || !c.sessionPin) continue;
+      const owner = excludingAncestor(c, byId);
+      if (owner?.id === r.id) sum += treeOf(c);
+    }
+    cache.set(r.id, sum);
+    return sum;
+  };
+  for (const r of records) r.tokens = treeOf(r);
 }
 
 export interface Bucket {

@@ -351,6 +351,63 @@ describe("PR D: attribution split - clean pinned children + tree sums", () => {
     assert.match(text, /· clean/);
     assert.match(text, /upper bounds/);
   });
+
+  it("F1: applyTreeSums is recursive and order-independent - 3-level trees count fully", () => {
+    const root = enrichRecord(
+      rec({ id: "root", task: "r", usage: { in: 600, cr: 350, cw: 0, out: 50, reqs: 4 }, excludedPins: ["pin_mid"] }),
+      noPricing,
+    );
+    const mid = enrichRecord(
+      rec({
+        id: "mid",
+        task: "m",
+        nested: "root",
+        sessionPin: "pin_mid",
+        usage: { in: 300, cr: 170, cw: 0, out: 30, reqs: 2 },
+        excludedPins: ["pin_leaf"],
+      }),
+      noPricing,
+    );
+    const leaf = enrichRecord(
+      rec({
+        id: "leaf",
+        task: "l",
+        nested: "mid",
+        sessionPin: "pin_leaf",
+        usage: { in: 120, cr: 60, cw: 0, out: 20, reqs: 1 },
+      }),
+      noPricing,
+    );
+    applyTreeSums([root, mid, leaf]); // roots first - the order that used to drop grandchildren
+    assert.equal(mid.tokens, 500 + 200, "mid tree = own 500 + leaf 200");
+    assert.equal(root.tokens, 1000 + 700, "root tree = own 1000 + mid TREE 700 (not the bare 500)");
+  });
+
+  it("F1b: a pinned leaf under an UNPINNED mid credits the ancestor that excluded its pin", () => {
+    // root's own harvest (100) already contains the unpinned mid's burn, and
+    // excluded the leaf's pin - the leaf must land on the ROOT's tree.
+    const root = enrichRecord(
+      rec({ id: "r2", task: "r", usage: { in: 60, cr: 35, cw: 0, out: 5, reqs: 3 }, excludedPins: ["pin_l2"] }),
+      noPricing,
+    );
+    const mid = enrichRecord(
+      rec({ id: "m2", task: "m", nested: "r2", usage: { in: 30, cr: 15, cw: 0, out: 5, reqs: 1 } }),
+      noPricing,
+    );
+    const leaf = enrichRecord(
+      rec({
+        id: "l2",
+        task: "l",
+        nested: "m2",
+        sessionPin: "pin_l2",
+        usage: { in: 12, cr: 6, cw: 0, out: 2, reqs: 1 },
+      }),
+      noPricing,
+    );
+    applyTreeSums([root, mid, leaf]);
+    assert.equal(root.tokens, 100 + 20, "root tree = own 100 (incl. mid) + excluded leaf 20");
+    assert.equal(mid.tokens, 50, "the unpinned mid keeps its own snapshot number");
+  });
 });
 
 describe("buildEstimate", () => {

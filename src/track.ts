@@ -623,7 +623,9 @@ function recodeTrack(args: TrackArgs, ctx: VerbCtx): number {
     (s) => {
       const t = s.markers.find((m) => m.id === id) ?? s.records.find((r) => r.id === id);
       if (!t) return false;
-      from = t.recodeFrom ?? t.complexity;
+      // The arrow shows the CURRENT value; recodeFrom (set below) keeps the
+      // original start declaration for drift evidence, not for display.
+      from = t.complexity;
       if (t.complexity === cx) {
         unchanged = true;
         return false; // already there – no write
