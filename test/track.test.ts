@@ -921,3 +921,270 @@ describe("track store", () => {
     }
   });
 });
+
+// ---------- lifecycle: reassessment, pause/resume, recode ----------
+
+describe("track stop --complexity (final reassessment)", () => {
+  it("overrides the start declaration and keeps the original in recodeFrom", async () => {
+    const fx = fixture();
+    const cap = captureConsole();
+    try {
+      await run(fx, ["track", "start", "--task=big work", "--complexity=l"]);
+      const id = /^trk_[0-9a-f]{8}/.exec(cap.out[0] ?? "")?.[0];
+      assert.ok(id);
+      cap.out.length = 0;
+      assert.equal(await run(fx, ["track", "stop", `--id=${id}`, "--complexity=xl"]), 0);
+      const store = readTrackStore(fx.dir);
+      assert.equal(store.records[0]?.complexity, "xl");
+      assert.equal(store.records[0]?.recodeFrom, "l");
+      assert.match(cap.out.join("\n"), /complexity xl recorded — drifted\? subtrk track recode --id/);
+    } finally {
+      cap.restore();
+      fx.restore();
+    }
+  });
+
+  it("rejects an invalid complexity with exit 2 before touching the store", async () => {
+    const fx = fixture();
+    const cap = captureConsole();
+    try {
+      await run(fx, ["track", "start", "--task=t"]);
+      cap.out.length = 0;
+      assert.equal(await run(fx, ["track", "stop", "--complexity=huge"]), 2);
+      const store = readTrackStore(fx.dir);
+      assert.equal(store.markers.length, 1, "the marker survives the rejected stop");
+    } finally {
+      cap.restore();
+      fx.restore();
+    }
+  });
+
+  it("prints the delegation split for orchestrated records", async () => {
+    const dir = tempDir("subtrk-track-");
+    const cwd = tempDir("subtrk-proj-");
+    const now = { ms: 1_700_000_000_000 };
+    const harvest: HarvestFn = async () => ({
+      attribution: "session-window",
+      usage: { in: 2000, cr: 8000, cw: 0, out: 1000, reqs: 9 },
+      bySource: {
+        "zcode:main": { in: 600, cr: 2400, cw: 0, out: 100, reqs: 1 },
+        "zcode:subagent": { in: 1400, cr: 5600, cw: 0, out: 900, reqs: 8 },
+      },
+      models: { "glm-5.3": 1 },
+      sessions: ["sess_main", "sess_sub"],
+    });
+    const cap = captureConsole();
+    try {
+      await trackCommand(
+        { sub: "start", json: false, task: "orchestrated", complexity: "l" },
+        { subtrkDir: dir, cwd: () => cwd, now: () => now.ms, harvest },
+      );
+      cap.out.length = 0;
+      assert.equal(
+        await trackCommand(
+          { sub: "stop", json: false },
+          { subtrkDir: dir, cwd: () => cwd, now: () => now.ms, harvest },
+        ),
+        0,
+      );
+      assert.match(cap.out.join("\n"), /orchestrated · 72% delegated \(main 3\.1k · subagents 7\.9k\)/);
+      assert.match(cap.out.join("\n"), /complexity covers the whole tree/);
+    } finally {
+      cap.restore();
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("track pause + resume", () => {
+  it("pauses, surfaces in status, resumes under the same identity, closes done with pauses kept", async () => {
+    const fx = fixture();
+    const cap = captureConsole();
+    try {
+      await run(fx, ["track", "start", "--task=ci wait", "--complexity=m"]);
+      const id = /^trk_[0-9a-f]{8}/.exec(cap.out[0] ?? "")?.[0];
+      assert.ok(id);
+      fx.now.ms += 60_000;
+      cap.out.length = 0;
+      assert.equal(await run(fx, ["track", "stop", `--id=${id}`, "--status=paused"]), 0);
+      let store = readTrackStore(fx.dir);
+      assert.equal(store.records[0]?.status, "paused");
+      assert.equal(store.markers.length, 0);
+
+      fx.now.ms += 60_000;
+      cap.out.length = 0;
+      assert.equal(await run(fx, ["track", "status"]), 0);
+      assert.match(cap.out.join("\n"), new RegExp(`${id}\\s+paused 1m`));
+      assert.match(cap.out.join("\n"), /track resume --id/);
+      assert.match(
+        cap.out.join("\n"),
+        new RegExp(fx.cwd.replace(/\\/g, "\\\\")),
+        "B4: the paused line shows its folder",
+      );
+
+      cap.out.length = 0;
+      assert.equal(await run(fx, ["track", "status", "--json=true"]), 0);
+      const parsed = JSON.parse(cap.out[0]) as { paused?: Array<{ id: string; status: string }> };
+      assert.equal(parsed.paused?.[0]?.id, id, "B3: --json exposes paused records to machine readers");
+
+      fx.now.ms += 3_600_000;
+      cap.out.length = 0;
+      assert.equal(await run(fx, ["track", "resume", `--id=${id}`]), 0);
+      assert.match(cap.out[0] ?? "", /resumed · t0 kept/);
+      store = readTrackStore(fx.dir);
+      assert.equal(store.markers.length, 1);
+      assert.equal(store.markers[0]?.id, id);
+      assert.equal(store.markers[0]?.t0, 1_700_000_000_000, "identity keeps the original t0");
+      assert.equal(store.markers[0]?.pauses?.length, 1);
+      assert.equal(store.records.length, 0, "the paused record is consumed by the resume");
+
+      fx.now.ms += 60_000;
+      cap.out.length = 0;
+      assert.equal(await run(fx, ["track", "stop", `--id=${id}`]), 0);
+      store = readTrackStore(fx.dir);
+      assert.equal(store.records[0]?.status, "done");
+      assert.equal(store.records[0]?.t0, 1_700_000_000_000);
+      assert.equal(store.records[0]?.pauses?.length, 1, "pause segments ride into the record");
+    } finally {
+      cap.restore();
+      fx.restore();
+    }
+  });
+
+  it("resume validates: needs --id (2), unknown id (1), already open (1)", async () => {
+    const fx = fixture();
+    const cap = captureConsole();
+    try {
+      assert.equal(await run(fx, ["track", "resume"]), 2);
+      assert.equal(await run(fx, ["track", "resume", "--id=trk_deadbeef"]), 1);
+      await run(fx, ["track", "start", "--task=t"]);
+      const id = /^trk_[0-9a-f]{8}/.exec(cap.out[0] ?? "")?.[0];
+      assert.ok(id);
+      assert.equal(await run(fx, ["track", "resume", `--id=${id}`]), 1);
+    } finally {
+      cap.restore();
+      fx.restore();
+    }
+  });
+});
+
+describe("PR D: parent harvest excludes child session pins", () => {
+  it("a pinned child's session rides the parent's window as excludeSessions and lands on the record", async () => {
+    const fx = fixture();
+    const cap = captureConsole();
+    try {
+      await run(fx, ["track", "start", "--task=parent work"]);
+      await run(fx, ["track", "start", "--task=child work", "--session=sess_kid"]);
+      const ids = cap.out.map((l) => /^trk_[0-9a-f]{8}(?=\s+marker open)/.exec(l)?.[0]).filter(Boolean) as string[];
+      const parent = ids[0];
+      const child = ids[1];
+      assert.ok(parent && child, `two markers opened: ${JSON.stringify(cap.out)}`);
+      fx.now.ms += 60_000;
+      await run(fx, ["track", "stop", `--id=${child}`]);
+      fx.now.ms += 60_000;
+      await run(fx, ["track", "stop", `--id=${parent}`]);
+      const store = readTrackStore(fx.dir);
+      const kid = store.records.find((r) => r.id === child);
+      const par = store.records.find((r) => r.id === parent);
+      assert.ok(kid && par, "both records closed");
+      assert.equal(kid.nested, parent, "child window is contained in the parent");
+      assert.equal(kid.sessionPin, "sess_kid");
+      assert.deepEqual(par.excludedPins, ["sess_kid"], "the parent record names the pin it left to the child");
+      const windows = fx.calls.windows as unknown as Array<{ excludeSessions?: string[] }>;
+      const withExclusions = windows.filter((w) => w.excludeSessions !== undefined);
+      assert.equal(withExclusions.length, 1, "only the parent's window carries exclusions");
+      assert.deepEqual(withExclusions[0]?.excludeSessions, ["sess_kid"]);
+    } finally {
+      cap.restore();
+      fx.restore();
+    }
+  });
+
+  it("unpinned children are not excluded - old-world containment stays", async () => {
+    const fx = fixture();
+    const cap = captureConsole();
+    try {
+      await run(fx, ["track", "start", "--task=parent work"]);
+      await run(fx, ["track", "start", "--task=child unpinned"]);
+      const ids = cap.out.map((l) => /^trk_[0-9a-f]{8}(?=\s+marker open)/.exec(l)?.[0]).filter(Boolean) as string[];
+      const parent = ids[0];
+      const child = ids[1];
+      assert.ok(parent && child);
+      fx.now.ms += 60_000;
+      await run(fx, ["track", "stop", `--id=${child}`]);
+      await run(fx, ["track", "stop", `--id=${parent}`]);
+      const store = readTrackStore(fx.dir);
+      const par = store.records.find((r) => r.id === parent);
+      assert.equal(par?.excludedPins, undefined, "nothing to exclude without a pin");
+    } finally {
+      cap.restore();
+      fx.restore();
+    }
+  });
+});
+
+describe("track recode", () => {
+  it("recodes an open marker and the value rides into the record", async () => {
+    const fx = fixture();
+    const cap = captureConsole();
+    try {
+      await run(fx, ["track", "start", "--task=wave", "--complexity=l"]);
+      const id = /^trk_[0-9a-f]{8}/.exec(cap.out[0] ?? "")?.[0];
+      assert.ok(id);
+      cap.out.length = 0;
+      assert.equal(await run(fx, ["track", "recode", `--id=${id}`, "--complexity=xl"]), 0);
+      assert.match(cap.out.join("\n"), /complexity l -> xl\s+\(marker\)/);
+      let store = readTrackStore(fx.dir);
+      assert.equal(store.markers[0]?.complexity, "xl");
+      assert.equal(store.markers[0]?.recodeFrom, "l");
+      await run(fx, ["track", "stop", `--id=${id}`]);
+      store = readTrackStore(fx.dir);
+      assert.equal(store.records[0]?.complexity, "xl");
+      assert.equal(store.records[0]?.recodeFrom, "l");
+    } finally {
+      cap.restore();
+      fx.restore();
+    }
+  });
+
+  it("recodes a closed record; the ORIGINAL declaration survives chained recodes", async () => {
+    const fx = fixture();
+    const cap = captureConsole();
+    try {
+      await run(fx, ["track", "start", "--task=done already", "--complexity=s"]);
+      const id = /^trk_[0-9a-f]{8}/.exec(cap.out[0] ?? "")?.[0];
+      await run(fx, ["track", "stop", `--id=${id}`]);
+      cap.out.length = 0;
+      assert.equal(await run(fx, ["track", "recode", `--id=${id}`, "--complexity=m"]), 0);
+      assert.match(cap.out.join("\n"), /\(record\)/);
+      await run(fx, ["track", "recode", `--id=${id}`, "--complexity=l"]);
+      const store = readTrackStore(fx.dir);
+      assert.equal(store.records[0]?.complexity, "l");
+      assert.equal(store.records[0]?.recodeFrom, "s", "the start declaration survives chained recodes");
+    } finally {
+      cap.restore();
+      fx.restore();
+    }
+  });
+
+  it("validates: missing flags (2), bad complexity (2), unknown id (1), no-op writes nothing", async () => {
+    const fx = fixture();
+    const cap = captureConsole();
+    try {
+      assert.equal(await run(fx, ["track", "recode"]), 2);
+      assert.equal(await run(fx, ["track", "recode", "--id=trk_00000000"]), 2);
+      assert.equal(await run(fx, ["track", "recode", "--id=trk_00000000", "--complexity=xl"]), 1);
+      await run(fx, ["track", "start", "--task=t", "--complexity=m"]);
+      const id = /^trk_[0-9a-f]{8}/.exec(cap.out[0] ?? "")?.[0];
+      cap.out.length = 0;
+      assert.equal(await run(fx, ["track", "recode", `--id=${id}`, "--complexity=m"]), 0);
+      assert.match(cap.out.join("\n"), /already m/);
+      const store = readTrackStore(fx.dir);
+      assert.equal(store.markers[0]?.recodeFrom, undefined, "a no-op recode writes nothing");
+    } finally {
+      cap.restore();
+      fx.restore();
+    }
+  });
+});

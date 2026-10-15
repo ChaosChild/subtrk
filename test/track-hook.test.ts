@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { clearSecrets, registerSecret } from "../src/core.ts";
-import type { TrackMarker } from "../src/track.ts";
+import type { TrackMarker, TrackRecord } from "../src/track.ts";
 import {
   hookOutput,
   markersInScope,
@@ -75,6 +75,31 @@ test("nudgeText: long task descriptions truncate; secrets scrub out", () => {
   } finally {
     clearSecrets();
   }
+});
+
+test("nudgeText: paused records surface with the resume command; stop stays silent without an OPEN marker", () => {
+  const rec = {
+    id: "trk_pause1",
+    task: "waiting on CI",
+    t0: 0,
+    t1: Date.parse("2026-10-08T15:00:00Z"),
+    status: "paused",
+    project: marker().project,
+  } as unknown as TrackRecord;
+  assert.equal(nudgeText("stop", [], []), null, "nothing open, nothing paused – silence");
+  assert.equal(nudgeText("stop", [], [rec]), null, "B1: a deliberate pause must not be nudged to resume at turn end");
+  const pz = nudgeText("session-start", [], [rec]);
+  assert.ok(pz?.includes("trk_pause1") && pz?.includes("waiting on CI"), "the paused task is named");
+  assert.ok(pz?.includes("track resume --id trk_pause1"), "the resume command rides the nudge");
+  assert.ok(pz?.includes("track start --task"), "B2: a parked task does not suppress the new-work reminder");
+  assert.ok((pz ?? "").length < 400, "paused nudge stays under the bound");
+  assert.ok(nudgeText("stop", [marker()], [rec])?.includes("trk_test01"), "an open marker still wins the nudge");
+});
+
+test("openStateKey: paused ids join the comparable state", () => {
+  const rec = { id: "trk_zz", status: "paused" } as unknown as TrackRecord;
+  assert.equal(openStateKey([], [rec]), "paused:trk_zz");
+  assert.equal(openStateKey([marker({ id: "trk_aa" })], [rec]), "open:trk_aa|paused:trk_zz");
 });
 
 test("hookOutput: exact key sets per dialect (zcode's stdout schema is strict)", () => {

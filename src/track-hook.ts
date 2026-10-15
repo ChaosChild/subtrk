@@ -12,7 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { SUBTRK_DIR, scrub } from "./core.ts";
-import { readTrackStore, type TrackMarker } from "./track.ts";
+import { readTrackStore, type TrackMarker, type TrackRecord } from "./track.ts";
 
 export const HOOK_EVENTS = ["session-start", "stop"] as const;
 export type HookEvent = (typeof HOOK_EVENTS)[number];
@@ -56,10 +56,20 @@ export function markersInScope(markers: TrackMarker[], cwd: string): TrackMarker
   return markers.filter((m) => dirMatches(m.project, cwd));
 }
 
-// The throttle state, as a comparable string: which markers are open.
-export function openStateKey(markers: TrackMarker[]): string {
-  const ids = markers.map((m) => m.id).sort();
-  return ids.length > 0 ? `open:${ids.join(",")}` : "none";
+export function pausedInScope(records: TrackRecord[], cwd: string): TrackRecord[] {
+  return records.filter((r) => r.status === "paused" && dirMatches(r.project, cwd));
+}
+
+// The throttle state, as a comparable string: which markers are open and
+// which records sit paused (a parked task must surface once per change, like
+// an open one – not on every fire, and not never).
+export function openStateKey(markers: TrackMarker[], paused: TrackRecord[] = []): string {
+  const open = markers.map((m) => m.id).sort();
+  const pz = paused.map((p) => p.id).sort();
+  const parts: string[] = [];
+  if (open.length > 0) parts.push(`open:${open.join(",")}`);
+  if (pz.length > 0) parts.push(`paused:${pz.join(",")}`);
+  return parts.length > 0 ? parts.join("|") : "none";
 }
 
 function clock(ms: number): string {
@@ -70,16 +80,33 @@ function clock(ms: number): string {
 }
 
 // Pure: the reminder text for a state, or null for silence.
-//  - session-start: nudge on any state change (first fire included) – both
-//    "nothing open, start one if this is real work" and "this is open".
-//  - stop (turn end): nudge only when something is open AND the open set
-//    changed since the last nudge – a turn ending markerless is normal.
-export function nudgeText(event: HookEvent, markers: TrackMarker[]): string | null {
+//  - session-start: nudge on any state change (first fire included) – nothing
+//    open ("start one, guess the ladder in one line"), something open, or a
+//    paused task parked for this folder ("resume if this continues it").
+//  - stop (turn end): nudge only when something is open or paused AND the
+//    state changed since the last nudge – a turn ending markerless is normal.
+export function nudgeText(event: HookEvent, markers: TrackMarker[], paused: TrackRecord[] = []): string | null {
+  // Turn-end nudges need an OPEN marker: a paused-only state at turn end is
+  // usually the pause the agent just made on purpose - telling it to resume
+  // its own deliberate pause is noise (B1). Parked tasks surface at session
+  // start instead.
   if (event === "stop" && markers.length === 0) return null;
+  if (markers.length === 0 && paused.length > 0) {
+    const p = paused[0] as TrackRecord;
+    const task = p.task.length > 48 ? `${p.task.slice(0, 47)}…` : p.task;
+    const more = paused.length > 1 ? ` (+${paused.length - 1} more paused)` : "";
+    return scrub(
+      `subtrk: track ${p.id} ("${task}") is paused in this folder${more}. ` +
+        `If this session continues that work, resume it: subtrk track resume --id ${p.id}; ` +
+        `otherwise it stays parked for a later session. New task? ` +
+        `subtrk track start --task "<short description>" --complexity <xs|s|m|l|xl>`,
+    );
+  }
   if (markers.length === 0) {
     return scrub(
       "subtrk: no open track marker. If this session starts a task that produces or changes a deliverable, " +
-        'open one first: subtrk track start --task "<short description>" --complexity <xs|s|m|l|xl>',
+        'open one first: subtrk track start --task "<short description>" --complexity <xs|s|m|l|xl> ' +
+        "(one-line ladder guess, no research – you reassess at stop; playbook: the subtrk-track skill)",
     );
   }
   const first = markers[0] as TrackMarker;
@@ -87,7 +114,9 @@ export function nudgeText(event: HookEvent, markers: TrackMarker[]): string | nu
   const more = markers.length > 1 ? ` (+${markers.length - 1} more open)` : "";
   return scrub(
     `subtrk: track marker ${first.id} ("${task}") open since ${clock(first.t0)} in this folder${more}. ` +
-      `Continue under it, or stop it before new work: subtrk track stop --id ${first.id} --status done|aborted`,
+      `Continue under it, or stop it before new work: subtrk track stop --id ${first.id} ` +
+      `--status done|aborted|paused (paused while feedback is pending; resume --id reopens it; ` +
+      `--complexity is the final reassessment; playbook: the subtrk-track skill)`,
   );
 }
 
@@ -197,7 +226,8 @@ export function trackHookCommand(args: { event: string; harness: string }, deps:
 
     const store = readTrackStore(subtrkDir);
     const scoped = markersInScope(store.markers, cwd);
-    const current = openStateKey(scoped);
+    const paused = pausedInScope(store.records, cwd);
+    const current = openStateKey(scoped, paused);
 
     // Session key: the harness session id, or a cwd+hour fallback so even
     // input-less fires stay bounded.
@@ -206,7 +236,7 @@ export function trackHookCommand(args: { event: string; harness: string }, deps:
     const seen = existsSync(statePath(subtrkDir)) ? state.sessions[key]?.s : undefined;
     if (seen === current) return { code: 0, output: "" }; // D5: state-change only
 
-    const text = nudgeText(event, scoped);
+    const text = nudgeText(event, scoped, paused);
     writeState(subtrkDir, state, key, current, nowMs);
     if (text === null) return { code: 0, output: "" };
     return { code: 0, output: hookOutput(dialect, event, text) };

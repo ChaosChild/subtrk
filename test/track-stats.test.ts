@@ -12,14 +12,20 @@ import type { ProviderModule } from "../src/core.ts";
 import { type ServeHandle, startConsole } from "../src/serve.ts";
 import { readTrackStore, type TrackRecord, type TrackStore, trackStorePath } from "../src/track.ts";
 import {
+  applyTreeSums,
   buildEstimate,
   buildStats,
+  cleanPinnedChild,
+  delegatedShare,
   dominantModel,
   enrichRecord,
   estimateCommand,
+  estimateText,
   percentile,
   providerOfModel,
+  statableDelegated,
   statsCommand,
+  statsText,
 } from "../src/track-stats.ts";
 import { hourKey, readUsageStore, type UsageStore } from "../src/usage.ts";
 
@@ -200,6 +206,209 @@ describe("buildStats", () => {
 });
 
 // ---------- estimate ----------
+
+describe("delegated population + orchestrated annotation (PR C)", () => {
+  const noPricing = emptyUsageStore();
+  const ORCH_USAGE = { in: 2000, cr: 8000, cw: 0, out: 1000, reqs: 9 };
+  const ORCH_BY_SOURCE = {
+    "zcode:main": { in: 600, cr: 2400, cw: 0, out: 100, reqs: 1 },
+    "zcode:subagent": { in: 1400, cr: 5600, cw: 0, out: 900, reqs: 8 },
+  };
+
+  it("delegatedShare reads the zcode subagent tiers; null when the tiers carry no split", () => {
+    assert.equal(delegatedShare(rec({ id: "x", task: "t" })), null, "no bySource = unknown, never zero");
+    const share = delegatedShare(rec({ id: "y", task: "t", usage: ORCH_USAGE, bySource: ORCH_BY_SOURCE }));
+    assert.equal(share, 7900 / 11000);
+  });
+
+  it("statableDelegated selects done, uncontested NESTED records only", () => {
+    const store: TrackStore = {
+      schemaVersion: 1,
+      markers: [],
+      records: [
+        rec({ id: "leaf", task: "solo" }),
+        rec({ id: "kid", task: "child", nested: "orch1", usage: { in: 10, cr: 20, cw: 0, out: 5, reqs: 1 } }),
+        rec({ id: "dead", task: "aborted child", nested: "orch1", status: "aborted" }),
+      ],
+    };
+    const picked = statableDelegated(store, 1_700_000_000_000 + 1000, 30);
+    assert.deepEqual(
+      picked.map((r) => r.id),
+      ["kid"],
+    );
+  });
+
+  it("buildStats carries delegated buckets separately; statsText labels them upper bounds", () => {
+    const leaf = enrichRecord(rec({ id: "l1", task: "solo", complexity: "m" }), noPricing);
+    const nested = enrichRecord(
+      rec({
+        id: "n1",
+        task: "child",
+        complexity: "m",
+        nested: "orch1",
+        usage: { in: 10, cr: 20, cw: 0, out: 5, reqs: 1 },
+      }),
+      noPricing,
+    );
+    const out = buildStats([leaf], [leaf, nested], 30, [nested]);
+    assert.equal(out.buckets.length, 1, "leaf buckets unchanged");
+    assert.equal(out.delegated.length, 1, "nested records form their own population");
+    assert.equal(out.delegated[0]?.n, 1);
+    const text = statsText(out).join("\n");
+    assert.match(text, /delegated glm · m/);
+    assert.match(text, /upper bounds/);
+  });
+
+  it("buildEstimate annotates whole-tree burn when the picked bucket holds orchestrated records", () => {
+    const dir = tempDir("subtrk-est-");
+    try {
+      const orch = enrichRecord(
+        rec({ id: "orch1", task: "wave", complexity: "xl", usage: ORCH_USAGE, bySource: ORCH_BY_SOURCE }),
+        noPricing,
+      );
+      const out = buildEstimate([orch], { provider: null, complexity: "xl", subtrkDir: dir, nowMs: 1_700_000_000_100 });
+      assert.equal(out.history.n, 1);
+      assert.ok(out.history.orchestrated, "orchestration composition present");
+      assert.equal(out.history.orchestrated?.n, 1);
+      assert.equal(out.history.orchestrated?.medianDelegatedPct, 72, "7900/11000 rounds to 72");
+      const text = estimateText(out).join("\n");
+      assert.match(text, /orchestration: 1 of 1 orchestrated · median 72% delegated – p50\/p90 are whole-tree burn/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("buildEstimate stays silent about orchestration for solo buckets", () => {
+    const dir = tempDir("subtrk-est-");
+    try {
+      const solo = enrichRecord(rec({ id: "s1", task: "solo", complexity: "s" }), noPricing);
+      const out = buildEstimate([solo], { provider: null, complexity: "s", subtrkDir: dir, nowMs: 1_700_000_000_100 });
+      assert.equal(out.history.orchestrated, undefined);
+      assert.ok(!estimateText(out).join("\n").includes("orchestration"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("PR D: attribution split - clean pinned children + tree sums", () => {
+  const noPricing = emptyUsageStore();
+
+  it("cleanPinnedChild: only excluded-pin children count; unpinned or unexcluded stay window snapshots", () => {
+    const parent = rec({ id: "p1", task: "parent", excludedPins: ["pin_x"] });
+    const clean = rec({ id: "c1", task: "clean child", nested: "p1", sessionPin: "pin_x" });
+    const unpinned = rec({ id: "c2", task: "unpinned child", nested: "p1" });
+    const notExcluded = rec({ id: "c3", task: "other pin", nested: "p1", sessionPin: "pin_y" });
+    const all = [parent, clean, unpinned, notExcluded];
+    assert.equal(cleanPinnedChild(clean, all), true);
+    assert.equal(cleanPinnedChild(unpinned, all), false);
+    assert.equal(cleanPinnedChild(notExcluded, all), false);
+  });
+
+  it("applyTreeSums: a parent's sample is its whole tree; delegated clean buckets split from snapshots", () => {
+    const parent = enrichRecord(
+      rec({
+        id: "p1",
+        task: "orchestrated",
+        complexity: "xl",
+        usage: { in: 600, cr: 300, cw: 0, out: 100, reqs: 5 },
+        excludedPins: ["pin_x"],
+      }),
+      noPricing,
+    );
+    const cleanKid = enrichRecord(
+      rec({
+        id: "c1",
+        task: "clean child",
+        complexity: "m",
+        nested: "p1",
+        sessionPin: "pin_x",
+        usage: { in: 300, cr: 150, cw: 0, out: 50, reqs: 2 },
+      }),
+      noPricing,
+    );
+    const snapKid = enrichRecord(
+      rec({
+        id: "c2",
+        task: "snapshot child",
+        complexity: "m",
+        nested: "p1",
+        usage: { in: 10, cr: 5, cw: 0, out: 1, reqs: 1 },
+      }),
+      noPricing,
+    );
+    const pool = [parent, cleanKid, snapKid];
+    applyTreeSums(pool);
+    assert.equal(parent.tokens, 1000 + 500, "tree = own 1000 + clean child 500");
+    assert.equal(snapKid.tokens, 16, "snapshot child untouched by tree sums");
+    const out = buildStats([parent], [parent, cleanKid, snapKid], 30, [cleanKid, snapKid]);
+    assert.equal(out.buckets[0]?.p50Tok, 1500, "the leaf calibration sample is the tree");
+    const clean = out.delegated.find((b) => b.clean === true);
+    const snapshot = out.delegated.find((b) => b.clean === false);
+    assert.ok(clean && clean.p50Tok === 500, "clean delegated bucket carries the child's exact burn");
+    assert.ok(snapshot && snapshot.p50Tok === 16, "snapshot delegated bucket stays separate");
+    const text = statsText(out).join("\n");
+    assert.match(text, /· clean/);
+    assert.match(text, /upper bounds/);
+  });
+
+  it("F1: applyTreeSums is recursive and order-independent - 3-level trees count fully", () => {
+    const root = enrichRecord(
+      rec({ id: "root", task: "r", usage: { in: 600, cr: 350, cw: 0, out: 50, reqs: 4 }, excludedPins: ["pin_mid"] }),
+      noPricing,
+    );
+    const mid = enrichRecord(
+      rec({
+        id: "mid",
+        task: "m",
+        nested: "root",
+        sessionPin: "pin_mid",
+        usage: { in: 300, cr: 170, cw: 0, out: 30, reqs: 2 },
+        excludedPins: ["pin_leaf"],
+      }),
+      noPricing,
+    );
+    const leaf = enrichRecord(
+      rec({
+        id: "leaf",
+        task: "l",
+        nested: "mid",
+        sessionPin: "pin_leaf",
+        usage: { in: 120, cr: 60, cw: 0, out: 20, reqs: 1 },
+      }),
+      noPricing,
+    );
+    applyTreeSums([root, mid, leaf]); // roots first - the order that used to drop grandchildren
+    assert.equal(mid.tokens, 500 + 200, "mid tree = own 500 + leaf 200");
+    assert.equal(root.tokens, 1000 + 700, "root tree = own 1000 + mid TREE 700 (not the bare 500)");
+  });
+
+  it("F1b: a pinned leaf under an UNPINNED mid credits the ancestor that excluded its pin", () => {
+    // root's own harvest (100) already contains the unpinned mid's burn, and
+    // excluded the leaf's pin - the leaf must land on the ROOT's tree.
+    const root = enrichRecord(
+      rec({ id: "r2", task: "r", usage: { in: 60, cr: 35, cw: 0, out: 5, reqs: 3 }, excludedPins: ["pin_l2"] }),
+      noPricing,
+    );
+    const mid = enrichRecord(
+      rec({ id: "m2", task: "m", nested: "r2", usage: { in: 30, cr: 15, cw: 0, out: 5, reqs: 1 } }),
+      noPricing,
+    );
+    const leaf = enrichRecord(
+      rec({
+        id: "l2",
+        task: "l",
+        nested: "m2",
+        sessionPin: "pin_l2",
+        usage: { in: 12, cr: 6, cw: 0, out: 2, reqs: 1 },
+      }),
+      noPricing,
+    );
+    applyTreeSums([root, mid, leaf]);
+    assert.equal(root.tokens, 100 + 20, "root tree = own 100 (incl. mid) + excluded leaf 20");
+    assert.equal(mid.tokens, 50, "the unpinned mid keeps its own snapshot number");
+  });
+});
 
 describe("buildEstimate", () => {
   function estDir(tokens: number[], usedPercent: number, consumedTok: number): string {

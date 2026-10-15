@@ -26,8 +26,10 @@ shared cache so concurrent agents never hammer provider endpoints.
 | `subtrk usage --hour` | Hourly buckets instead of daily |
 | `subtrk usage --rebuild` | Drop and refetch re-derivable range-API history (glm, openrouter); zcode deltas and % samples are never rebuilt (not re-derivable) |
 | `subtrk track start --task <text>` | Open a task marker; `--complexity xs\|s\|m\|l\|xl`, `--tags a,b`, `--project <dir>` (default cwd), `--session <id>` pin (restricts the session-window tier to one harness session), `--provider <id>` hint; warns when markers are already open in the project |
-| `subtrk track stop` | Close the newest open marker for this directory (`--id` to pick, `--status done\|aborted\|failed`, `--note`) and harvest its real token usage from local harness stores (§Track store) |
-| `subtrk track status` | Open markers (age, `stale?` past 6h) + records still pending their harvest retry |
+| `subtrk track stop` | Close the newest open marker for this directory (`--id` to pick, `--status done\|aborted\|failed\|paused`, `--note`) and harvest its real token usage from local harness stores (§Track store); `--complexity <cx>` is the final reassessment — it overrides the start declaration and the original survives in `recodeFrom`; plain output adds the delegation split (orchestrated records) and the recode hint. Since v0.22-PR-D the harvest EXCLUDES session pins of child markers started inside the window — zcode rows, claude transcripts, and codex rollouts (by `session_meta.payload.id`; older rollouts without an id cannot be excluded) — the record names them in `excludedPins`, each side counts its own burn once, and a parent's stats/estimate sample is its whole tree (own + clean pinned children) |
+| `subtrk track resume` | Reopen a closed record under its identity (`--id`): t0 kept, the closed gap becomes a pause segment (`pauses`), prior harvest numbers are recomputed at the next stop over the whole span |
+| `subtrk track recode` | Realign the complexity of an open marker or closed record (`--id`, `--complexity`); `recodeFrom` keeps the original start declaration across recodes |
+| `subtrk track status` | Open markers (age, `stale?` past 6h), paused records with their resume command, + records still pending their harvest retry |
 | `subtrk track list` | Recent records, newest first (`--days N`, 1-365, default 30) |
 | `subtrk track stats` | Usage distributions per provider × complexity (`--provider`, `--complexity`, `--model`, `--days`); done, leaf, uncontested records only; model-agnostic headline median with min/max/p90 |
 | `subtrk track estimate` | The go/no-go: history p50/p90 for a bucket (fallback chain shown) vs the provider's live window, calibrated into tokens by the ladder in §Track store (`--provider`, `--complexity`, `--model`); `--suggest` flips it around — ranks every enabled provider × observed priced model by fit, each line labelled with its calibration confidence |
@@ -849,16 +851,27 @@ between the markers. Writes go through a temp file + rename in the target
 directory (two attempts); a failed write is reported, never silently dropped –
 the file belongs to the user.
 
-Tiers (v0.1.19): the section comes in two variants over one shared status
-body. Default is status-only; the track tier (`--track`, or `agents.track:
-true` in `~/.subtrk/config.json`, asked once by interactive init with default
-No) adds the `### track` section – trigger positional ("first actions of the
-task, before the first file read"), not predictive – and, for
-claude/zcode/codex, installs the lifecycle hooks of §Track store. `--no-track`
-overrides per run and also removes previously installed hooks (matching only
-subtrk-tagged handlers; a one-time `.subtrk-bak` copy precedes the first
-modification of a JSON target). No grandfathering: a plain re-run on a
-pre-0.1.19 track blurb writes the status-only tier.
+Tiers (v0.1.19; slimmed v0.22): the section comes in two variants, both SLIM
+since v0.22 – the detailed contracts moved on demand into skills. Default is
+status-only (a short pointer to the `subtrk` skill); the track tier
+(`--track`, or `agents.track: true` in `~/.subtrk/config.json`, asked once by
+interactive init with default No) adds the `### track` trigger pointer –
+positional ("first actions of the task, before the first file read"), not
+predictive – and, for claude/zcode/codex, installs the lifecycle hooks of
+§Track store. `--no-track` overrides per run and also removes previously
+installed hooks (matching only subtrk-tagged handlers; a one-time
+`.subtrk-bak` copy precedes the first modification of a JSON target). No
+grandfathering: a plain re-run on a pre-0.1.19 track blurb writes the
+status-only tier.
+
+Skills (v0.22): `init --agent` also writes subtrk-owned skill folders into
+each harness's skills dir – `subtrk` (both tiers, the quota/status contract)
+and `subtrk-track` (track tier only, the lifecycle playbook: ladder,
+pause/resume, stop-time reassessment, subagent session pins). Locations:
+`~/.claude/skills`, `~/.zcode/skills`, `~/.codex/skills`,
+`~/.config/opencode/skills`, `~/.gemini/config/skills` + `~/.gemini/
+antigravity-cli/skills` (agy IDE + CLI). Writes are idempotent (subtrk owns
+`subtrk*` folders outright); `--no-track` removes `subtrk-track`.
 
 Exit codes: 0 written · 2 unknown or missing harness name – stderr then lists
 every supported harness with its file and whether the section is present right

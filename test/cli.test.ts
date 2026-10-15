@@ -1,7 +1,7 @@
 // cli.test.ts – exit codes, flag validation, rendering, orchestration via the
 // main(argv, { providers, dirs }) seam. No network, no real user files.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -489,7 +489,23 @@ describe("init --agent", () => {
         1,
         "second run must not duplicate the section",
       );
-      assert.match(cap.out[1], /^claude – updated /);
+      assert.ok(
+        cap.out.some((l) => /^claude – updated /.test(l)),
+        "second run updates the section",
+      );
+      assert.ok(
+        cap.out.some((l) => /skill subtrk in /.test(l)),
+        "the subtrk skill is installed",
+      );
+      assert.ok(
+        readFileSync(join(agentsDir, ".claude", "skills", "subtrk", "SKILL.md"), "utf8").includes("name: subtrk"),
+        "skill body written with frontmatter",
+      );
+      assert.equal(
+        existsSync(join(agentsDir, ".claude", "skills", "subtrk-track")),
+        false,
+        "tier 1 does not install the track skill",
+      );
     } finally {
       cap.restore();
     }

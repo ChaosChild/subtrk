@@ -52,8 +52,8 @@ usage:
   subtrk                  same as: subtrk status
   subtrk status [flags]   probe enabled providers, compact text
   subtrk usage [flags]    token usage + API-equivalent cost from the local store
-  subtrk track <sub>      task-level usage accounting (start, stop, status,
-                          list, stats, estimate, prune, hook)
+  subtrk track <sub>      task-level usage accounting (start, stop, resume,
+                          recode, status, list, stats, estimate, prune, hook)
   subtrk init             one-time interactive setup
   subtrk init --agent <id>  write agent instructions for a harness and exit
                           (claude|zcode|codex|opencode|agy); --track adds the
@@ -88,9 +88,17 @@ track flags:
     [--provider <id>]   usage bucket hint for later stats
   track stop            close + harvest the real usage into a record
     [--id trk_x]        default: newest open marker for this directory
-    [--status <s>]      done (default) | aborted | failed
+    [--status <s>]      done (default) | aborted | failed | paused
+                        (paused = feedback pending; track resume reopens it)
+    [--complexity <cx>] final complexity – the reassessment; overrides the
+                        start declaration (original kept as recodeFrom)
     [--note <text>]
-  track status          open markers + records still pending harvest
+  track resume          reopen a closed record under its identity
+    --id trk_x          t0 kept; the closed gap becomes a pause segment
+  track recode          realign the complexity of a marker or record
+    --id trk_x
+    --complexity <cx>   xs | s | m | l | xl (works after stop too)
+  track status          open + paused markers, records still pending harvest
   track list            recent records (--days N, default 30)
   track stats           usage distributions per provider x complexity
     [--provider <id>]   one provider
@@ -126,15 +134,18 @@ const INIT_USAGE = `subtrk init – one-time interactive setup
 Checks every provider, offers installs and logins where missing, and writes
 new secrets to ~/.subtrk/env (mode 0600 on POSIX). Secrets are never echoed.
 
---agent <id> skips all of that: it only writes subtrk's instruction section
-into harness <id>'s global instructions file (claude|zcode|codex|opencode|agy)
-and exits. Idempotent – only subtrk's own marked block is touched.
+--agent <id> skips all of that: it only writes subtrk's slim instruction
+section into harness <id>'s global instructions file and installs subtrk's
+skills into the harness's skills dir (claude|zcode|codex|opencode|agy)
+and exits. Idempotent – only subtrk's own marked block and skill folders
+(subtrk, subtrk-track) are touched.
 
 The instruction section comes in two tiers (interactive init asks once which
 you want, stored as agents.track in ~/.subtrk/config.json): status-only by
-default, or --track for the task-tracking section plus lifecycle hooks that
-remind agents to run track start/stop (claude, zcode, codex; re-run with
---no-track to strip both back).
+default, or --track for task tracking. Both tiers keep AGENTS.md slim (the
+detail lives in the skills); --track additionally installs the subtrk-track
+skill and lifecycle hooks that remind agents to run track start/stop
+(claude, zcode, codex; re-run with --no-track to strip both back).
 
 flags:
   --agent <id>   install agent instructions for <id>, no interaction
@@ -339,7 +350,18 @@ export async function main(argv: string[], deps: CliDeps = {}): Promise<number> 
   }
   const positionals = parsed.positionals;
   // the only two-verb commands: "auth refresh" and "track <sub>"
-  const TRACK_SUBS = new Set(["start", "stop", "status", "list", "stats", "estimate", "prune", "hook"]);
+  const TRACK_SUBS = new Set([
+    "start",
+    "stop",
+    "resume",
+    "recode",
+    "status",
+    "list",
+    "stats",
+    "estimate",
+    "prune",
+    "hook",
+  ]);
   if (positionals[0] === "auth") {
     if (positionals[1] !== "refresh" || positionals.length > 2) {
       console.error(`subtrk: unknown command '${positionals.join(" ")}' – try subtrk --help`);
