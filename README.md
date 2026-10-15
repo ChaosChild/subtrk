@@ -20,17 +20,20 @@ adding providers are welcome.
 Agents stop hitting brick walls at rate limits: `subtrk status --json` gives every
 window's usage and reset time plus a computed `nextEvent`, so an agent can schedule a
 wake-up at the reset instead of dying. Humans stop keeping a browser tab open per
-provider.
+provider. And because no API reports what a single task cost, `subtrk track`
+measures it from the harnesses' own local stores – start, pause, resume, stop
+with a reassessed complexity, recode later – and turns that history into
+"does this task fit my remaining window?" estimates
+([Task tracking](#task-tracking--what-did-this-task-cost)).
 
 ```text
 $ subtrk
-claude     5h 13% (reset 18:04) · 7d 89% !
-glm        5h 4% (reset 19:47) · 7d 61%
-alibaba    credits 31,240/45,000 · cycle ends 2026-10-12
-google     gemini-models 7d 0% left · claude-and-gpt-models 5h 100% left !
-opencode   PAYG · no usage API (signals only)
-openrouter $74.75 left · key today $1.20
-next: claude 5h at 18:09 (4h 49m)
+claude     5h 31% (reset 12:00) · behind · 7d 32% (reset 03:00) · behind · runway: through reset 12:00
+glm        5h 17% (reset 14:47) · ahead – projected empty in 2h 25m · 7d 3% (reset 09:05) · ahead – projected empty in 1d 14h · MCP 1% (reset 09:05)
+alibaba    30d 99% (reset 18:00) · ahead – projected empty in 3h 16m · runway: projected empty in 3h 16m (30d window) · credits 269/45,000 · cycle ends 2026-10-22 !
+openai     30d 0% (reset 17:53) · behind · runway: through reset 17:53
+openrouter $8.07 left · key today $0.00
+next: claude 5h at 12:00 (1h 43m)
 help: subtrk status --json | subtrk status --provider <id> | subtrk init
 ```
 
@@ -157,7 +160,7 @@ npm link          # puts `subtrk` on PATH (subtrk.cmd on Windows)
 with numbers and/or ids (e.g. `1 3 5` or `claude, google`) – and stores the
 selection in `~/.subtrk/config.json`; the checks below then only cover those.
 Edit the file or re-run `subtrk init` to change the selection, delete it to
-track all seven again. It runs the Alibaba login flow (`bl auth login --api-key` +
+track all of them again. It runs the Alibaba login flow (`bl auth login --api-key` +
 `--console` browser login), prompts for OpenRouter keys (hidden input, saved to
 `~/.subtrk/env`), and verifies each provider honestly – `[ok]` only when a
 credential actually works.
@@ -285,6 +288,14 @@ subtrk usage --days 7 --hour     # last 7 days, hourly buckets
 subtrk usage --rebuild           # re-derive range-API history from the sources
 ```
 
+**GLM history survives a degraded z.ai.** z.ai's usage-detail API has failed
+in ways that look healthy – empty envelopes, all-zero buckets, a single stray
+bucket. The local ZCode store acts as referee: the API is account-wide, so it
+can never honestly report *less* than this machine burned in the same hours.
+When it does (or reports nothing at all), the hourly glm history is rebuilt
+from `~/.zcode/cli/db/db.sqlite`, the span is recorded as local provenance,
+and the next healthy fetch replaces it with the vendor's authoritative rows.
+
 ### Task tracking – what did this task cost?
 
 Wrap a task in markers and `subtrk` attributes the real token usage between
@@ -295,12 +306,35 @@ anywhere reports per-task usage:
 ```bash
 subtrk track start --task "fix the boundary-day bug" --complexity m
 # …the agent works, subagents included…
-subtrk track stop --status done  # harvests in/cr/cw/out for the window
-subtrk track status              # open markers + records pending harvest
+subtrk track stop --status done --complexity l   # harvests in/cr/cw/out for the
+                                 #   window; --complexity is the final reassessment
+subtrk track stop --status paused  # waiting on feedback – same identity…
+subtrk track resume --id <id>    # …picked up again: t0 kept, the gap is a pause segment
+subtrk track recode --id <id> --complexity s   # fix a drifted label, open or closed
+subtrk track status              # open + paused markers, records pending harvest
 subtrk track list --days 30      # recent records
 subtrk track prune               # close markers orphaned by crashes (≥3d,
                                  #   --before 24h / --all)
 ```
+
+The start complexity is a one-line guess; the stop is where it gets
+reassessed against what the task actually turned out to be (the original
+declaration survives in the record as `recodeFrom`). A paused record keeps its
+identity – `track status` lists it with its resume command – and the final stop
+re-harvests the whole span. For orchestrated work the stop output adds the
+delegation split, and every stop ends with the recode hint:
+
+![track lifecycle: resume, pause, status, resume, stop with reassessment](docs/img/cli-track-lifecycle.gif)
+
+**Subagents.** An orchestrator puts a `track start --session <pin>` into each
+subagent's brief. The pin is per harness: ZCode `sess_subagent_agent_<agentId>`
+and Claude Code `agent-<agentId>` (both from the spawn result, relayed to the
+child), while Codex and Antigravity children pin themselves (`$CODEX_THREAD_ID`,
+the SessionStart payload's conversationId). When the parent stops, its harvest
+excludes the pinned children's sessions (named in `excludedPins`), so every
+token is counted once – by the worker that burned it – and the parent's
+calibration sample is its whole tree: its own burn plus its cleanly pinned
+children. An unpinned child still tracks, as a window snapshot.
 
 After a few tasks, the history answers the question that motivated all of
 this — "is my remaining window enough for an m task?" — with your own data:
@@ -312,15 +346,24 @@ subtrk track stats                          # distributions per provider x
 subtrk track estimate --provider glm --complexity m
 # history   n=14 (glm, m) · done · leaves
 #   p50 1.21M tok / $3.99      p90 2.05M tok / $6.77
+#   orchestration: 5 of 14 orchestrated · median 42% delegated – p50/p90 are whole-tree burn
 # window    glm 5h · 18% left (reset 14:05Z)
 #   ≈ 1.29M tok remaining  (calibrated: 5.9M consumed at 82% → capacity 7.2M)
 # verdict   median fits · p90 does not — split the task or switch model
 # help: subtrk track estimate --json | subtrk track start --task <text>
+```
 
 Calibration is a ladder, labelled in the output: a window ≥10% used calibrates
 from its own burn; a freshly reset window borrows the median capacity of your
 own prior windows (`calibrated:history`); only a provider with no usable
 history at all is skipped, with the reason shown.
+
+`track stats` keeps delegated work apart from the leaf buckets: nested
+subagent records get their own `delegated` rows – exact when the child was
+session-pinned, otherwise labelled upper bounds (a window snapshot includes
+concurrent orchestrator and sibling burn):
+
+![track stats with delegated buckets](docs/img/cli-track-stats.png)
 
 ```bash
 subtrk track estimate --suggest --complexity m
@@ -337,17 +380,28 @@ table.
 
 ![Task tracking](docs/img/console-track.png)
 
+Orchestration is visible throughout the page: orchestrated records carry an
+`orch <pct>%` badge and show their tokens as *tree (own X)*, the hatched
+segment inside each chart bar is the delegated share of that cell, the
+distributions table gains a `del` column plus badged `delegated` rows (clean
+pinned children vs window-snapshot upper bounds), and the **Orchestrated**
+table lists every record that delegated – own vs tree tokens, delegated share,
+wall time.
+
+![Distributions and the Orchestrated table](docs/img/console-track-orchestration.png)
+
 Records live in `~/.subtrk/track.json` and carry honesty flags rather than
 guesses: `nested` when one task ran inside another's window, `contested` when
 overlapping tasks provably shared sessions, and `usage: null` when no local
 store was readable — never a machine-wide blur. Claude Code attribution
 records the exact session ids it summed — subagents included, attributed to
 their parent session — resolves the session's launch dir by walking up to the
-git root, and prices 1h cache writes at their real 2× rate. The
-agent-instruction blurb
-(`subtrk init --agent`) teaches the whole workflow: check `track status`
-first, stop or prune your own open markers, start before non-trivial tasks,
-stop when done, and ask `track estimate` before large work.
+git root, and prices 1h cache writes at their real 2× rate. The track tier of
+`subtrk init --agent` (slim instructions plus the `subtrk-track` skill and
+lifecycle hooks, see [Agent instructions](#agent-instructions)) teaches the
+whole workflow: check `track status` first, start before non-trivial tasks,
+pause while waiting on feedback, reassess at stop, pin subagents, and ask
+`track estimate` before large work.
 
 On the dashboard (screenshot above), the month-to-date cards sum the local
 calendar month, this-machine harvests included and labeled, and every provider
