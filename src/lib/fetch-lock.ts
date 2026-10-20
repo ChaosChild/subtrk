@@ -130,6 +130,37 @@ export function fetchLockHeld(path: string, staleMs: number = STALE_MS): boolean
 }
 
 /**
+ * Run an async `fn` while holding the lock at `path`, serialising every holder
+ * across processes AND within this process (both go through the same O_EXCL
+ * file, so a second local caller just polls until the first releases). Unlike
+ * takeFetchTurn this is a plain mutex: there is no cache to answer from, and a
+ * waiter that outlasts `waitMs` does NOT run unlocked – serialisation is the
+ * point – so it resolves `undefined` and the caller decides how to fail.
+ * `staleMs` must exceed the longest legitimate hold, or a slow holder gets its
+ * lock taken over mid-flight by a peer.
+ */
+export async function withCrossProcessLock<T>(
+  path: string,
+  fn: () => Promise<T>,
+  { waitMs = 30_000, pollMs = POLL_MS, staleMs = STALE_MS }: FetchTurnOptions = {},
+): Promise<T | undefined> {
+  const deadline = performance.now() + waitMs;
+  for (;;) {
+    const lock = tryLock(path);
+    if (lock === "unavailable") return undefined;
+    if (lock) {
+      try {
+        return await fn();
+      } finally {
+        lock.release();
+      }
+    }
+    if (performance.now() >= deadline) return undefined;
+    if (settleHolder(path, staleMs) === "held") await sleep(pollMs);
+  }
+}
+
+/**
  * Create the lock file exclusively with O_EXCL ("wx") – atomic on every
  * platform Node supports, so exactly one process wins. `undefined` means
  * another process holds it; `"unavailable"` means no lock can be taken here.

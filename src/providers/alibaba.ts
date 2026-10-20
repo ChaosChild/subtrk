@@ -4,13 +4,34 @@
 // `bl console call --api zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/*`.
 // Fixed literal commands; nothing is ever interpolated into a command line.
 
-import { exec, execFile } from "node:child_process";
+import { spawn } from "node:child_process";
+import { statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { Credits, ProviderError, ProviderModule, ProviderResult, RefreshResult, Window } from "../core.ts";
+import { withCrossProcessLock } from "../lib/fetch-lock.ts";
 
 const BL_TIMEOUT_MS = 10_000;
 // The console re-login blocks on the browser callback and bl has its own idle
 // timeout – give it a generous budget instead of the probe's 10s.
 const REFRESH_TIMEOUT_MS = 300_000;
+// bl self-updates: on a "significant" version delta its runtime prints a
+// banner to stderr, then runs `npm install -g bailian-cli@latest` as a
+// blocking child of the very command we spawned. Killing that tree
+// mid-extraction truncates files in the global install and breaks bl for
+// every caller until someone reinstalls it (2026-10-20: a 10s exec-timeout
+// kill landed mid-install and cut one sdk chunk to 27,045 of 47,980 bytes).
+// So a detected update is supervised for up to this long and never killed.
+export const BL_UPDATE_CAP_MS = 300_000;
+// The banner, printed before the install starts (plain text when piped –
+// bl only emits ANSI colors on a TTY):
+//   ⚡ Significant update detected: 2.3.3 → 2.4.0
+//   Auto-updating to keep your CLI up to date...
+const UPDATE_BANNER = /(major|significant) update detected|auto-updating/i;
+// Wording-independent fallback: bl rewrites this file right before installing.
+const BL_UPDATE_STATE = join(homedir(), ".bailian", "update-state.json");
+const MAX_OUTPUT = 1_000_000; // the old exec() default maxBuffer
+
 const API_USAGE = "zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/usage";
 const API_SUBSCRIPTION = "zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/subscription";
 const API_QUOTA_CONFIG = "zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/quota-config";
@@ -28,32 +49,246 @@ interface BlRun {
   stderr: string;
   toolMissing: boolean;
   timedOut: boolean;
+  /** bl's self-update ran during this invocation (it may still have answered). */
+  selfUpdated: boolean;
+  /** supervised update overran BL_UPDATE_CAP_MS; the child was left to finish on its own. */
+  updateAbandoned: boolean;
+  /** another subtrk process held the bl lock for the whole wait – bl never ran. */
+  busy: boolean;
 }
 
-function runBl(literal: string, args: readonly string[], timeoutMs: number = BL_TIMEOUT_MS): Promise<BlRun> {
-  return new Promise((resolve) => {
-    const finish = (
-      err: (Error & { code?: string | number; killed?: boolean }) | null,
-      stdout: string | Buffer,
-      stderr: string | Buffer,
-    ): void => {
-      const out = String(stdout ?? "");
-      const errText = String(stderr ?? "");
-      if (err) {
-        const toolMissing = err.code === "ENOENT" || (process.platform === "win32" && err.code === 9009);
-        const timedOut = err.killed === true;
-        resolve({ ok: false, stdout: out, stderr: errText, toolMissing, timedOut });
-      } else {
-        resolve({ ok: true, stdout: out, stderr: errText, toolMissing: false, timedOut: false });
-      }
-    };
-    if (process.platform === "win32") {
-      // .cmd shim requires the shell; the literal is a fixed string, never interpolated.
-      exec(literal, { timeout: timeoutMs, windowsHide: true }, finish);
-    } else {
-      execFile(args[0], args.slice(1), { timeout: timeoutMs }, finish);
-    }
+interface SuperviseOptions {
+  timeoutMs?: number;
+  updateCapMs?: number;
+  tickMs?: number;
+  /** Override the update-state file to watch, or null to disable the fallback (tests). */
+  statePath?: string | null;
+}
+
+function snapshotState(path: string): { mtimeMs: number; size: number } | null {
+  try {
+    const st = statSync(path);
+    return { mtimeMs: st.mtimeMs, size: st.size };
+  } catch {
+    return null;
+  }
+}
+
+// Runs whose bl is currently sitting out a self-update. serve() drains these
+// at shutdown so process exit never lands mid-install (see runSupervised).
+const activeSelfUpdates = new Set<Promise<BlRun>>();
+export function pendingSelfUpdates(): Promise<BlRun>[] {
+  return [...activeSelfUpdates];
+}
+
+/**
+ * Spawn bl under a supervisor. Normal runs are killed at `timeoutMs`, exactly
+ * like the old `exec({ timeout })`. Once the update banner appears (or bl's
+ * update-state file changes), the run is treated as a self-update: the budget
+ * widens to `updateCapMs` and the child is NEVER killed – at the cap it is
+ * abandoned (left running, detached) rather than terminated, because a kill
+ * mid-`npm install` is what corrupts the global install. While supervised,
+ * Ctrl+C is deferred for the same reason: a signal-driven exit tears down the
+ * child tree. Exported for the supervisor tests.
+ */
+export function runSupervised(
+  literal: string,
+  args: readonly string[],
+  {
+    timeoutMs = BL_TIMEOUT_MS,
+    updateCapMs = BL_UPDATE_CAP_MS,
+    tickMs = 100,
+    statePath = BL_UPDATE_STATE,
+  }: SuperviseOptions = {},
+): Promise<BlRun> {
+  let resolveRun: (run: BlRun) => void;
+  const promise = new Promise<BlRun>((resolve) => {
+    resolveRun = resolve;
   });
+  const out: BlRun = {
+    ok: false,
+    stdout: "",
+    stderr: "",
+    toolMissing: false,
+    timedOut: false,
+    selfUpdated: false,
+    updateAbandoned: false,
+    busy: false,
+  };
+
+  let stdout = "";
+  let stderrTail = ""; // banner-sized tail; guards against banners split across chunks
+  let updateMode = false;
+  let settled = false;
+
+  const sameState = (
+    a: { mtimeMs: number; size: number } | null,
+    b: { mtimeMs: number; size: number } | null,
+  ): boolean => a === b || (a !== null && b !== null && a.mtimeMs === b.mtimeMs && a.size === b.size);
+  const state0 = statePath ? snapshotState(statePath) : undefined;
+  const stateChanged = (): boolean =>
+    statePath !== null && statePath !== undefined && !sameState(snapshotState(statePath), state0);
+
+  // Kill bl and every descendant. A bare child.kill() is not enough: on
+  // Windows the direct child is cmd.exe (bl's node lives one level down and
+  // survives, orphaned, holding our pipe write-ends); taskkill /T is the
+  // reliable tree kill. Never called in update mode – that is the point.
+  const killTree = (): void => {
+    if (process.platform === "win32") {
+      if (child.pid === undefined) return;
+      const tk = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+        windowsHide: true,
+        stdio: "ignore",
+      });
+      tk.on("error", () => {
+        try {
+          child.kill();
+        } catch {
+          /* already gone */
+        }
+      });
+      return;
+    }
+    try {
+      if (child.pid !== undefined) process.kill(-child.pid, "SIGTERM"); // the detached process group
+    } catch {
+      try {
+        child.kill();
+      } catch {
+        /* already gone */
+      }
+    }
+  };
+
+  const child =
+    process.platform === "win32"
+      ? // .cmd shim requires the shell; the literal is a fixed string, never interpolated.
+        spawn(literal, { shell: true, windowsHide: true })
+      : // Own process group so the timeout can signal bl AND its children
+        // (an update's npm) together; a bare kill() would orphan them.
+        spawn(args[0], args.slice(1), { windowsHide: true, detached: true });
+
+  let sigintArmed = false;
+  const sigintHandler = (): void => {
+    // Second Ctrl+C is honoured; the first buys the install time to land.
+    if (sigintArmed) {
+      process.exit(130);
+      return;
+    }
+    sigintArmed = true;
+    process.stderr.write(
+      "subtrk: bl is mid-self-update – deferring exit so the install is not corrupted (Ctrl+C again to force)\n",
+    );
+  };
+  const armSignals = (): void => {
+    process.on("SIGINT", sigintHandler);
+    sigintArmed = false;
+  };
+  const detachSignals = (): void => process.off("SIGINT", sigintHandler);
+
+  const settle = (): void => {
+    if (settled) return;
+    settled = true;
+    clearInterval(tick);
+    detachSignals();
+    out.stdout = stdout;
+    resolveRun(out);
+  };
+
+  const enterUpdateMode = (): void => {
+    if (updateMode) return;
+    updateMode = true;
+    out.selfUpdated = true;
+    activeSelfUpdates.add(promise);
+    armSignals();
+  };
+
+  const startedAt = performance.now();
+  const tick = setInterval((): void => {
+    const elapsed = performance.now() - startedAt;
+    if (updateMode) {
+      if (elapsed >= Math.max(timeoutMs, updateCapMs)) {
+        // Never kill mid-update: detach and let it finish on its own. The
+        // still-draining stdio streams keep this process alive until the
+        // child exits, so a plain `subtrk status` also waits it out.
+        out.updateAbandoned = true;
+        child.unref();
+        settle();
+      }
+      return;
+    }
+    if (elapsed >= timeoutMs) {
+      // Last-chance state check before the axe: a renamed banner must not
+      // turn into a mid-install kill.
+      if (stateChanged()) {
+        enterUpdateMode();
+        return;
+      }
+      out.timedOut = true;
+      killTree();
+    }
+  }, tickMs);
+
+  child.stdout?.on("data", (chunk: Buffer) => {
+    stdout = (stdout + chunk.toString("utf8")).slice(0, MAX_OUTPUT);
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    const text = chunk.toString("utf8");
+    out.stderr = (out.stderr + text).slice(-MAX_OUTPUT);
+    stderrTail = (stderrTail + text).slice(-200);
+    if (UPDATE_BANNER.test(stderrTail)) enterUpdateMode();
+  });
+
+  child.on("error", (err: NodeJS.ErrnoException) => {
+    out.toolMissing = err.code === "ENOENT";
+    settle();
+  });
+  // "close" can stall forever: a killed cmd.exe leaves an orphaned grandchild
+  // holding the pipe write-ends, so exit + a short drain grace settles the
+  // run instead of waiting for it. A killed run's tail output is worthless.
+  let exitGrace: NodeJS.Timeout | undefined;
+  child.on("exit", (code: number | null) => {
+    out.ok = code === 0 && !out.timedOut;
+    // cmd.exe reports a missing command as exit code 9009 (the old exec()
+    // surfaced it as err.code; mapError's stderr sniff needs no change).
+    if (process.platform === "win32" && code === 9009) out.toolMissing = true;
+    if (updateMode) activeSelfUpdates.delete(promise);
+    exitGrace = setTimeout(settle, 250);
+    exitGrace.unref?.();
+  });
+  child.on("close", () => {
+    if (exitGrace) clearTimeout(exitGrace);
+    if (updateMode) activeSelfUpdates.delete(promise);
+    settle();
+  });
+
+  return promise;
+}
+
+// One bl at a time, machine-wide: concurrent bl spawns each spotting the same
+// "significant update" would race several `npm install -g` into one directory
+// (all three probe calls used to run in parallel). The lock serialises every
+// spawn across processes; a peer that never releases costs one honest error.
+async function runBl(literal: string, args: readonly string[], timeoutMs: number = BL_TIMEOUT_MS): Promise<BlRun> {
+  const dir = process.env.SUBTRK_DIR ?? join(homedir(), ".subtrk");
+  const run = await withCrossProcessLock(
+    join(dir, "locks", "bl.lock"),
+    () => runSupervised(literal, args, { timeoutMs }),
+    // staleMs must exceed the longest hold (an update rides the lock for up
+    // to BL_UPDATE_CAP_MS) or a peer would take the lock over mid-update.
+    { waitMs: 60_000, staleMs: BL_UPDATE_CAP_MS + 100_000 },
+  );
+  if (run) return run;
+  return {
+    ok: false,
+    stdout: "",
+    stderr: "",
+    toolMissing: false,
+    timedOut: false,
+    selfUpdated: false,
+    updateAbandoned: false,
+    busy: true,
+  };
 }
 
 // Pure: pull the JSON object out of stdout that may carry banners – first "{" to last "}".
@@ -204,6 +439,33 @@ export function mapError(run: BlRun, fetchedAt: string, redact?: (s: string) => 
       fetchedAt,
     );
   }
+  if (run.busy) {
+    return fail(
+      {
+        kind: "subprocess-failed",
+        message: "bl busy – another subtrk process is running it (or riding out a self-update)",
+      },
+      fetchedAt,
+    );
+  }
+  if (run.updateAbandoned) {
+    return fail(
+      {
+        kind: "self-update",
+        message: `bl self-update exceeded ${Math.round(BL_UPDATE_CAP_MS / 1000)}s – left it running to finish; data returns next cycle`,
+      },
+      fetchedAt,
+    );
+  }
+  if (run.selfUpdated && !run.ok) {
+    return fail(
+      {
+        kind: "self-update",
+        message: "bl self-updated itself this run – no quota data yet; the next refresh uses the new version",
+      },
+      fetchedAt,
+    );
+  }
   if (run.timedOut) {
     return fail({ kind: "timeout", message: `bl timed out after ${BL_TIMEOUT_MS / 1000}s` }, fetchedAt);
   }
@@ -214,15 +476,14 @@ async function probeInner(): Promise<ProviderResult> {
   const fetchedAt = new Date().toISOString();
   const redact = await coreRedact();
 
-  // Secondary calls run in parallel with usage – each bl spawn costs seconds.
-  const sub = callArgs(API_SUBSCRIPTION);
-  const qc = callArgs(API_QUOTA_CONFIG);
-  const subPromise = runBl(sub.literal, sub.args);
-  const qcPromise = runBl(qc.literal, qc.args);
-
+  // Every bl spawn goes through the machine-wide bl lock, sequentially:
+  // parallel spawns that all spot the same "significant update" race several
+  // npm installs into one directory. usage goes first alone so a self-update
+  // surfaces (and finishes) before the secondary calls spend their spawns.
   const usage = callArgs(API_USAGE);
   let usageRun = await runBl(usage.literal, usage.args);
   // Known gateway flakiness: 200-Success with empty data – retry once or twice.
+  // A run whose bl self-updated also lands here and retries on the new build.
   for (let i = 0; i < 2 && usageRun.ok && parseTokenPlanUsage(extractJson(usageRun.stdout)).length === 0; i++) {
     usageRun = await runBl(usage.literal, usage.args);
   }
@@ -231,8 +492,10 @@ async function probeInner(): Promise<ProviderResult> {
   const windows = parseTokenPlanUsage(extractJson(usageRun.stdout));
 
   // A failure here degrades to fewer fields, never a provider error.
-  const info = parseSubscription(extractJson((await subPromise).stdout));
-  const quotas = parseQuotaConfig(extractJson((await qcPromise).stdout));
+  const sub = callArgs(API_SUBSCRIPTION);
+  const qc = callArgs(API_QUOTA_CONFIG);
+  const info = parseSubscription(extractJson((await runBl(sub.literal, sub.args)).stdout));
+  const quotas = parseQuotaConfig(extractJson((await runBl(qc.literal, qc.args)).stdout));
 
   const monthly = windows.find((w) => w.kind === "30d");
   const credits = deriveCredits(monthly, info.specCode ? quotas[info.specCode] : undefined);

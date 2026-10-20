@@ -54,6 +54,7 @@ export type ErrorKind =
   | "parse-failure"
   | "subprocess-failed"
   | "timeout"
+  | "self-update"
   | "http-error";
 
 export interface ProviderError {

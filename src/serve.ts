@@ -29,6 +29,7 @@ import {
   saveConfig,
   scrubValue,
 } from "./core.ts";
+import { BL_UPDATE_CAP_MS, pendingSelfUpdates } from "./providers/alibaba.ts";
 import { allProviders, refreshableProviders } from "./providers/index.ts";
 import { type HarvestFn, readTrackStore, type TrackMarker } from "./track.ts";
 import { applyTreeSums, type EnrichedRecord, enrichRecord } from "./track-stats.ts";
@@ -491,11 +492,21 @@ export async function runServe(deps: ServeDeps = {}): Promise<void> {
   sampler.unref();
   const stop = (): void => {
     clearInterval(sampler);
-    const force = setTimeout(() => process.exit(0), 1000);
-    void h.close().finally(() => {
-      clearTimeout(force);
-      process.exit(0);
-    });
+    // A bl self-update in flight must not die with us: process exit tears
+    // down the child tree mid-`npm install` and corrupts bl's global install.
+    // Wait for it (bounded by its own supervision cap) before exiting.
+    const pending = pendingSelfUpdates();
+    const forceMs = pending.length > 0 ? BL_UPDATE_CAP_MS + 10_000 : 1_000;
+    if (pending.length > 0) {
+      console.log(`serve: waiting for a bl self-update to finish before exit (${pending.length} in flight)`);
+    }
+    const force = setTimeout(() => process.exit(0), forceMs);
+    void Promise.allSettled(pending)
+      .then(() => h.close())
+      .finally(() => {
+        clearTimeout(force);
+        process.exit(0);
+      });
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
