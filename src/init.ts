@@ -32,7 +32,7 @@ import {
   saveConfig,
   scrub,
 } from "./core.ts";
-import { runBl as runBlSupervised } from "./providers/alibaba.ts";
+import { cmdExe, runBl as runBlSupervised } from "./providers/alibaba.ts";
 import { claudeAuth } from "./providers/claude.ts";
 import { desktopKeyPath, kimiTokenStale, parseDesktopKeyFile, parseKimiCliCredentials } from "./providers/kimi.ts";
 import { parseOpenaiAuth } from "./providers/openai.ts";
@@ -251,7 +251,9 @@ function runBl(
   opts: { stdio?: "inherit" } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const win = process.platform === "win32";
-  const file = win ? "cmd.exe" : "bl";
+  // Absolute, existence-verified shell path on win32 (never a bare PATH
+  // lookup – see cmdExe); POSIX execs bl directly with no shell.
+  const file = win ? cmdExe() : "bl";
   const argv = win ? ["/d", "/s", "/c", "bl", ...args] : args;
   return new Promise((resolve) => {
     if (opts.stdio === "inherit") {
