@@ -72,21 +72,21 @@ const {
 const { extractJson, mapError, parseSubscription, parseTokenPlanUsage } = await import("../src/providers/alibaba.ts");
 type BlRunShape = Parameters<typeof mapError>[0];
 // mapError's BlRun grew update-supervision lanes; tests only care about the
-// classification inputs, so fill the rest from this base.
-const blRun = (partial: Partial<BlRunShape>): BlRunShape =>
-  ({
-    ok: false,
-    stdout: "",
-    stderr: "",
-    toolMissing: false,
-    timedOut: false,
-    selfUpdated: false,
-    updateAbandoned: false,
-    busy: false,
-    exitCode: null,
-    exited: Promise.resolve(),
-    ...partial,
-  }) as BlRunShape;
+// classification inputs, so fill the rest from this base. No cast: if BlRun
+// gains another required lane, this literal must fail to compile here first.
+const blRun = (partial: Partial<BlRunShape>): BlRunShape => ({
+  ok: false,
+  stdout: "",
+  stderr: "",
+  toolMissing: false,
+  timedOut: false,
+  selfUpdated: false,
+  updateAbandoned: false,
+  busy: false,
+  exitCode: null,
+  exited: Promise.resolve(),
+  ...partial,
+});
 const { glmAuth, parseGlmQuota } = await import("../src/providers/glm.ts");
 const { claudeAuth } = await import("../src/providers/claude.ts");
 const { extractOpencodeKey } = await import("../src/providers/opencode.ts");

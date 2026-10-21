@@ -268,7 +268,7 @@ function runBl(
       if (run.selfUpdated) {
         // The runner eats bl's banner; an update can stall this step for
         // minutes, so the user gets a line instead of silence.
-        console.log("[info]    bl updated itself during this step – continuing on the new version");
+        console.log("[note]    bl updated itself during this step – continuing on the new version");
       }
       resolve({
         code: run.exitCode ?? 1,
