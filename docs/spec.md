@@ -106,7 +106,8 @@ type ErrorKind =
   | "not-readable-remotely" // google degrade: 403/free-tier-shaped response
   | "parse-failure"       // endpoint reachable, shape unrecognized
   | "subprocess-failed"   // bl exited non-zero
-  | "timeout"             // per-provider 10s budget exceeded
+  | "timeout"             // per-provider budget exceeded (alibaba's is longer: it can ride out a bl self-update)
+  | "self-update"         // bl self-updated mid-run; stale for one cycle, next refresh uses the new version
   | "http-error";         // other non-2xx (carries status)
 
 interface ProviderError {

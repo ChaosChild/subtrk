@@ -161,6 +161,44 @@ export async function withCrossProcessLock<T>(
 }
 
 /**
+ * withCrossProcessLock for sections that keep working after they answer: `fn`
+ * returns `{ value, hold }`; `value` resolves to the caller as soon as `fn`
+ * does, but the lock is only released once `hold` settles. Used by the bl
+ * supervisor: a run whose update overran its cap answers the fetch at the cap
+ * (stale marker for one cycle) while the lock stays held until the bl child
+ * actually exits, so no peer can spawn bl mid-install. The release is
+ * fire-and-forget on purpose – awaiting it in a finally would block the caller
+ * for the whole hold; a crash before the release falls back to stale takeover
+ * (keep `staleMs` above the longest hold + install tail).
+ */
+export async function withCrossProcessLockHold<T>(
+  path: string,
+  fn: () => Promise<{ value: T; hold: Promise<unknown> }>,
+  { waitMs = 30_000, pollMs = POLL_MS, staleMs = STALE_MS }: FetchTurnOptions = {},
+): Promise<T | undefined> {
+  const deadline = performance.now() + waitMs;
+  for (;;) {
+    const lock = tryLock(path);
+    if (lock === "unavailable") return undefined;
+    if (lock) {
+      let hold: Promise<unknown> = Promise.resolve();
+      try {
+        const got = await fn();
+        hold = got.hold;
+        return got.value;
+      } catch (err) {
+        lock.release();
+        throw err;
+      } finally {
+        void Promise.allSettled([hold]).then(() => lock.release());
+      }
+    }
+    if (performance.now() >= deadline) return undefined;
+    if (settleHolder(path, staleMs) === "held") await sleep(pollMs);
+  }
+}
+
+/**
  * Create the lock file exclusively with O_EXCL ("wx") – atomic on every
  * platform Node supports, so exactly one process wins. `undefined` means
  * another process holds it; `"unavailable"` means no lock can be taken here.

@@ -2,10 +2,10 @@
 // Emulates the bl behaviours the supervisor must distinguish, with timings
 // scaled down from the real thing (banner -> ~1s, npm install -> 30-60s).
 //
-// argv: <scenario> <workfile> [statefile]
+// argv: <scenario> <workfile>
 "use strict";
 const fs = require("fs");
-const [scenario, workfile, statefile] = process.argv.slice(2);
+const [scenario, workfile] = process.argv.slice(2);
 
 const BANNER = [
   "  \u26a1 Significant update detected: 2.3.3 \u2192 2.4.0",
@@ -38,15 +38,6 @@ async function install(chunks, delayMs, doneMarker) {
   if (scenario === "update-ok") {
     process.stderr.write(BANNER + "\n");
     await install(8, 300); // ~2.4s of "installing" – longer than the kill budget
-    process.stdout.write('{"data":{"per1MonthPercentage":0.01}}\n');
-    process.exit(0);
-  }
-  if (scenario === "update-silent") {
-    // No banner (simulates a renamed/changed banner): only the update-state
-    // file flips, which the supervisor must notice before killing.
-    await sleep(500);
-    fs.writeFileSync(statefile, JSON.stringify({ lastChecked: Date.now(), latestVersion: "2.4.0" }));
-    await install(8, 300);
     process.stdout.write('{"data":{"per1MonthPercentage":0.01}}\n');
     process.exit(0);
   }

@@ -465,7 +465,7 @@ subtrk status --json
   (`calibrated:current-window | calibrated:history | estimated:history-sparse`).
 - `providers[].error.kind` – branch on it: `no-credentials`, `expired-token`,
   `tool-missing`, `rate-limited`, `forbidden`, `not-readable-remotely`,
-  `parse-failure`, `subprocess-failed`, `timeout`, `http-error`.
+  `parse-failure`, `subprocess-failed`, `timeout`, `self-update`, `http-error`.
 - `providers[].error.remedy` – exact CLI line to run when present;
   `refreshable: true` on a failed provider means `subtrk auth refresh
   --provider <id>` can re-authorise it.
