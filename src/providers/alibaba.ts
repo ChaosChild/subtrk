@@ -91,8 +91,11 @@ export function pendingSelfUpdates(): Promise<void>[] {
  * corrupts the global install. While supervised, Ctrl+C is deferred for the
  * same reason: a signal-driven exit tears down the child tree. The child is
  * isolated from our console on every platform (own hidden console on win32,
- * own process group on POSIX), so neither Ctrl+C nor our own process exit can
- * reach bl or its npm child. Exported for the supervisor tests.
+ * own process group on POSIX), so Ctrl+C on our console cannot reach bl or
+ * its npm child. Caveat: a FORCED exit of subtrk (kill, console close, second
+ * Ctrl+C) still tears the tree's stdio down — bl survives it only while it
+ * stays silent; file-backed stdio is the tracked follow-up. Exported for the
+ * supervisor tests.
  */
 export function runSupervised(
   args: readonly string[],
@@ -161,12 +164,15 @@ export function runSupervised(
       ? // cmd.exe with an argv array (never a shell string: init.ts passes
         // user secrets as arguments) resolves the .cmd shim via PATH.
         // windowsHide (CREATE_NO_WINDOW) puts the tree on its OWN hidden
-        // console, so neither Ctrl+C nor console-close on our console
-        // reaches bl/npm, and the tree survives our process exit (verified:
-        // an install ran to completion after the parent exited). detached
-        // must NOT be used here: a detached cmd.exe NULLs its std handles,
-        // silently losing our stdout/stderr pipes (verified – exit 0, no
-        // output, banner detection impossible).
+        // console, so Ctrl+C and console-close on our console cannot reach
+        // bl/npm. A FORCED exit of subtrk is a different story: libuv's job
+        // object kills cmd.exe, and while bl's node survives the breakaway,
+        // its next pipe write EPIPE-kills it — so the tree survives our exit
+        // only as long as it stays silent. File-backed stdio is the tracked
+        // follow-up; until then the serve drain + SIGINT deferral cover the
+        // common exit paths. detached must NOT be used here: a detached
+        // cmd.exe NULLs its std handles, silently losing our stdout/stderr
+        // pipes (verified – exit 0, no output, banner detection impossible).
         spawn("cmd.exe", ["/d", "/s", "/c", ...args], { windowsHide: true })
       : // Own process group so the timeout can signal bl AND its children
         // (an update's npm) together; a bare kill() would orphan them.
@@ -188,7 +194,9 @@ export function runSupervised(
     process.on("SIGINT", sigintHandler);
     sigintArmed = false;
   };
-  const detachSignals = (): void => process.off("SIGINT", sigintHandler);
+  const detachSignals = (): void => {
+    process.off("SIGINT", sigintHandler);
+  };
 
   const settle = (): void => {
     if (settled) return;

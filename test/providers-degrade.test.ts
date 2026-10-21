@@ -70,6 +70,23 @@ const {
   spawnLsAndProbe,
 } = await import("../src/providers/google.ts");
 const { extractJson, mapError, parseSubscription, parseTokenPlanUsage } = await import("../src/providers/alibaba.ts");
+type BlRunShape = Parameters<typeof mapError>[0];
+// mapError's BlRun grew update-supervision lanes; tests only care about the
+// classification inputs, so fill the rest from this base.
+const blRun = (partial: Partial<BlRunShape>): BlRunShape =>
+  ({
+    ok: false,
+    stdout: "",
+    stderr: "",
+    toolMissing: false,
+    timedOut: false,
+    selfUpdated: false,
+    updateAbandoned: false,
+    busy: false,
+    exitCode: null,
+    exited: Promise.resolve(),
+    ...partial,
+  }) as BlRunShape;
 const { glmAuth, parseGlmQuota } = await import("../src/providers/glm.ts");
 const { claudeAuth } = await import("../src/providers/claude.ts");
 const { extractOpencodeKey } = await import("../src/providers/opencode.ts");
@@ -285,7 +302,7 @@ describe("alibaba probe degrade paths", () => {
     // only the flag runBl set can classify it (regression: misreported as
     // 'subprocess-failed: bl exited non-zero (stderr withheld)').
     const fetchedAt = "2026-10-12T00:00:00.000Z";
-    const r = mapError({ ok: false, stdout: "", stderr: "", toolMissing: true, timedOut: false }, fetchedAt);
+    const r = mapError(blRun({ toolMissing: true }), fetchedAt);
     assert.ok(r);
     assert.equal(r.ok, false);
     assert.equal(r.fetchedAt, fetchedAt);
@@ -296,10 +313,7 @@ describe("alibaba probe degrade paths", () => {
   });
 
   it("mapError: empty stderr WITHOUT the toolMissing flag stays subprocess-failed (withheld, never invented)", () => {
-    const r = mapError(
-      { ok: false, stdout: "", stderr: "", toolMissing: false, timedOut: false },
-      new Date().toISOString(),
-    );
+    const r = mapError(blRun({}), new Date().toISOString());
     assert.ok(r?.error);
     assert.equal(r.error.kind, "subprocess-failed");
     assert.equal(r.error.message, "bl exited non-zero (stderr withheld)");
@@ -308,20 +322,14 @@ describe("alibaba probe degrade paths", () => {
   it("mapError: a gateway 404 body is a failed run, NOT tool-missing", () => {
     // Regression: ANY stderr containing "not found" was classified as the bl
     // binary being absent, telling users to reinstall a CLI that is installed.
-    const r = mapError(
-      { ok: false, stdout: "", stderr: "API endpoint not found (404)", toolMissing: false, timedOut: false },
-      new Date().toISOString(),
-    );
+    const r = mapError(blRun({ stderr: "API endpoint not found (404)" }), new Date().toISOString());
     assert.ok(r?.error);
     assert.equal(r.error.kind, "subprocess-failed", "a gateway 404 is subprocess-failed");
     assert.notEqual(r.error.kind, "tool-missing");
   });
 
   it("mapError: the POSIX shell's own missing-command phrasing is tool-missing", () => {
-    const r = mapError(
-      { ok: false, stdout: "", stderr: "/bin/sh: 1: bl: command not found\n", toolMissing: false, timedOut: false },
-      new Date().toISOString(),
-    );
+    const r = mapError(blRun({ stderr: "/bin/sh: 1: bl: command not found\n" }), new Date().toISOString());
     assert.ok(r?.error);
     assert.equal(r.error.kind, "tool-missing");
     assert.equal(r.error.message, "'bl' not found on PATH");
@@ -329,13 +337,9 @@ describe("alibaba probe degrade paths", () => {
 
   it("mapError: cmd.exe's missing-command phrasing is tool-missing", () => {
     const r = mapError(
-      {
-        ok: false,
-        stdout: "",
+      blRun({
         stderr: "'bl' is not recognized as an internal or external command,\r\noperable program or batch file.",
-        toolMissing: false,
-        timedOut: false,
-      },
+      }),
       new Date().toISOString(),
     );
     assert.ok(r?.error);

@@ -178,8 +178,10 @@ describe("runBl bl-lock discipline", () => {
     installFakeBl(join(dir, "bin"), "serial", work);
     process.env.PATH = `${join(dir, "bin")}${process.platform === "win32" ? ";" : ":"}${savedPath}`;
     const { default: alibaba } = await import("../src/providers/alibaba.ts");
+    const refresh = alibaba.refresh;
+    assert.ok(refresh, "provider must expose refresh");
     try {
-      const results = await Promise.all([alibaba.refresh(), alibaba.refresh()]);
+      const results = await Promise.all([refresh(), refresh()]);
       assert.ok(
         results.every((r) => r.ok),
         "both serialised spawns must succeed",

@@ -168,8 +168,9 @@ export async function withCrossProcessLock<T>(
  * (stale marker for one cycle) while the lock stays held until the bl child
  * actually exits, so no peer can spawn bl mid-install. The release is
  * fire-and-forget on purpose – awaiting it in a finally would block the caller
- * for the whole hold; a crash before the release falls back to stale takeover
- * (keep `staleMs` above the longest hold + install tail).
+ * for the whole hold. A holder that crashes is taken over as soon as its pid
+ * is provably dead (regardless of `staleMs`); a LIVE holder is only taken
+ * over past `staleMs`, so keep that above the longest legitimate hold.
  */
 export async function withCrossProcessLockHold<T>(
   path: string,
