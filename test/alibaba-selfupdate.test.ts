@@ -12,10 +12,10 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { type ProviderModule, runProbe } from "../src/core.ts";
-import { mapError, pendingSelfUpdates, runBl, runSupervised } from "../src/providers/alibaba.ts";
+import { cmdExe, mapError, pendingSelfUpdates, runBl, runSupervised } from "../src/providers/alibaba.ts";
 
 const FIXTURE = join(import.meta.dirname, "fixtures", "fake-bl-selfupdate.cjs");
 // Scaled-down budgets, sized for suite load: a cold fixture process can take
@@ -217,6 +217,16 @@ describe("runBl bl-lock discipline", () => {
       process.env.PATH = savedPath;
       delete process.env.SUBTRK_DIR;
     }
+  });
+});
+
+describe("cmdExe shell anchoring (win32)", () => {
+  it("resolves the shell to an absolute, existing path – never a bare PATH lookup", () => {
+    if (process.platform !== "win32") return; // posix execs bl directly, no shell
+    const p = cmdExe();
+    assert.ok(isAbsolute(p), `must be absolute, got ${p}`);
+    assert.ok(existsSync(p), `must exist, got ${p}`);
+    assert.match(p.toLowerCase(), /cmd\.exe$/);
   });
 });
 

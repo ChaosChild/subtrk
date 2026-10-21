@@ -5,8 +5,9 @@
 // Fixed literal commands; nothing is ever interpolated into a command line.
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type { Credits, ProviderError, ProviderModule, ProviderResult, RefreshResult, Window } from "../core.ts";
 import { withCrossProcessLockHold } from "../lib/fetch-lock.ts";
 
@@ -40,6 +41,21 @@ const MAX_OUTPUT = 1_000_000; // the old exec() default maxBuffer
 // If the timeout kill somehow fails to land (taskkill denied, exotic shell),
 // settle anyway rather than looping the kill every tick forever.
 const KILL_SETTLE_MS = 5_000;
+
+// The shell runs as an absolute, existence-verified path – never a bare PATH
+// lookup (CodeQL js/shell-command-injection-from-environment: PATH is the
+// most trivially poisonable resolution vector, user-overridable per process).
+// The hardcoded System32 location wins whenever it exists – attacker-controlled
+// only with filesystem access; ComSpec/SystemRoot cover relocated Windowses.
+const CMD_EXE = "C:\\Windows\\System32\\cmd.exe";
+export function cmdExe(): string {
+  if (existsSync(CMD_EXE)) return CMD_EXE;
+  const comspec = process.env.ComSpec;
+  if (comspec && isAbsolute(comspec) && existsSync(comspec)) return comspec;
+  const rooted = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe");
+  if (isAbsolute(rooted) && existsSync(rooted)) return rooted;
+  return "cmd.exe"; // not reachable on a normal install
+}
 
 const API_USAGE = "zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/usage";
 const API_SUBSCRIPTION = "zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/subscription";
@@ -173,7 +189,7 @@ export function runSupervised(
         // common exit paths. detached must NOT be used here: a detached
         // cmd.exe NULLs its std handles, silently losing our stdout/stderr
         // pipes (verified – exit 0, no output, banner detection impossible).
-        spawn("cmd.exe", ["/d", "/s", "/c", ...args], { windowsHide: true })
+        spawn(cmdExe(), ["/d", "/s", "/c", ...args], { windowsHide: true })
       : // Own process group so the timeout can signal bl AND its children
         // (an update's npm) together; a bare kill() would orphan them.
         spawn(args[0], args.slice(1), { windowsHide: true, detached: true });
