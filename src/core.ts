@@ -54,6 +54,7 @@ export type ErrorKind =
   | "parse-failure"
   | "subprocess-failed"
   | "timeout"
+  | "self-update"
   | "http-error";
 
 export interface ProviderError {
@@ -126,6 +127,11 @@ export interface ProviderModule {
   ttlMs: number;
   probe(): Promise<ProviderResult>; // NEVER throws
   refresh?: () => Promise<RefreshResult>; // interactive re-auth (browser/login flow)
+  // This probe's own budget for runProbe's withTimeout, overriding PROBE_TIMEOUT_MS
+  // (and opts.probeTimeoutMs). Providers whose probe can legitimately ride out a
+  // subprocess self-update (alibaba) need one well above the default 10s, or a
+  // healthy serialized probe reports as a generic timeout.
+  probeTimeoutMs?: number;
   // W1.3: the probe traces its credential inputs (src/lib/input-trace.ts) and
   // this provider's cache entries carry an identity stamp; a stampless legacy
   // entry is re-probed once and upgraded. Test stubs omit this and keep the
@@ -643,8 +649,9 @@ export function releaseLock(lockPath: string): void {
   }
 }
 
-async function runProbe(p: ProviderModule, opts: FetchOpts): Promise<ProviderResult> {
-  const timeoutMs = opts.probeTimeoutMs ?? PROBE_TIMEOUT_MS;
+/** Wrap one provider probe with its budget (exported for core tests). */
+export async function runProbe(p: ProviderModule, opts: FetchOpts): Promise<ProviderResult> {
+  const timeoutMs = p.probeTimeoutMs ?? opts.probeTimeoutMs ?? PROBE_TIMEOUT_MS;
   try {
     return await withTimeout(p.probe(), timeoutMs);
   } catch (err) {
@@ -743,7 +750,13 @@ export async function fetchProvider(p: ProviderModule, opts: FetchOpts = {}): Pr
         const withinTtl = opts.fresh !== true && Date.now() - again.fetchedAt < p.ttlMs;
         return freshWrite || withinTtl ? ({ ...again.data, stale: false } as ProviderResult) : undefined;
       },
-      { waitMs: opts.fetchWaitMs ?? opts.contenderWaitMs },
+      {
+        waitMs: opts.fetchWaitMs ?? opts.contenderWaitMs,
+        // A leader may legitimately hold the fetch lock for its whole probe
+        // budget (alibaba rides out bl self-updates under its); the default
+        // 120s stale takeover must not fire mid-ride and double the probe.
+        ...(p.probeTimeoutMs !== undefined ? { staleMs: p.probeTimeoutMs + 120_000 } : {}),
+      },
     );
     if (turn.kind === "answered") return turn.value;
     // W1.3: trace the probe's credential inputs so the cache write is stamped

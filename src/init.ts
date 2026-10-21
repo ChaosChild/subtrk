@@ -32,6 +32,7 @@ import {
   saveConfig,
   scrub,
 } from "./core.ts";
+import { runBl as runBlSupervised } from "./providers/alibaba.ts";
 import { claudeAuth } from "./providers/claude.ts";
 import { desktopKeyPath, kimiTokenStale, parseDesktopKeyFile, parseKimiCliCredentials } from "./providers/kimi.ts";
 import { parseOpenaiAuth } from "./providers/openai.ts";
@@ -232,18 +233,19 @@ function runShellLiteral(command: string): Promise<number> {
 
 // ---------- bl (alibaba) helpers ----------
 
-const BL_TIMEOUT_MS = 10_000;
-
 // User-typed secrets go in as ONE argv element; this charset (letters, digits,
 // . _ : -) keeps every quoting/shell layer inert.
 function safeArg(v: string): boolean {
   return /^[A-Za-z0-9._:-]+$/.test(v);
 }
 
-// Run `bl` with a fixed argv array via execFile. On Windows `bl` is a .cmd
-// shim, so the call routes through `cmd.exe /d /s /c` – still argv-driven:
-// Node quotes each element into the child command line, and user-typed secrets
-// pass safeArg first, so no command string is ever assembled here.
+// Run `bl` with a fixed argv array. On Windows `bl` is a .cmd shim, so the
+// call routes through `cmd.exe /d /s /c` – still argv-driven: Node quotes each
+// element into the child command line, and user-typed secrets pass safeArg
+// first, so no command string is ever assembled here. Non-interactive calls
+// go through the alibaba provider's supervised runner: same kill discipline
+// plus the machine-wide bl lock, so an init-time bl self-update is ridden out
+// instead of killed mid-install (the 2026-10-20 corruption path).
 function runBl(
   args: string[],
   opts: { stdio?: "inherit" } = {},
@@ -259,10 +261,21 @@ function runBl(
       child.on("exit", (code) => resolve({ code: code ?? 1, stdout: "", stderr: "" }));
       return;
     }
-    execFile(file, argv, { timeout: BL_TIMEOUT_MS, encoding: "utf8", windowsHide: true }, (err, stdout, stderr) => {
-      const code = err ? (typeof err.code === "number" ? err.code : 1) : 0;
-      resolve({ code, stdout, stderr });
-    });
+    void (async () => {
+      // The supervised runner takes bl's own argv (["bl", ...]) and adds the
+      // cmd.exe /d /s /c wrapper itself on Windows.
+      const run = await runBlSupervised(["bl", ...args]);
+      if (run.selfUpdated) {
+        // The runner eats bl's banner; an update can stall this step for
+        // minutes, so the user gets a line instead of silence.
+        console.log("[note]    bl updated itself during this step – continuing on the new version");
+      }
+      resolve({
+        code: run.exitCode ?? 1,
+        stdout: run.stdout,
+        stderr: run.busy ? "bl busy – another subtrk process is running it; retry shortly" : run.stderr,
+      });
+    })();
   });
 }
 

@@ -130,6 +130,76 @@ export function fetchLockHeld(path: string, staleMs: number = STALE_MS): boolean
 }
 
 /**
+ * Run an async `fn` while holding the lock at `path`, serialising every holder
+ * across processes AND within this process (both go through the same O_EXCL
+ * file, so a second local caller just polls until the first releases). Unlike
+ * takeFetchTurn this is a plain mutex: there is no cache to answer from, and a
+ * waiter that outlasts `waitMs` does NOT run unlocked – serialisation is the
+ * point – so it resolves `undefined` and the caller decides how to fail.
+ * `staleMs` must exceed the longest legitimate hold, or a slow holder gets its
+ * lock taken over mid-flight by a peer.
+ */
+export async function withCrossProcessLock<T>(
+  path: string,
+  fn: () => Promise<T>,
+  { waitMs = 30_000, pollMs = POLL_MS, staleMs = STALE_MS }: FetchTurnOptions = {},
+): Promise<T | undefined> {
+  const deadline = performance.now() + waitMs;
+  for (;;) {
+    const lock = tryLock(path);
+    if (lock === "unavailable") return undefined;
+    if (lock) {
+      try {
+        return await fn();
+      } finally {
+        lock.release();
+      }
+    }
+    if (performance.now() >= deadline) return undefined;
+    if (settleHolder(path, staleMs) === "held") await sleep(pollMs);
+  }
+}
+
+/**
+ * withCrossProcessLock for sections that keep working after they answer: `fn`
+ * returns `{ value, hold }`; `value` resolves to the caller as soon as `fn`
+ * does, but the lock is only released once `hold` settles. Used by the bl
+ * supervisor: a run whose update overran its cap answers the fetch at the cap
+ * (stale marker for one cycle) while the lock stays held until the bl child
+ * actually exits, so no peer can spawn bl mid-install. The release is
+ * fire-and-forget on purpose – awaiting it in a finally would block the caller
+ * for the whole hold. A holder that crashes is taken over as soon as its pid
+ * is provably dead (regardless of `staleMs`); a LIVE holder is only taken
+ * over past `staleMs`, so keep that above the longest legitimate hold.
+ */
+export async function withCrossProcessLockHold<T>(
+  path: string,
+  fn: () => Promise<{ value: T; hold: Promise<unknown> }>,
+  { waitMs = 30_000, pollMs = POLL_MS, staleMs = STALE_MS }: FetchTurnOptions = {},
+): Promise<T | undefined> {
+  const deadline = performance.now() + waitMs;
+  for (;;) {
+    const lock = tryLock(path);
+    if (lock === "unavailable") return undefined;
+    if (lock) {
+      let hold: Promise<unknown> = Promise.resolve();
+      try {
+        const got = await fn();
+        hold = got.hold;
+        return got.value;
+      } catch (err) {
+        lock.release();
+        throw err;
+      } finally {
+        void Promise.allSettled([hold]).then(() => lock.release());
+      }
+    }
+    if (performance.now() >= deadline) return undefined;
+    if (settleHolder(path, staleMs) === "held") await sleep(pollMs);
+  }
+}
+
+/**
  * Create the lock file exclusively with O_EXCL ("wx") – atomic on every
  * platform Node supports, so exactly one process wins. `undefined` means
  * another process holds it; `"unavailable"` means no lock can be taken here.
