@@ -291,8 +291,14 @@ listed and excluded from sums – never priced at zero. Cost kinds: `actual`
 (vendor's own `usd`/`cost_usd`: openrouter, openai), `estimate` (list price
 formula `in·P_in + cr·P_cr + cw·P_cw + out·P_out`), `blended` (split-less
 zcode totals priced with the operator's observed z.ai in/cache/out mix, labeled
-an estimate). Providers with no token surface (claude, google, kimi) surface
-window-% history from `samples` instead of tokens.
+an estimate). Providers with no token surface (claude, kimi) surface
+window-% history from `samples` instead of tokens. Google has no usage API –
+its tokens come from the Antigravity local store (`harvestGoogleLocal`:
+machine-wide incremental walk of the same conversation dbs the track
+harvester reads, watermark + one-hour reprocess overlap, replace-range
+application, 90d first-run backfill; per-model rows keyed by the served
+model id, so `gemini-*` pricing resolves through the `google/` OpenRouter
+prefix and unlisted ids – e.g. trial variants – land in `unpriced`).
 
 ## Track store (task-level accounting)
 

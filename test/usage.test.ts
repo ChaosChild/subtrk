@@ -1740,3 +1740,199 @@ describe("GET /api/usage", () => {
     }
   });
 });
+
+// ---------- google: Antigravity local-store usage source ----------
+
+// Minimal protobuf encoder for synthetic steps.metadata/gen_metadata blobs
+// (same field map as src/antigravity-store.ts; the track-harvest suite runs
+// the decoder against the real stores – here we only need shapes).
+function gpbVarintVal(n: number | bigint): number[] {
+  let v = BigInt(n);
+  const out: number[] = [];
+  for (;;) {
+    const b = Number(v & 0x7fn);
+    v >>= 7n;
+    if (v === 0n) {
+      out.push(b);
+      return out;
+    }
+    out.push(b | 0x80);
+  }
+}
+function gpbVar(field: number, val: number | bigint): Buffer {
+  return Buffer.from([...gpbVarintVal((field << 3) | 0), ...gpbVarintVal(val)]);
+}
+function gpbLen(field: number, body: Buffer): Buffer {
+  return Buffer.from([...gpbVarintVal((field << 3) | 2), ...gpbVarintVal(body.length), ...body]);
+}
+
+interface GStep {
+  tsMs: number;
+  genId?: number;
+  inTok?: number;
+  cr?: number;
+  out?: number;
+  corrupt?: boolean;
+}
+
+async function mkAntigravityHome(
+  convs: { id: string; workspace: string; steps: GStep[]; gens: { genId: number; model?: string }[] }[],
+) {
+  const home = tempDir();
+  const mod = await importSqlite();
+  assert.ok(mod, "node:sqlite available in this runtime");
+  const root = join(home, ".gemini", "antigravity", "conversations");
+  mkdirSync(root, { recursive: true });
+  const sdb = new mod.DatabaseSync(join(home, ".gemini", "antigravity", "conversation_summaries.db"));
+  sdb.exec(
+    `create table conversation_summaries (conversation_id text primary key, workspace_uris text not null,
+      last_modified_time text not null)`,
+  );
+  for (const c of convs) {
+    const lm = new Date(Math.max(...c.steps.map((s) => s.tsMs), 0))
+      .toISOString()
+      .replace("T", " ")
+      .replace("Z", "+00:00");
+    sdb
+      .prepare("insert into conversation_summaries values (?, ?, ?)")
+      .run(c.id, JSON.stringify([`file://${c.workspace}`]), lm);
+  }
+  sdb.close();
+  for (const c of convs) {
+    const db = new mod.DatabaseSync(join(root, `${c.id}.db`));
+    db.exec("create table steps (idx integer primary key, metadata blob)");
+    db.exec("create table gen_metadata (idx integer primary key, data blob)");
+    c.steps.forEach((s, i) => {
+      const parts: Buffer[] = [];
+      parts.push(gpbLen(1, Buffer.concat([gpbVar(1, Math.floor(s.tsMs / 1000)), gpbVar(2, (s.tsMs % 1000) * 1e6)])));
+      if (s.inTok !== undefined) {
+        parts.push(gpbLen(9, Buffer.concat([gpbVar(2, s.inTok), gpbVar(3, s.out ?? 0), gpbVar(5, s.cr ?? 0)])));
+      }
+      if (s.genId !== undefined) parts.push(gpbVar(12, s.genId));
+      db.prepare("insert into steps values (?, ?)").run(
+        i + 1,
+        s.corrupt ? Buffer.from([0xff, 0xff]) : Buffer.concat(parts),
+      );
+    });
+    c.gens.forEach((g, i) => {
+      const body =
+        g.model === undefined
+          ? gpbVar(4, g.genId)
+          : Buffer.concat([gpbVar(4, g.genId), gpbLen(1, gpbLen(19, Buffer.from(g.model, "utf8")))]);
+      db.prepare("insert into gen_metadata values (?, ?)").run(i + 1, body);
+    });
+    db.close();
+  }
+  return home;
+}
+
+describe("harvestUsage: google local store (antigravity)", () => {
+  const fetchOff: typeof fetch = (async () => new Response("unavailable", { status: 503 })) as typeof fetch;
+
+  it("writes machine-wide hourly google rows with served model ids; MTD includes them; rerun is idempotent", async () => {
+    const dir = tempDir();
+    const now = Date.now() + 3_600_000;
+    const h1 = now - 2 * HOUR;
+    const home = await mkAntigravityHome([
+      {
+        id: "conv-g1",
+        workspace: "/c%3A/work/anything", // usage is machine-wide – workspace must not gate it
+        steps: [
+          { tsMs: h1 + 60_000, genId: 1, inTok: 1_000, cr: 20_000, out: 200 },
+          { tsMs: h1 + 120_000, genId: 2, inTok: 500, out: 50 },
+          { tsMs: h1 + 180_000, corrupt: true },
+        ],
+        gens: [
+          { genId: 1, model: "gemini-4-argon-trial" },
+          { genId: 2, model: "gemini-3.8-flash-n" },
+        ],
+      },
+    ]);
+    try {
+      const seed = (dir2: string) =>
+        mutateUsageStore(
+          dir2,
+          (s) => {
+            const st = s.state as Record<string, Record<string, number | boolean>>;
+            st.glm = { at: 0, throughMs: 0, backfilled: true };
+            st.openrouter = { activityAt: now, analyticsAt: now };
+            st.zcode = { at: now };
+            st.alibaba = { at: now };
+            st.openai = { whamAt: now };
+          },
+          now,
+        );
+      seed(dir);
+      const summary = await harvestUsage([], {
+        subtrkDir: dir,
+        now,
+        fetchImpl: fetchOff,
+        envPath: join(dir, "env"),
+        homeDir: home,
+        budgetMs: 8000,
+      });
+      assert.ok(
+        summary.applied.some((s) => s.includes("antigravity local store")),
+        `google local applied: ${JSON.stringify(summary)}`,
+      );
+      const store = readUsageStore(dir);
+      const hk = hourKey(h1 + 60_000);
+      const r1 = store.hourly.google?.[hk]?.["gemini-4-argon-trial"];
+      const r2 = store.hourly.google?.[hk]?.["gemini-3.8-flash-n"];
+      assert.ok(r1 && r2, `hours written: ${JSON.stringify(store.hourly.google)}`);
+      assert.equal(r1.in, 1_000);
+      assert.equal(r1.cr, 20_000);
+      assert.equal(r1.out, 200);
+      assert.equal(r2.in, 500);
+      const through1 = (store.state.googleLocal as { throughMs: number }).throughMs;
+      assert.ok(through1 > h1, "watermark advanced");
+
+      // Second run past the TTL: same rows, no doubling.
+      const now2 = now + 20 * 60_000;
+      const summary2 = await harvestUsage([], {
+        subtrkDir: dir,
+        now: now2,
+        fetchImpl: fetchOff,
+        envPath: join(dir, "env"),
+        homeDir: home,
+        budgetMs: 8000,
+      });
+      assert.ok(summary2.applied.some((s) => s.includes("antigravity local store")));
+      const store2 = readUsageStore(dir);
+      assert.equal(store2.hourly.google?.[hk]?.["gemini-4-argon-trial"]?.in, 1_000, "idempotent reharvest");
+
+      // MTD aggregation includes google tokens.
+      const agg = aggregateUsage(store2, { fromMs: now - 30 * 24 * HOUR, toMs: now2, granularity: "day" });
+      const g = agg.providers.google;
+      assert.ok(g, "google provider aggregate exists");
+      assert.ok(g.in + g.cr + g.out >= 21_750, `google tokens in MTD sums: ${JSON.stringify(g)}`);
+      assert.ok(
+        g.models.some((m) => m.model === "gemini-4-argon-trial"),
+        "served model id in the models table",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("no antigravity store: skipped cleanly, never an error", async () => {
+    const dir = tempDir();
+    const home = tempDir(); // no .gemini at all
+    try {
+      const summary = await harvestUsage([], {
+        subtrkDir: dir,
+        now: Date.now(),
+        fetchImpl: fetchOff,
+        envPath: join(dir, "env"),
+        homeDir: home,
+        budgetMs: 4000,
+      });
+      assert.ok(summary.skipped.some((s) => s.includes("no local antigravity store")));
+      assert.equal(readUsageStore(dir).hourly.google, undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});

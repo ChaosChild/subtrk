@@ -667,7 +667,8 @@ function fmtTok(n: number): string {
 // `subtrk usage` – reads the local usage store (refreshing due sources first,
 // short budget) and prints per-provider token totals with API-equivalent cost.
 // Split-less providers (zcode) show blended estimates; %-only providers
-// (claude, google, kimi) say so instead of inventing tokens.
+// (claude, kimi) say so instead of inventing tokens. Google's tokens come
+// from the Antigravity local store (usage.ts harvestGoogleLocal).
 async function usageCommand(args: UsageArgs, deps: CliDeps): Promise<number> {
   const dir = deps.dirs?.subtrk ?? SUBTRK_DIR;
   let daysN: number | null = null;

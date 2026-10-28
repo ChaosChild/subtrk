@@ -33,6 +33,7 @@ import {
 import { stat as statAsync } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { antigravityConversations, readAntigravityUsage } from "./antigravity-store.ts";
 import { acquireLock, errorMessage, getSecret, type ProviderResult, releaseLock, SUBTRK_DIR } from "./core.ts";
 import { extractJson } from "./providers/alibaba.ts";
 import { glmAuth } from "./providers/glm.ts";
@@ -1153,6 +1154,94 @@ async function harvestGlmLocal(ctx: JobCtx, fromMs: number): Promise<void> {
 
 interface ParsedGlmDetail {
   buckets: Record<string, Record<string, UsageRow>>; // label -> model -> row
+}
+
+// Google has no usage API: the Antigravity app's local conversation stores
+// are the only per-model token source for this machine's Gemini traffic.
+// Machine-wide incremental walk (no project filter) with a watermark and a
+// one-hour reprocess overlap, applied replace-range so reharvests are
+// idempotent. Same decoder and per-row drift guards as the track harvester's
+// antigravity tier (shared module). No vendor referee exists, so there is no
+// degraded-reconstruct path: zero rows is genuinely zero. Conversations the
+// app was writing to (unreadable db) hold the watermark back one extra hour
+// instead of leaving a permanent hole.
+const GOOGLE_LOCAL_TTL_MS = 10 * 60_000;
+const GOOGLE_LOCAL_BACKFILL_MS = 90 * 86_400_000; // first run: match hourly retention
+
+interface GoogleLocalState {
+  at?: number;
+  throughMs?: number;
+}
+
+async function harvestGoogleLocal(ctx: JobCtx): Promise<void> {
+  const home = ctx.homeDir ?? homedir();
+  const prev = readUsageStore(ctx.dir).state.googleLocal as GoogleLocalState | undefined;
+  if (prev?.at !== undefined && ctx.now - prev.at < GOOGLE_LOCAL_TTL_MS) {
+    ctx.summary.skipped.push("google: local store fresh");
+    return;
+  }
+  const hourFloor = Math.floor(ctx.now / 3_600_000) * 3_600_000;
+  const fromMs = prev?.throughMs !== undefined ? prev.throughMs - 3_600_000 : ctx.now - GOOGLE_LOCAL_BACKFILL_MS;
+  const convs = await antigravityConversations(home);
+  if (convs.length === 0 && prev === undefined) {
+    ctx.summary.skipped.push("google: no local antigravity store");
+    return;
+  }
+  const rowsByHour = new Map<string, Record<string, UsageRow>>();
+  let degraded = false;
+  let anyContribution = false;
+  for (const c of convs) {
+    if (c.lastModifiedMs !== null && c.lastModifiedMs < fromMs - 3_600_000) continue; // untouched since the last pass
+    const rows = await readAntigravityUsage(c.dbPath, fromMs, ctx.now, ctx.now);
+    if (rows === null) {
+      degraded = true; // busy/foreign db – do not watermark past its steps
+      continue;
+    }
+    for (const r of rows) {
+      if (r.inTok + r.cr + r.out <= 0) continue;
+      const hk = hourKey(r.tsMs);
+      const hour = rowsByHour.get(hk) ?? {};
+      const u = (hour[r.model] ?? { in: 0, cr: 0, cw: 0, out: 0, req: 0 }) as UsageRow;
+      u.in = (u.in ?? 0) + r.inTok;
+      u.cr = (u.cr ?? 0) + r.cr;
+      u.out = (u.out ?? 0) + r.out;
+      u.req = (u.req ?? 0) + 1;
+      hour[r.model] = u;
+      rowsByHour.set(hk, hour);
+      anyContribution = true;
+    }
+  }
+  // Degraded: hold the watermark two hours back – the reprocess overlap then
+  // re-reads whatever the app was too busy to serve. Clean pass: cover the
+  // current (possibly partial) hour; the overlap completes it next run.
+  const throughMs = degraded ? hourFloor - 3_600_000 : hourFloor + 3_600_000;
+  const hours: Record<string, Record<string, UsageRow>> = {};
+  for (const [hk, models] of rowsByHour) hours[hk] = models;
+  const applied = mutateUsageStore(
+    ctx.dir,
+    (store) => {
+      // Replace only on a clean pass: while a db was busy, its earlier rows
+      // are missing from `hours` and a replace would delete them.
+      if (!degraded) replaceHourlyRange(store, "google", fromMs, throughMs, hours);
+      const s = ensure(store.state, "googleLocal") as GoogleLocalState;
+      s.at = ctx.now;
+      s.throughMs = throughMs;
+    },
+    ctx.now,
+  );
+  if (applied) {
+    if (anyContribution) {
+      const totReq = Object.values(hours).reduce(
+        (a, h) => a + Object.values(h).reduce((b, r) => b + (r.req ?? 0), 0),
+        0,
+      );
+      ctx.summary.applied.push(`google (antigravity local store: ${Object.keys(hours).length}h, ${totReq} gens)`);
+    } else if (!degraded) {
+      ctx.summary.applied.push("google (antigravity local store: nothing new)");
+    } else {
+      ctx.summary.skipped.push("google: a conversation db was busy – watermark held back");
+    }
+  } else ctx.summary.skipped.push("google: store busy (local)");
 }
 
 // Pure: data.modelUsage.{xTime[], modelDataList[]} -> bucket rows. Series are
@@ -2400,6 +2489,7 @@ export async function harvestUsage(results: ProviderResult[] = [], opts: Harvest
     harvestAlibaba(ctx),
     harvestOpenai(ctx),
     harvestClaudeLocal(ctx),
+    harvestGoogleLocal(ctx),
   ];
   const settled = await Promise.allSettled(jobs);
   for (const s of settled) {
