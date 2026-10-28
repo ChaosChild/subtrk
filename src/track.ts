@@ -13,8 +13,9 @@ import { ALL_PROVIDER_IDS, acquireLock, releaseLock, SUBTRK_DIR, scrub, scrubVal
 
 // Ladder: "session-window" (zcode per-request rows), "session-scan" (claude
 // transcript window scan with the exact contributing session ids recorded),
-// "window" (codex transcript scans – sessions not recorded), "none".
-export type Attribution = "session-window" | "session-scan" | "window" | "none";
+// "conversation-window" (antigravity per-step usage keyed by conversation
+// id), "window" (codex transcript scans – sessions not recorded), "none".
+export type Attribution = "session-window" | "session-scan" | "conversation-window" | "window" | "none";
 
 export type TrackStatus = "done" | "aborted" | "failed" | "paused" | "stale";
 
@@ -290,8 +291,14 @@ export function activeMs(t0: number, t1: number, pauses: { from: number; to: num
 // cannot be refined – overlapping usage stays contested (flag, never average).
 function sessionCovered(r: TrackRecord): boolean {
   if (r.usage === null || r.sessions.length === 0) return false;
-  if (r.attribution !== "session-window" && r.attribution !== "session-scan") return false;
-  return Object.keys(r.bySource ?? {}).every((k) => k.startsWith("zcode:") || k === "claude");
+  if (
+    r.attribution !== "session-window" &&
+    r.attribution !== "session-scan" &&
+    r.attribution !== "conversation-window"
+  ) {
+    return false;
+  }
+  return Object.keys(r.bySource ?? {}).every((k) => k.startsWith("zcode:") || k === "claude" || k === "antigravity");
 }
 
 // Full deterministic pass over the record set: containment marks the inner

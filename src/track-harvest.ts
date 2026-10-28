@@ -9,6 +9,8 @@ import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import * as readline from "node:readline";
+import { antigravityProjectUsage } from "./antigravity-store.ts";
+import { importSqlite } from "./sqlite-import.ts";
 import { type HarvestResult, type HarvestWindow, pausedAt, type TrackUsage } from "./track.ts";
 import { type CodexParserState, parseClaudeTranscriptLine, parseCodexRolloutLine } from "./usage.ts";
 
@@ -41,31 +43,9 @@ interface Accumulator {
 
 // ---------- zcode: per-request rows in ~/.zcode/cli/db/db.sqlite ----------
 
-// node:sqlite is experimental on the Node versions we support and prints an
-// ExperimentalWarning on load. Removing 'warning' listeners does NOT
-// suppress it – Node prints to stderr whenever the event fires with zero
-// listeners, so the event must never fire: patch process.emitWarning across
-// the import (restore one immediate later, in case a deferred call site),
-// memoized so concurrent callers can't double-patch. Unavailable → no data.
-let sqlitePromise: Promise<typeof import("node:sqlite") | null> | null = null;
-// Shared with the usage harvest's local glm fallback (PR E).
-export function importSqlite(): Promise<typeof import("node:sqlite") | null> {
-  sqlitePromise ??= (async () => {
-    const origEmitWarning = process.emitWarning;
-    process.emitWarning = (() => {}) as typeof process.emitWarning;
-    try {
-      const mod = await import("node:sqlite");
-      setImmediate(() => {
-        process.emitWarning = origEmitWarning;
-      });
-      return mod;
-    } catch {
-      process.emitWarning = origEmitWarning;
-      return null;
-    }
-  })();
-  return sqlitePromise;
-}
+// importSqlite (above) is shared with the usage harvest's local glm fallback
+// (PR E) and the antigravity store reader; the loader lives in sqlite-import.ts.
+export { importSqlite };
 
 async function harvestZcode(acc: Accumulator, w: HarvestWindow, homeDir: string): Promise<boolean> {
   const dbPath = join(homeDir, ".zcode", "cli", "db", "db.sqlite");
@@ -480,6 +460,32 @@ async function harvestCodex(acc: Accumulator, w: HarvestWindow, homeDir: string)
   return any;
 }
 
+// ---------- antigravity: per-step usage in ~/.gemini/antigravity ----------
+
+// Gemini (Antigravity app) burn: conversations whose workspace is the project
+// or an ancestor contribute their in-window generation steps. Sessions are
+// conversation ids, so overlapping markers with disjoint conversations stay
+// uncontested (sessionCovered knows this tier). cw is always 0 – Gemini
+// implicit caching has no write cost.
+async function harvestAntigravity(acc: Accumulator, w: HarvestWindow, homeDir: string): Promise<boolean> {
+  const { rows, sessions } = await antigravityProjectUsage(homeDir, w.project, w.t0, w.t1, Date.now());
+  let any = false;
+  for (const r of rows) {
+    if (pausedAt(w.pauses, r.tsMs)) continue;
+    if (r.inTok + r.cr + r.out <= 0) continue;
+    any = true;
+    const u = bucket(acc.bySource, "antigravity");
+    u.in += r.inTok;
+    u.cr += r.cr;
+    u.out += r.out;
+    u.reqs += 1;
+    const model = PROTO_KEYS.has(r.model) ? "?" : r.model;
+    acc.models[model] = (acc.models[model] ?? 0) + r.inTok + r.cr + r.out;
+  }
+  if (any) for (const s of sessions) acc.sessions.add(s);
+  return any;
+}
+
 // ---------- entry point ----------
 
 export interface HarvestOpts {
@@ -489,15 +495,17 @@ export interface HarvestOpts {
 // Sum every readable local store's usage for [t0, t1] in the project. The
 // result's attribution names the best tier that produced numbers:
 // "session-window" (zcode per-request rows), "session-scan" (claude
-// transcript scans with exact session ids), "window" (codex transcript
+// transcript scans with exact session ids), "conversation-window" (antigravity
+// per-step usage keyed by conversation id), "window" (codex transcript
 // scans), "none" (nothing readable – the record keeps its task facts only).
 export async function harvestWindow(w: HarvestWindow, opts: HarvestOpts = {}): Promise<HarvestResult | null> {
   const homeDir = opts.homeDir ?? homedir();
   const acc: Accumulator = { bySource: {}, models: {}, sessions: new Set() };
-  const [zcode, claude, codex] = await Promise.all([
+  const [zcode, claude, codex, agy] = await Promise.all([
     harvestZcode(acc, w, homeDir).catch(() => false),
     harvestClaude(acc, w, homeDir).catch(() => false),
     harvestCodex(acc, w, homeDir).catch(() => false),
+    harvestAntigravity(acc, w, homeDir).catch(() => false),
   ]);
   const usage = emptyUsage();
   for (const u of Object.values(acc.bySource)) {
@@ -512,6 +520,14 @@ export async function harvestWindow(w: HarvestWindow, opts: HarvestOpts = {}): P
   if (total <= 0) return null;
   const shares: Record<string, number> = {};
   for (const [model, tok] of Object.entries(acc.models)) shares[model] = tok / total;
-  const attribution = zcode ? "session-window" : claude ? "session-scan" : codex ? "window" : "none";
+  const attribution = zcode
+    ? "session-window"
+    : claude
+      ? "session-scan"
+      : agy
+        ? "conversation-window"
+        : codex
+          ? "window"
+          : "none";
   return { attribution, usage, bySource: acc.bySource, models: shares, sessions: [...acc.sessions] };
 }

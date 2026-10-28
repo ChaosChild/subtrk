@@ -586,3 +586,201 @@ describe("harvestWindow: pause gaps", () => {
     }
   });
 });
+
+// ---------- antigravity fixtures: a minimal protobuf encoder + store builder ----------
+
+function pbVarintVal(n: number | bigint): number[] {
+  let v = BigInt(n);
+  const out: number[] = [];
+  for (;;) {
+    const b = Number(v & 0x7fn);
+    v >>= 7n;
+    if (v === 0n) {
+      out.push(b);
+      return out;
+    }
+    out.push(b | 0x80);
+  }
+}
+
+function pbVar(field: number, val: number | bigint): Buffer {
+  return Buffer.from([...pbVarintVal((field << 3) | 0), ...pbVarintVal(val)]);
+}
+
+function pbLen(field: number, body: Buffer | number[] | string): Buffer {
+  const payload = typeof body === "string" ? Buffer.from(body, "utf8") : Buffer.from(body);
+  return Buffer.from([...pbVarintVal((field << 3) | 2), ...pbVarintVal(payload.length), ...payload]);
+}
+
+interface AgStep {
+  tsMs: number;
+  genId?: number;
+  inTok?: number;
+  cr?: number;
+  outTotal?: number;
+  visible?: number;
+  think?: number;
+  corrupt?: boolean;
+  noTs?: boolean;
+}
+
+interface AgFixture {
+  id: string;
+  workspace: string; // a percent-encoded file URI, as the real store writes them
+  steps: AgStep[];
+  gens?: { genId: number; model?: string }[];
+}
+
+function agStepBlob(s: AgStep): Buffer {
+  const parts: Buffer[] = [];
+  if (!s.noTs) {
+    const sec = Math.floor(s.tsMs / 1000);
+    const nanos = (s.tsMs % 1000) * 1e6;
+    parts.push(pbLen(1, Buffer.concat([pbVar(1, sec), pbVar(2, nanos)])));
+  }
+  if (s.inTok !== undefined) {
+    const usage: Buffer[] = [pbVar(2, s.inTok), pbVar(3, s.outTotal ?? 0), pbVar(5, s.cr ?? 0)];
+    if (s.visible !== undefined) usage.push(pbVar(9, s.visible), pbVar(10, s.think ?? 0));
+    parts.push(pbLen(9, Buffer.concat(usage)));
+  }
+  if (s.genId !== undefined) parts.push(pbVar(12, s.genId));
+  return Buffer.concat(parts);
+}
+
+async function buildAntigravity(home: string, convs: AgFixture[], summariesOk = true): Promise<void> {
+  const { DatabaseSync } = (await import("node:sqlite")) as unknown as SqliteModule;
+  const root = join(home, ".gemini", "antigravity");
+  const convsDir = join(root, "conversations");
+  mkdirSync(convsDir, { recursive: true });
+  if (summariesOk) {
+    const sdb = new DatabaseSync(join(root, "conversation_summaries.db"));
+    sdb.exec(
+      `create table conversation_summaries (conversation_id text primary key, workspace_uris text not null,
+        last_modified_time text not null)`,
+    );
+    for (const c of convs) {
+      const lm = new Date(T1 + 60_000).toISOString().replace("T", " ").replace("Z", "+00:00");
+      sdb
+        .prepare("insert into conversation_summaries values (?, ?, ?)")
+        .run(c.id, JSON.stringify([`file://${c.workspace}`]), lm);
+    }
+    sdb.close();
+  }
+  for (const c of convs) {
+    const db = new DatabaseSync(join(convsDir, `${c.id}.db`));
+    db.exec(`create table steps (idx integer primary key, metadata blob)`);
+    db.exec(`create table gen_metadata (idx integer primary key, data blob)`);
+    c.steps.forEach((s, i) => {
+      db.prepare("insert into steps values (?, ?)").run(i + 1, s.corrupt ? Buffer.from([0xff, 0xff]) : agStepBlob(s));
+    });
+    (c.gens ?? []).forEach((g, i) => {
+      const body =
+        g.model === undefined ? pbVar(4, g.genId) : Buffer.concat([pbVar(4, g.genId), pbLen(1, pbLen(19, g.model))]);
+      db.prepare("insert into gen_metadata values (?, ?)").run(i + 1, body);
+    });
+    db.close();
+  }
+}
+
+describe("harvestWindow: antigravity conversation tier", () => {
+  const ID = "d4376bfe-1d1c-42cf-ade6-10a949e22a4a";
+
+  it("attributes in-window steps with the served model id, session = conversation id", async () => {
+    const home = tempHome();
+    try {
+      await buildAntigravity(home, [
+        {
+          id: ID,
+          workspace: "/c%3A/work/my-proj",
+          steps: [
+            { tsMs: T0 + 60_000, genId: 7, inTok: 100, cr: 900, outTotal: 20, visible: 15, think: 5 },
+            { tsMs: T0 + 120_000, genId: 8, inTok: 50, cr: 0, outTotal: 10 }, // no visible/think split – no guard
+            { tsMs: T0 - 1, genId: 7, inTok: 9_999, outTotal: 9_999 }, // before the window
+            { tsMs: T1 + 1, genId: 7, inTok: 9_999, outTotal: 9_999 }, // after the window
+            { tsMs: T0 + 130_000 }, // a step without a usage block
+          ],
+          gens: [
+            { genId: 7, model: "gemini-4-argon-trial" },
+            { genId: 8 }, // gen row without a served id -> fallback
+          ],
+        },
+        {
+          id: "elsewhere-0000",
+          workspace: "/c%3A/other/proj", // a different workspace – ignored
+          steps: [{ tsMs: T0 + 60_000, genId: 1, inTok: 9_999, outTotal: 9_999 }],
+          gens: [{ genId: 1, model: "gemini-3-flash-a" }],
+        },
+      ]);
+      const res = await harvestWindow({ project: "C:\\work\\my-proj", t0: T0, t1: T1 }, { homeDir: home });
+      assert.ok(res);
+      assert.equal(res.attribution, "conversation-window");
+      assert.deepEqual(res.usage, { in: 150, cr: 900, cw: 0, out: 30, reqs: 2 });
+      assert.deepEqual(res.sessions, [ID], "the conversation id is the session");
+      assert.ok(Math.abs((res.models["gemini-4-argon-trial"] ?? 0) - 1020 / 1080) < 1e-9);
+      assert.ok(Math.abs((res.models["gemini-unknown"] ?? 0) - 60 / 1080) < 1e-9);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("an ancestor workspace matches a subfolder marker; pause gaps are skipped", async () => {
+    const home = tempHome();
+    try {
+      await buildAntigravity(home, [
+        {
+          id: ID,
+          workspace: "/c%3A/work/repo",
+          steps: [
+            { tsMs: T0 + 60_000, genId: 1, inTok: 100, outTotal: 10 },
+            { tsMs: T0 + 1_500_000, genId: 1, inTok: 9_999, outTotal: 9_999 }, // inside the pause gap
+          ],
+          gens: [{ genId: 1, model: "gemini-3.8-flash-n" }],
+        },
+      ]);
+      const res = await harvestWindow(
+        { project: "C:\\work\\repo\\sub\\dir", t0: T0, t1: T1, pauses: [{ from: T0 + 600_000, to: T0 + 2_400_000 }] },
+        { homeDir: home },
+      );
+      assert.ok(res);
+      assert.equal(res.attribution, "conversation-window");
+      assert.deepEqual(res.usage, { in: 100, cr: 0, cw: 0, out: 10, reqs: 1 });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("corrupt blobs and drift-guard failures are skipped without losing their neighbours", async () => {
+    const home = tempHome();
+    try {
+      await buildAntigravity(home, [
+        {
+          id: ID,
+          workspace: "/c%3A/work/guards",
+          steps: [
+            { tsMs: T0 + 60_000, genId: 1, inTok: 100, outTotal: 10 },
+            { tsMs: T0 + 70_000, corrupt: true },
+            { tsMs: T0 + 80_000, genId: 1, inTok: 100, outTotal: 50, visible: 10, think: 5 }, // 50 != 10+5 – drift
+            { tsMs: T0 + 90_000, noTs: true, genId: 1, inTok: 9_999, outTotal: 9_999 }, // no timestamp
+          ],
+          gens: [{ genId: 1, model: "gemini-4-argon-trial" }],
+        },
+      ]);
+      const res = await harvestWindow({ project: "C:\\work\\guards", t0: T0, t1: T1 }, { homeDir: home });
+      assert.ok(res);
+      assert.deepEqual(res.usage, { in: 100, cr: 0, cw: 0, out: 10, reqs: 1 });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("no store (or no matching conversation) yields null – never an error", async () => {
+    const home = tempHome();
+    try {
+      assert.equal(await harvestWindow({ project: "C:\\nowhere", t0: T0, t1: T1 }, { homeDir: home }), null);
+      await buildAntigravity(home, [], true); // summaries db, zero conversations
+      assert.equal(await harvestWindow({ project: "C:\\nowhere", t0: T0, t1: T1 }, { homeDir: home }), null);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});

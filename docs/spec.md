@@ -316,16 +316,17 @@ window):
 | zcode `~/.zcode/cli/db/db.sqlite` | `model_usage` rows with `started_at ∈ [t0, t1]` joined to `session` by normalized directory; `session_title` rows excluded (harness bookkeeping), `compact` rows included (task-driven burn); inclusive `input_tokens` gets `cr`+`cw` subtracted | `session-window` |
 | claude `~/.claude/projects/<encoded-launch-dir>/` (main transcripts + `<sid>/subagents/*.jsonl`) | per-assistant-message usage inside the window, ccusage dedupe first-wins shared across all files; subagent lines attribute to the parent session; 1h-ephemeral cache writes split into `cw1h` (subset of `cw`); the launch dir is found at harvest time by walking the marker's project up to its git root (truncated long-path names confirmed by a transcript `cwd`, never a guessed hash); `--session` pins to that session + its subagents | `session-scan` |
 | codex `~/.codex/sessions/**/rollout-*.jsonl` | cumulative `token_count` deltas inside the window, only for rollouts whose `session_meta.cwd` matches the project | `window` |
+| antigravity `~/.gemini/antigravity/` (conversation_summaries.db + `conversations/<id>.db`) | per-generation steps inside the window for conversations whose `workspace_uris` entry is the project or an ancestor; usage and timestamps decode from the `steps.metadata` protobuf blobs (reverse-engineered field map in src/antigravity-store.ts, per-row drift guards fail closed), the served model id comes from `gen_metadata` via the generation-id join; `cw` is always 0 (Gemini implicit caching has no write cost); conversation ids double as session ids | `conversation-window` |
 
-Nothing readable (antigravity has no local store; node:sqlite unavailable)
+Nothing readable (node:sqlite unavailable; every store missing or foreign)
 records `usage: null` with attribution `none` – a visible gap, never a
 machine-wide provider delta (operator decision D18). The record keeps the
 exact session-id set it summed. Two structural flags are recomputed
 deterministically over the record set: **nested** (a record's window is
 contained in another's – the inner one points at its container; stats will
 read leaves only) and **contested** (overlapping same-project records that
-provably shared sessions, or any overlap between window-attributed records
-with usage). A busy/failed harvest degrades to a `pending` record retried on
+provably shared sessions – zcode rows, claude transcripts or antigravity
+conversations – or any overlap between window-attributed records with usage). A busy/failed harvest degrades to a `pending` record retried on
 later invocations (records whose window closed more than 7 days ago stop
 being retried – empty sources stay empty, and dead records must not hold the
 bounded retry slots) – `track stop` itself never blocks the agent.
