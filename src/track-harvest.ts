@@ -9,7 +9,7 @@ import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import * as readline from "node:readline";
-import type { HarvestResult, HarvestWindow, TrackUsage } from "./track.ts";
+import { type HarvestResult, type HarvestWindow, pausedAt, type TrackUsage } from "./track.ts";
 import { type CodexParserState, parseClaudeTranscriptLine, parseCodexRolloutLine } from "./usage.ts";
 
 // Store keys derived from (untrusted) harness store content – usage.ts discipline.
@@ -87,6 +87,7 @@ async function harvestZcode(acc: Accumulator, w: HarvestWindow, homeDir: string)
       const pin = typeof w.session === "string" && w.session.trim() !== "" ? w.session.trim() : null;
       const stmt = db.prepare(
         `select mu.session_id as sid, mu.query_source as src, mu.model_id as model,
+                mu.started_at as tsMs,
                 mu.input_tokens as inTok, mu.output_tokens as outTok,
                 mu.cache_creation_input_tokens as cw, mu.cache_read_input_tokens as cr
          from model_usage mu join session s on s.id = mu.session_id
@@ -111,6 +112,7 @@ async function harvestZcode(acc: Accumulator, w: HarvestWindow, homeDir: string)
   for (const row of rows) {
     const r = row as Record<string, unknown>;
     if (excluded.size > 0 && typeof r.sid === "string" && excluded.has(r.sid)) continue; // PR D: a child pin's burn is the child's
+    if (pausedAt(w.pauses, Number(r.tsMs))) continue; // burn inside a pause gap belongs to whoever worked then
     const inTok = Number(r.inTok) || 0;
     const cr = Number(r.cr) || 0;
     const cw = Number(r.cw) || 0;
@@ -368,6 +370,7 @@ async function harvestClaude(acc: Accumulator, w: HarvestWindow, homeDir: string
       for await (const line of rl) {
         const r = parseClaudeTranscriptLine(line, null);
         if (!r || r.ts < w.t0 || r.ts > w.t1) continue;
+        if (pausedAt(w.pauses, r.ts)) continue; // burn inside a pause gap belongs to whoever worked then
         if (r.dedupeKey) {
           if (seen.has(r.dedupeKey)) continue;
           seen.add(r.dedupeKey);
@@ -459,6 +462,7 @@ async function harvestCodex(acc: Accumulator, w: HarvestWindow, homeDir: string)
       if (r.modelUpdate !== null) model = r.modelUpdate;
       prev = r.nextState;
       if (r.ts === 0 || r.ts < w.t0 || r.ts > w.t1) continue;
+      if (pausedAt(w.pauses, r.ts)) continue; // burn inside a pause gap belongs to whoever worked then
       const tot = (r.row.in ?? 0) + (r.row.cr ?? 0) + (r.row.cw ?? 0) + (r.row.out ?? 0);
       if (tot <= 0) continue;
       any = true;

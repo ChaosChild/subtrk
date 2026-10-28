@@ -501,3 +501,88 @@ describe("harvestWindow: zcode sqlite tier", () => {
     }
   });
 });
+
+describe("harvestWindow: pause gaps", () => {
+  // A closed pause gap [from, to): burn stamped inside it belongs to whoever
+  // worked while the task was paused. Gap below spans T0+10m..T0+40m.
+  const PAUSE = { from: T0 + 600_000, to: T0 + 2_400_000 };
+  const window = { t0: T0, t1: T1, pauses: [PAUSE] };
+
+  it("zcode: rows stamped inside the gap are skipped, active rows count", async () => {
+    const home = tempHome();
+    const db = await makeDb(home);
+    try {
+      db.prepare(`insert into session (id, directory, time_created) values (?, ?, ?)`).run(
+        "sess_p",
+        "c:\\work\\pause",
+        T0,
+      );
+      insert(db, "keep", { sid: "sess_p", src: "main_turn", model: "glm-5.3", at: T0 + 60_000, inTok: 100, out: 10 });
+      insert(db, "drop", {
+        sid: "sess_p",
+        src: "main_turn",
+        model: "glm-5.3",
+        at: PAUSE.from + 1,
+        inTok: 9_999,
+        out: 9_999,
+      });
+      insert(db, "edge", {
+        sid: "sess_p",
+        src: "main_turn",
+        model: "glm-5.3",
+        at: PAUSE.to, // half-open gap: resuming at `to` is the task's again
+        inTok: 50,
+        out: 5,
+      });
+      const res = await harvestWindow({ project: "C:\\work\\pause", ...window }, { homeDir: home });
+      assert.ok(res);
+      assert.deepEqual(res.usage, { in: 150, cr: 0, cw: 0, out: 15, reqs: 2 });
+    } finally {
+      db.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("claude: messages stamped inside the gap are skipped", async () => {
+    const home = tempHome();
+    const dir = join(home, ".claude", "projects", "C--work-pause");
+    mkdirSync(dir, { recursive: true });
+    try {
+      writeFileSync(
+        join(dir, "s1.jsonl"),
+        [
+          claudeLine(T0 + 60_000, "active", 100, 0, 10),
+          claudeLine(PAUSE.from + 1, "paused", 9_999, 0, 9_999),
+          claudeLine(PAUSE.to, "resumed", 50, 0, 5),
+        ].join("\n"),
+      );
+      const res = await harvestWindow({ project: "C:\\work\\pause", ...window }, { homeDir: home });
+      assert.ok(res);
+      assert.deepEqual(res.usage, { in: 150, cr: 0, cw: 0, out: 15, reqs: 2 });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("codex: the snapshot delta inside the gap is skipped, later deltas still compute", async () => {
+    const home = tempHome();
+    const day = join(home, ".codex", "sessions", "2026", "01", "02");
+    mkdirSync(day, { recursive: true });
+    try {
+      writeFileSync(
+        join(day, "rollout.jsonl"),
+        [
+          codexMeta("C:\\work\\pause"),
+          codexToken(T0 + 60_000, 100, 0, 0, 10), // delta 100/10 – active
+          codexToken(PAUSE.from + 300_000, 150, 0, 0, 15), // delta 50/5 inside the gap – skipped
+          codexToken(PAUSE.to + 60_000, 200, 0, 0, 20), // delta 50/5 since the paused snapshot – active
+        ].join("\n"),
+      );
+      const res = await harvestWindow({ project: "C:\\work\\pause", ...window }, { homeDir: home });
+      assert.ok(res);
+      assert.deepEqual(res.usage, { in: 150, cr: 0, cw: 0, out: 15, reqs: 2 });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});

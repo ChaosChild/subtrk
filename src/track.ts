@@ -89,6 +89,7 @@ export interface HarvestWindow {
   t1: number;
   session?: string; // manual pin: restrict session-attributed tiers (zcode rows, claude transcripts) to one session id
   excludeSessions?: string[]; // PR D: child session pins whose burn belongs to child markers, not this window
+  pauses?: { from: number; to: number }[]; // closed gaps: burn inside them belongs to whoever worked then, not this task
 }
 
 export type HarvestFn = (w: HarvestWindow) => Promise<HarvestResult | null>;
@@ -105,6 +106,10 @@ const TRACK_SCHEMA_VERSION = 1;
 const WRITE_RETRIES = [25, 50, 75, 100];
 const PRUNE_DEFAULT_MS = 3 * 86_400_000;
 const STALE_AFTER_MS = 6 * 3_600_000;
+// A pending record whose window closed longer ago than this stops being
+// retried: a store with no readable source stays empty forever, and dead
+// records must not hold the bounded retry slots hostage.
+const RETRY_MAX_AGE_MS = 7 * 86_400_000;
 const COMPLEXITIES = new Set(["xs", "s", "m", "l", "xl"]);
 const STATUSES = new Set(["done", "aborted", "failed", "paused", "stale"]);
 const DURATION_RE = /^(\d{1,3})([dhm])$/;
@@ -254,6 +259,29 @@ export function parseDurationMs(value: string): number | null {
   if (!Number.isFinite(n) || n <= 0) return null;
   const unitMs = m[2] === "d" ? 86_400_000 : m[2] === "h" ? 3_600_000 : 60_000;
   return n * unitMs;
+}
+
+// True when ts falls inside a closed pause gap (gaps are half-open: [from,
+// to) – resuming at `to` makes a row stamped `to` the task's again).
+export function pausedAt(pauses: { from: number; to: number }[] | undefined, ts: number): boolean {
+  if (pauses === undefined) return false;
+  for (const p of pauses) {
+    if (ts >= p.from && ts < p.to) return true;
+  }
+  return false;
+}
+
+// Active (non-paused) time inside [t0, t1]: every pause span clipped to the
+// window, subtracted from the elapsed. Open-marker age stays elapsed on
+// purpose – "how long open" and "how long worked" answer different questions.
+export function activeMs(t0: number, t1: number, pauses: { from: number; to: number }[] | undefined): number {
+  let paused = 0;
+  for (const p of pauses ?? []) {
+    const from = Math.max(p.from, t0);
+    const to = Math.min(p.to, t1);
+    if (to > from) paused += to - from;
+  }
+  return Math.max(0, t1 - t0 - paused);
 }
 
 // A record's session list names every store that produced its usage: zcode
@@ -460,6 +488,7 @@ async function closeMarker(
       t1,
       session: marker.session,
       excludeSessions,
+      pauses: marker.pauses,
     });
   } catch {
     pending = true;
@@ -487,7 +516,7 @@ async function closeMarker(
     providerHint: marker.providerHint,
     sessionPin: marker.session,
     excludedPins: excludeSessions,
-    wallMs: t1 - marker.t0,
+    wallMs: activeMs(marker.t0, t1, marker.pauses),
     note: note?.trim() || undefined,
   };
   mutateTrackStore(
@@ -513,10 +542,10 @@ function recordLines(r: TrackRecord): string[] {
     bits.push(`(tot ${fmtTok(usageTotal(u))})`);
     bits.push(r.attribution);
     bits.push(`${r.sessions.length} session${r.sessions.length === 1 ? "" : "s"}`);
-  } else if (r.pending) {
-    bits.push("pending harvest");
   } else {
-    bits.push("no local usage data");
+    // usage null always means pending: closeMarker and retryPending are the
+    // only writers, and both set usage and pending together.
+    bits.push("pending harvest");
   }
   const flags: string[] = [];
   if (r.contested) flags.push("contested");
@@ -716,11 +745,14 @@ function resumeTrack(args: TrackArgs, ctx: VerbCtx & { now: () => number }): num
 }
 
 // Retry pending harvests (bounded) – the recovery path for a store that was
-// busy or unreadable at stop time. Newest first, at most three per call.
+// busy or unreadable at stop time. Newest first, at most three per call, and
+// none older than RETRY_MAX_AGE_MS: a window whose sources stay empty will
+// never produce numbers, and dead records must not hold the slots.
 async function retryPending(dir: string, now: () => number, harvest: HarvestFn): Promise<number> {
+  const nowMs = now();
   const store = readTrackStore(dir);
   const pending = store.records
-    .filter((r) => r.pending && r.usage === null)
+    .filter((r) => r.pending && r.usage === null && r.t1 >= nowMs - RETRY_MAX_AGE_MS)
     .sort((a, b) => b.t1 - a.t1)
     .slice(0, 3);
   let recovered = 0;
@@ -733,6 +765,7 @@ async function retryPending(dir: string, now: () => number, harvest: HarvestFn):
         t1: rec.t1,
         session: rec.sessionPin,
         excludeSessions: rec.excludedPins,
+        pauses: rec.pauses,
       });
     } catch {
       continue;
@@ -797,7 +830,10 @@ async function statusTrack(args: TrackArgs, ctx: VerbCtx & { harvest: HarvestFn 
     );
   }
   for (const r of store.records.filter((r) => r.pending)) {
-    console.log(scrub(`${r.id}  pending harvest (${r.status})  ·  ${r.task}`));
+    const cx = r.complexity ? ` ${r.complexity}` : "";
+    console.log(
+      scrub(`${r.id}  pending harvest (${r.status}${cx})  ·  ${fmtDur(r.wallMs)}  ·  ${r.task}  ·  ${r.project}`),
+    );
   }
   console.log(USAGE_HINT);
   return 0;
