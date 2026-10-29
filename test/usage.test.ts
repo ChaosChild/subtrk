@@ -826,6 +826,8 @@ describe("usage pricing", () => {
       usdPerTok: {
         "z-ai/glm-5.3": { in: 1.4e-6, out: 4.4e-6, cr: 0.26e-6 },
         "anthropic/claude-opus-5.5": { in: 5e-6, out: 25e-6 },
+        "google/gemini-4-argon": { in: 2e-6, out: 1e-5, cr: 1e-7 },
+        "google/gemini-3.8-flash": { in: 8.25e-7, out: 4.125e-6, cr: 8.25e-8 },
       },
     },
   };
@@ -840,6 +842,16 @@ describe("usage pricing", () => {
     // resolved null because the dotted variant was rebuilt dash->dot)
     assert.equal(priceForModel(store, "qwen3.8-max")?.source, "fallback");
     assert.equal(priceForModel(store, "totally-unknown-model"), null);
+  });
+
+  it("resolves served variant suffixes to their priced base model", () => {
+    // Antigravity serves -trial / -n ids while only the base models are priced;
+    // the stripped form resolves only after the exact match fails.
+    assert.equal(priceForModel(store, "gemini-4-argon-trial")?.price.in, 2e-6);
+    assert.equal(priceForModel(store, "gemini-3.8-flash-n")?.price.out, 4.125e-6);
+    assert.equal(priceForModel(store, "gemini-4-argon")?.price.in, 2e-6); // base still exact
+    assert.equal(priceForModel(store, "gemini-9-unicorn-trial"), null); // strip helps only when the base exists
+    assert.equal(priceForModel(store, "GLM-5.3")?.price.in, 1.4e-6); // suffix strip must not disturb existing keys
   });
 
   it("rowCost prefers vendor-actual usd over estimates", () => {
@@ -1725,6 +1737,9 @@ describe("GET /api/usage", () => {
         // page (regression guard for the blank-drill-down bug).
         assert.ok(shellText.includes(`\${location.hash}`), "card navigation must carry the fragment");
         assert.ok(shellText.includes('"/" + location.hash'), "back link must carry the fragment");
+        // google charts on brand yellow: its brand blue collides with Z.ai's
+        // in every stacked/model-colored chart (operator report 2026-10-29).
+        assert.ok(shellText.includes('google: "#fbbc04"'), "google chart color must stay distinct from glm's blue");
         assert.equal((await fetch(`http://127.0.0.1:${handle.port}/provider/nope`)).status, 404);
 
         for (const r of [res, scoped, noAuth, badProvider, badMethod]) {

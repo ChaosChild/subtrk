@@ -390,32 +390,55 @@ export interface ResolvedPrice {
   source: "openrouter" | "fallback";
 }
 
+// Served model ids carry variant suffixes their priced base models don't:
+// Antigravity serves "gemini-4-argon-trial" and "gemini-3.8-flash-n" while
+// only "google/gemini-4-argon" / "google/gemini-3.8-flash" are priced. The
+// stripped forms are tried after the exact match fails, so only
+// otherwise-unpriced variants are affected – display keeps the served id,
+// the price stays list-rate (estimate), never invented.
+function priceVariants(model: string): string[] {
+  const out = [model];
+  const trimmed = model.trim();
+  const qualifier = /^(.*)-(trial|preview|latest|exp|experimental)$/i.exec(trimmed);
+  if (qualifier) out.push(qualifier[1]);
+  const letter = /^(.*)-[a-z]$/i.exec(trimmed);
+  if (letter) out.push(letter[1]);
+  return out;
+}
+
 // Resolve a vendor model key ("GLM-5.3", "glm-5-3", "anthropic/claude-opus-5.5")
 // to a per-token price: the refreshed OpenRouter list first, the bundled vendor
 // table second, null when honestly unpriced.
 export function priceForModel(store: UsageStore, model: string): ResolvedPrice | null {
   const p = store.pricing.usdPerTok ?? {};
   if (Object.keys(p).length > 0) {
-    const raw = model.toLowerCase().trim();
-    // Own-property guard, same discipline as ensure()/PROTO_KEYS above: a
-    // hostile model name ("constructor", "valueOf") must not resolve through
-    // the prototype chain to a truthy inherited function and come back
-    // dressed as a price (its fields are undefined -> NaN costs).
-    if (Object.hasOwn(p, raw) && p[raw]) return { price: p[raw], source: "openrouter" };
-    // Dots, dashes and vendor prefixes all normalize away: "GLM-5.3" and the
-    // slugified scope "glm-5-3" both resolve to the "z-ai/glm-5.3" slug.
-    const key = normalizeModelKey(model);
-    for (const [re, prefix] of OR_PREFIXES) {
-      if (!re.test(key)) continue;
-      for (const slug of Object.keys(p)) {
-        if (!slug.startsWith(`${prefix}/`)) continue;
-        if (normalizeModelKey(slug.slice(prefix.length + 1)) === key) return { price: p[slug], source: "openrouter" };
+    const resolveListed = (m: string): ModelPrice | null => {
+      const raw = m.toLowerCase().trim();
+      // Own-property guard, same discipline as ensure()/PROTO_KEYS above: a
+      // hostile model name ("constructor", "valueOf") must not resolve through
+      // the prototype chain to a truthy inherited function and come back
+      // dressed as a price (its fields are undefined -> NaN costs).
+      if (Object.hasOwn(p, raw) && p[raw]) return p[raw];
+      // Dots, dashes and vendor prefixes all normalize away: "GLM-5.3" and the
+      // slugified scope "glm-5-3" both resolve to the "z-ai/glm-5.3" slug.
+      const key = normalizeModelKey(m);
+      for (const [re, prefix] of OR_PREFIXES) {
+        if (!re.test(key)) continue;
+        for (const slug of Object.keys(p)) {
+          if (!slug.startsWith(`${prefix}/`)) continue;
+          if (normalizeModelKey(slug.slice(prefix.length + 1)) === key) return p[slug];
+        }
       }
-    }
-    for (const slug of Object.keys(p)) {
-      const slash = slug.indexOf("/");
-      const slugModel = slash >= 0 ? slug.slice(slash + 1) : slug;
-      if (normalizeModelKey(slugModel) === key) return { price: p[slug], source: "openrouter" };
+      for (const slug of Object.keys(p)) {
+        const slash = slug.indexOf("/");
+        const slugModel = slash >= 0 ? slug.slice(slash + 1) : slug;
+        if (normalizeModelKey(slugModel) === key) return p[slug];
+      }
+      return null;
+    };
+    for (const variant of priceVariants(model)) {
+      const hit = resolveListed(variant);
+      if (hit) return { price: hit, source: "openrouter" };
     }
   }
   const fb = fallbackPriceFor(model);
