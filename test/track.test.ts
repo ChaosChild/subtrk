@@ -260,6 +260,61 @@ describe("track stop", () => {
       fx.restore();
     }
   });
+
+  it("wallMs reports active time: pause gaps are excluded from the record and passed to the harvest", async () => {
+    const fx = fixture();
+    const seen: { pauses?: { from: number; to: number }[] }[] = [];
+    fx.harvest = async (w) => {
+      seen.push({ pauses: w.pauses });
+      return usage(10, 20, 0, 5);
+    };
+    const cap = captureConsole();
+    try {
+      await run(fx, ["track", "start", "--task=a"]);
+      const id = readTrackStore(fx.dir).markers[0].id;
+      fx.now.ms += 60_000; // 1m of work
+      await run(fx, ["track", "stop", `--id=${id}`, "--status=paused"]);
+      fx.now.ms += 3_600_000; // 1h paused
+      await run(fx, ["track", "resume", `--id=${id}`]);
+      fx.now.ms += 60_000; // 1m more work
+      await run(fx, ["track", "stop"]);
+      const rec = readTrackStore(fx.dir).records[0];
+      assert.equal(rec.status, "done");
+      assert.equal(rec.pauses?.length, 1);
+      assert.equal(rec.wallMs, 120_000, "wall clock is active time – the 1h pause is excluded");
+      assert.equal(seen.at(-1)?.pauses?.length, 1, "the final stop harvest receives the pause gaps");
+    } finally {
+      cap.restore();
+      fx.restore();
+    }
+  });
+
+  it("pending records whose window closed over 7 days ago stop being retried", async () => {
+    const fx = fixture();
+    let calls = 0;
+    fx.harvest = async () => {
+      calls += 1;
+      throw new Error("db locked");
+    };
+    const cap = captureConsole();
+    try {
+      await run(fx, ["track", "start", "--task=a"]);
+      fx.now.ms += 5_000;
+      await run(fx, ["track", "stop"]);
+      const afterStop = calls;
+      fx.now.ms += 5_000;
+      await run(fx, ["track", "status"]); // fresh pending record – retried
+      assert.equal(calls, afterStop + 1);
+      fx.now.ms += 8 * 86_400_000; // the window closed more than 7d ago
+      await run(fx, ["track", "status"]);
+      assert.equal(calls, afterStop + 1, "dead pending records no longer hold the retry slots");
+      const rec = readTrackStore(fx.dir).records[0];
+      assert.equal(rec.pending, true, "still honestly pending – just no longer retried");
+    } finally {
+      cap.restore();
+      fx.restore();
+    }
+  });
 });
 
 describe("contested + nested detection", () => {

@@ -319,7 +319,7 @@ export async function startConsole(deps: ServeDeps = {}): Promise<ServeHandle> {
               markers = await Promise.all(
                 markers.map(async (m) => {
                   try {
-                    const h = await runLive({ project: m.project, t0: m.t0, t1: Date.now() });
+                    const h = await runLive({ project: m.project, t0: m.t0, t1: Date.now(), pauses: m.pauses });
                     if (!h?.usage) return { ...m, live: null };
                     const u = h.usage;
                     return { ...m, live: { tokens: u.in + u.cr + u.cw + u.out, attribution: h.attribution } };

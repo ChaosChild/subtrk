@@ -26,8 +26,8 @@ shared cache so concurrent agents never hammer provider endpoints.
 | `subtrk usage --hour` | Hourly buckets instead of daily |
 | `subtrk usage --rebuild` | Drop and refetch re-derivable range-API history (glm, openrouter); zcode deltas and % samples are never rebuilt (not re-derivable) |
 | `subtrk track start --task <text>` | Open a task marker; `--complexity xs\|s\|m\|l\|xl`, `--tags a,b`, `--project <dir>` (default cwd), `--session <id>` pin (restricts the session-window tier to one harness session), `--provider <id>` hint; warns when markers are already open in the project |
-| `subtrk track stop` | Close the newest open marker for this directory (`--id` to pick, `--status done\|aborted\|failed\|paused`, `--note`) and harvest its real token usage from local harness stores (§Track store); `--complexity <cx>` is the final reassessment — it overrides the start declaration and the original survives in `recodeFrom`; plain output adds the delegation split (orchestrated records) and the recode hint. Since v0.22-PR-D the harvest EXCLUDES session pins of child markers started inside the window — zcode rows, claude transcripts, and codex rollouts (by `session_meta.payload.id`; older rollouts without an id cannot be excluded) — the record names them in `excludedPins`, each side counts its own burn once, and a parent's stats/estimate sample is its whole tree (own + clean pinned children) |
-| `subtrk track resume` | Reopen a closed record under its identity (`--id`): t0 kept, the closed gap becomes a pause segment (`pauses`), prior harvest numbers are recomputed at the next stop over the whole span |
+| `subtrk track stop` | Close the newest open marker for this directory (`--id` to pick, `--status done\|aborted\|failed\|paused`, `--note`) and harvest its real token usage from local harness stores (§Track store); `--complexity <cx>` is the final reassessment — it overrides the start declaration and the original survives in `recodeFrom`; plain output adds the delegation split (orchestrated records) and the recode hint. Since v0.22-PR-D the harvest EXCLUDES session pins of child markers started inside the window — zcode rows, claude transcripts, and codex rollouts (by `session_meta.payload.id`; older rollouts without an id cannot be excluded) — the record names them in `excludedPins`, each side counts its own burn once, and a parent's stats/estimate sample is its whole tree (own + clean pinned children). The harvest and `wallMs` are pause-aware: burn inside closed pause gaps belongs to whoever worked then, not the paused task |
+| `subtrk track resume` | Reopen a closed record under its identity (`--id`): t0 kept, the closed gap becomes a pause segment (`pauses`), prior harvest numbers are recomputed at the next stop over the whole span minus pause gaps |
 | `subtrk track recode` | Realign the complexity of an open marker or closed record (`--id`, `--complexity`); `recodeFrom` keeps the original start declaration across recodes |
 | `subtrk track status` | Open markers (age, `stale?` past 6h), paused records with their resume command, + records still pending their harvest retry |
 | `subtrk track list` | Recent records, newest first (`--days N`, 1-365, default 30) |
@@ -305,8 +305,11 @@ gone. Never holds secrets (task text and token counts only; all output passes
 the standard redaction path).
 
 At `track stop` (and at `prune`, and as a bounded retry on `status`/`list`)
-the window `[t0, t1]` is harvested read-only from harness-local stores, all
-normalized to `in` = uncached input:
+the window `[t0, t1]` minus closed pause gaps is harvested read-only from
+harness-local stores, all normalized to `in` = uncached input — burn stamped
+inside a pause gap belongs to whoever worked while the task was paused, and
+`wallMs` reports active time (elapsed minus pause spans clipped to the
+window):
 
 | Store | Query | Attribution |
 |---|---|---|
@@ -323,7 +326,9 @@ contained in another's – the inner one points at its container; stats will
 read leaves only) and **contested** (overlapping same-project records that
 provably shared sessions, or any overlap between window-attributed records
 with usage). A busy/failed harvest degrades to a `pending` record retried on
-later invocations – `track stop` itself never blocks the agent.
+later invocations (records whose window closed more than 7 days ago stop
+being retried – empty sources stay empty, and dead records must not hold the
+bounded retry slots) – `track stop` itself never blocks the agent.
 
 **Stats + estimate (M4b).** The estimation set is done, leaf, uncontested
 records with numbers – aborted/failed tasks undercount effort and would skew
