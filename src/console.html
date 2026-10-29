@@ -661,8 +661,10 @@ const statSkeletonHTML = n =>
 // Chart-only recolor (Lavish review Q7, 2026-10-03): openrouter sits between
 // glm and zcode in the blue-violet band – three near-identical colors in one
 // stacked legend. Cards keep their META marks; only the stacked all-provider
-// charts differ.
-const CHART_COLOR = { openrouter: "#d557a4" };
+// charts differ. Google's brand blue (#1a73e8) collides the same way with
+// Z.ai's (#2f6fed) now that Gemini models chart next to GLM – the brand
+// yellow is Google's most distant hue (operator report, 2026-10-29).
+const CHART_COLOR = { openrouter: "#d557a4", google: "#fbbc04" };
 const chartColor = id => CHART_COLOR[id] || (META[id] || { color: "#6b7280" }).color;
 const authHeaders = () => (token ? { Authorization: `Bearer ${token}` } : {});
 function usageUrl() {
